@@ -1,0 +1,1019 @@
+"""
+state_machine.py — the deterministic engine.
+
+It walks PHASES in order. For each phase it asks a PhaseExecutor to run the phase
+and return an ExitCode. The machine NEVER advances on the model's say-so; it advances
+only on ExitCode.OK. Every other code maps to a specific, non-negotiable transition:
+
+    OK                 -> record completion; if human_gate, pause for approval; else advance
+    AWAITING_APPROVAL  -> pause (handled via OK + human_gate, kept for explicit executors)
+    REJECTED           -> stay on the same phase, carry feedback back in
+    BOUNDARY_VIOLATION -> HALT (an interlock tripped — the whole point)
+    ITERATION_CAP      -> HALT (credit guard)
+    VALIDATION_FAILED  -> HALT (e.g. mvn test red)
+    ARTIFACT_MISSING   -> HALT (phase didn't produce its pinned output)
+    SDK_ERROR / CONFIG_ERROR -> HALT
+
+The executor is injected (dependency injection), so this engine is testable with a
+fake executor — zero SDK, zero credits. That is the claude-shepherd AgentRunner seam,
+one layer up.
+"""
+from __future__ import annotations
+import re
+import time
+from pathlib import Path
+from typing import Protocol
+
+from contracts import ExitCode, label
+from phases import PHASES, Phase, next_phase
+from state import RunState
+import halt_gates as HG
+
+
+class PhaseExecutor(Protocol):
+    """Anything that can run a phase and return an ExitCode.
+
+    In Phase 3 we implement FakeExecutor (no SDK). In Phase 4, SdkExecutor (real Copilot).
+    The state machine doesn't know or care which it's given.
+    """
+    def run_phase(self, phase: Phase, run: RunState) -> ExitCode: ...
+
+
+# Codes that mean "stop the machine and surface to a human/operator"
+_HALTING = {
+    ExitCode.BOUNDARY_VIOLATION,
+    ExitCode.ITERATION_CAP,
+    ExitCode.VALIDATION_FAILED,
+    ExitCode.ARTIFACT_MISSING,
+    ExitCode.SDK_ERROR,
+    ExitCode.CONFIG_ERROR,
+}
+
+
+# Maven paths/goals that identify a failure as belonging to TEST sources.
+_TEST_PATH = re.compile(r"[/\\]src[/\\]test[/\\]", re.IGNORECASE)
+_TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
+                        r"|:testCompile\b"
+                        r"|Failed to execute goal[^\n]*testCompile)", re.IGNORECASE)
+_MAIN_PATH = re.compile(r"[/\\]src[/\\]main[/\\]", re.IGNORECASE)
+
+
+def _scope_detail(repo_root, run) -> str:
+    """Name the unplanned files and the approved list.
+
+    The scope message explained WHY the halt matters but never said WHICH files
+    caused it, so a developer had to diff the plan against the working tree by
+    hand to find out. The two lists side by side make the gap obvious.
+    """
+    try:
+        from execution_record import _approved_paths_from_plan
+        pf = repo_root / ".harness" / "prompt-steps.md"
+        approved = sorted(_approved_paths_from_plan(pf.read_text(encoding="utf-8"))) \
+            if pf.is_file() else []
+    except Exception:
+        approved = []
+    written = sorted(getattr(run, "changed_main_files", None) or [])
+    unplanned = [w for w in written if not any(w.endswith(a) or a.endswith(w)
+                                               for a in approved)]
+    out = ""
+    if unplanned:
+        out += "  Files NOT in the plan:\n"
+        for u in unplanned[:10]:
+            out += f"    - {u}\n"
+        if len(unplanned) > 10:
+            out += f"    ... and {len(unplanned) - 10} more\n"
+    if approved:
+        out += "  The plan approved:\n"
+        for a in approved[:10]:
+            out += f"    - {a}\n"
+        if len(approved) > 10:
+            out += f"    ... and {len(approved) - 10} more\n"
+    return out
+
+
+def _failure_is_in_tests(output: str) -> bool:
+    """True when a red build is the TEST code's fault rather than production code's.
+
+    Deliberately CONSERVATIVE: it returns True only when there is positive evidence
+    of a test-side compilation problem AND no evidence of a main-side one. Getting
+    this wrong in the permissive direction is the dangerous case — routing a genuine
+    production defect to the unit_testing phase invites the tests to be bent until
+    they pass, which is precisely the failure mode the frozen-main interlock exists
+    to prevent. When the signal is mixed or absent, fall back to the historical
+    behaviour (production code is at fault) so the mirror interlock still holds.
+
+    Note this is about COMPILATION ownership, not about assertions failing. A test
+    that compiles but fails its assertion is left routed to 'coding': a red
+    assertion is the normal signal that production code is wrong, and that is the
+    whole point of the gate.
+    """
+    if not output:
+        return False
+    text = str(output)
+
+    # ---- signatures that are unambiguously the TEST's own fault ----
+    # A failing assertion usually means production is wrong, but some runtime
+    # failures can only come from the test itself, and routing those to 'coding'
+    # sends work to a phase that may not write test files at all. Observed in run
+    # 33199xxxxx: an unstubbed mock returned null, the NPE was classified
+    # main-side, and 'coding' was asked twice to fix a defect in a test it is
+    # forbidden from touching.
+    low = text.lower()
+    test_only = (
+        # Mockito misuse: unnecessary stubbing, wrong argument matchers, etc.
+        "org.mockito.exceptions.misusing" in low
+        or "unnecessarystubbing" in low
+        or "invalidusewiththematchers" in low
+        # An unstubbed mock returns null; the NPE then names the mocked method.
+        or ("nullpointerexception" in low
+            and "because the return value of" in low
+            and "mock" not in low.split("nullpointerexception")[0][-200:])
+    )
+    if test_only:
+        return True
+
+    compile_failure = ("COMPILATION ERROR" in text.upper()
+                       or "Compilation failure" in text
+                       or "cannot find symbol" in text
+                       or "no suitable method found" in text
+                       or "is ambiguous" in text)
+    if not compile_failure:
+        # Assertion failures and runtime errors stay with 'coding' — see docstring.
+        return False
+
+    error_lines = [ln for ln in text.splitlines() if "[ERROR]" in ln]
+    scope = "\n".join(error_lines) if error_lines else text
+
+    test_hits = len(_TEST_PATH.findall(scope))
+    main_hits = len(_MAIN_PATH.findall(scope))
+
+    if _TEST_GOAL.search(text) and main_hits == 0:
+        return True
+    # Require test evidence and NO main evidence before diverting.
+    return test_hits > 0 and main_hits == 0
+
+
+class StateMachine:
+    def __init__(self, executor: PhaseExecutor, harness_dir: Path, repo_root: Path = None,
+                 log=print, validator=None):
+        self.executor = executor
+        self.harness_dir = harness_dir
+        # repo_root is where the validation gate runs mvn; fall back to executor's.
+        self.repo_root = repo_root or getattr(executor, "repo_root", harness_dir.parent)
+        self.log = log
+        # validator(repo_root, harness_dir, log) -> object with .passed/.summary/.exit_code/.output_tail
+        # Defaults to the real mvn-test gate; tests inject a fake to avoid shelling out.
+        self._validator = validator
+
+    def _phase(self, pid: str) -> Phase:
+        for p in PHASES:
+            if p.id == pid:
+                return p
+        raise KeyError(pid)
+
+    def step(self, run: RunState) -> RunState:
+        """Execute exactly ONE phase and apply the resulting transition.
+
+        Returns the updated RunState. Caller loops `step` until status is
+        'done', 'halted', or 'awaiting_approval'.
+        """
+        phase = self._phase(run.current_phase)
+
+        # ---- GLOBAL PER-PHASE RUN CAP ----
+        # Counted here, at the single point every phase execution passes through,
+        # so it holds no matter which gate caused the re-entry. The review,
+        # coverage and validation budgets are separate counters that cannot see
+        # each other, and each loopback resets iterations[phase] to 0 — so without
+        # this a phase can run far more often than any one cap implies
+        # (run 31257053514: unit_testing ran 6x while every individual counter
+        # stayed within limits, burning ~15 minutes and the credit budget on a
+        # failure the agent could not diagnose).
+        #
+        # Stored under a namespaced key in the existing iterations dict because
+        # that dict already persists across saves; the "__runs__:" prefix cannot
+        # collide with a phase id and is never reset by the loopback handlers.
+        _cfg_cap = None
+        try:
+            from config import HarnessConfig as _HCcap
+            _cfg_cap = _HCcap.load(self.harness_dir).max_phase_runs
+        except Exception:
+            _cfg_cap = None
+        if _cfg_cap and _cfg_cap > 0:
+            _key = f"__runs__:{phase.id}"
+            _ran = int(run.iterations.get(_key, 0)) + 1
+            run.iterations[_key] = _ran
+            if _ran > _cfg_cap:
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                self.log(f"  ! PHASE_RUN_CAP — '{phase.id}' has already run "
+                         f"{_ran - 1} time(s) (cap {_cfg_cap}); halting instead of "
+                         f"looping again.")
+                self.log("    The gates kept sending work back to this phase and it "
+                         "did not converge.")
+                # Name the gate that did the sending. Without this the operator gets
+                # a generic "read the last output" message and has to scroll back
+                # through several loops to work out which check was unsatisfied —
+                # and the gate's own halt message, with its remedies, never printed
+                # because the cap fired first.
+                _last = (getattr(run, "halt_detail", None) or "")
+                _hint = {
+                    "coverage": ("The coverage gate was the last to send work back. Ways "
+                                 "forward:\n"
+                                 "      1. Add the missing tests by hand on "
+                                 f"harness-wip/{run.feature_id}, push, then resume from "
+                                 "'unit_testing'.\n"
+                                 "      2. If the uncovered lines are not meaningfully "
+                                 "testable (config classes, data holders, defensive "
+                                 "branches), lower min_coverage in the SERVICE repo's "
+                                 ".harness/config.yaml — with a reason.\n"
+                                 "      3. Resume from 'unit_testing' for a fresh set of "
+                                 "attempts. Weakest option: same inputs, different sample.\n"),
+                    "code_review": ("The reviewer kept requesting changes. Read "
+                                    ".harness/review.md, fix the code by hand on "
+                                    f"harness-wip/{run.feature_id}, then resume from "
+                                    "'code_review'.\n"),
+                    "test_build": ("The build kept failing. Read the failure tail above, "
+                                   f"fix it on harness-wip/{run.feature_id}, then resume "
+                                   "from the phase that owns it.\n"),
+                }.get(_last.split(":")[0].strip().lower() if _last else "", "")
+                if _hint:
+                    self.log("    " + _hint)
+                else:
+                    self.log("    Read the phase's last output and the gate that preceded "
+                             "it, fix the underlying cause, then resume.")
+                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true, "
+                         f"start_phase={phase.id}")
+                run.status = "halted"
+                run.halt_gate = HG.PHASE_RUN_CAP
+                run.halt_reason = (
+                    f"PHASE_RUN_CAP: phase '{phase.id}' exceeded max_phase_runs="
+                    f"{_cfg_cap} across all loopback types (review/coverage/validation "
+                    f"budgets are independent and combined to re-enter it repeatedly)."
+                )
+                run.save(self.harness_dir)
+                return run
+
+        # ---- BY-EXCEPTION PHASES ----
+        # The design phase runs only when the story needs one. That judgement is
+        # made by the CONTEXT phase, which is the only phase that has read both
+        # the story and the codebase, and is recorded in context.md as
+        # "DESIGN REQUIRED: YES/NO".
+        #
+        # Most stories follow a pattern the codebase already establishes and have
+        # no open design question. Producing a design document for every one of
+        # them costs a model invocation per run and, worse, trains reviewers to
+        # skim past design documents — so the ones that matter stop being read.
+        #
+        # A MISSING marker skips too. That keeps behaviour identical to today for
+        # context files written before this phase existed, rather than silently
+        # adding a phase (and its cost) to every in-flight story. It is logged,
+        # so the absence is visible rather than assumed.
+        if phase.id == "design":
+            try:
+                from clarification import scan_context as _scan_d
+                from config import HarnessConfig as _HCd
+                _cfgd = _HCd.load(self.harness_dir)
+                _dr = _scan_d(self.repo_root, _cfgd.context_output_dir,
+                              check_feasibility=False).design_required
+            except Exception as _e:
+                self.log(f"  [design] could not read the design trigger ({_e!r}) — skipping")
+                _dr = "MISSING"
+            if _dr != "YES":
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                if _dr == "NO":
+                    self.log("  [design] not required — the context phase judged this "
+                             "story to follow an existing pattern. Skipping.")
+                else:
+                    self.log("  [design] no DESIGN REQUIRED marker in the context file "
+                             "— skipping (context may predate the design phase).")
+                if phase.id not in run.completed_phases:
+                    run.completed_phases.append(phase.id)
+                nxt = next_phase(phase.id)
+                if nxt is None:
+                    run.status = "done"
+                else:
+                    run.current_phase = nxt.id
+                    run.status = "running"
+                run.save(self.harness_dir)
+                return run
+
+        self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+
+        # Denials are per-attempt: a phase that is re-entered should report what
+        # IT refused, not what a previous attempt did.
+        run.denied_writes = []
+
+        # Same for a declared blocker. A resumed run whose human fixed the pom
+        # must not halt again on the declaration that asked them to.
+        try:
+            _bf = self.repo_root / ".harness" / "blocked.md"
+            if _bf.is_file():
+                _bf.unlink()
+        except Exception:
+            pass
+
+        _t_start = time.time()
+
+        # Timestamp taken BEFORE the phase runs. The review gate uses it to prove
+        # review.md was actually (re)written by THIS attempt — see the stale-verdict
+        # guard below. Sub-second resolution matters on fast reruns, so subtract a
+        # small epsilon to tolerate coarse filesystem mtime granularity.
+        _phase_started = time.time() - 1.0
+
+        code = self.executor.run_phase(phase, run)
+        self.log(f"--> exit {int(code)} ({label(code)})")
+
+        # Accumulate, don't overwrite: a phase re-entered by a loopback should
+        # report the total time it consumed across the run, not just the last go.
+        _elapsed = round(time.time() - _t_start, 1)
+        run.phase_durations[phase.id] = round(
+            run.phase_durations.get(phase.id, 0.0) + _elapsed, 1)
+
+        # ---- SCOPE GATE ----
+        # The coding phase created production file(s) the approved plan never listed.
+        # Loop back with the violation as explicit feedback — told plainly, the model
+        # usually retreats to the authorised files. Bounded: if it keeps inventing
+        # classes, that is a planning problem and a human must look.
+        if code == ExitCode.SCOPE_VIOLATION:
+            from config import HarnessConfig as _HC
+            cfg = _HC.load(self.harness_dir)
+            max_scope = getattr(cfg, "max_scope_retries", 2)
+            run.scope_attempts += 1
+            if run.scope_attempts <= max_scope:
+                self.log(f"  ! SCOPE_VIOLATION — looping back to '{phase.id}' to redo the "
+                         f"change WITHIN the approved plan "
+                         f"(attempt {run.scope_attempts}/{max_scope})")
+                run.iterations[phase.id] = 0
+                run.approvals[phase.id] = "rejected"
+                run.current_phase = phase.id      # redo the SAME phase
+                run.status = "running"
+                run.save(self.harness_dir)
+                return run
+
+            halt_msg = (
+                "\n  ================ SCOPE GATE: HALTED ================\n"
+                f"  The '{phase.id}' phase created production files outside the approved\n"
+                f"  plan {run.scope_attempts - 1} time(s) in a row, even after being told not to.\n"
+                "  The harness did NOT let the unplanned files stand.\n"
+                "  Why this matters : inventing new classes to dodge a failing build\n"
+                "                     poisons every downstream phase — the reviewer and\n"
+                "                     the test author end up reasoning over two\n"
+                "                     contradictory versions of the same class.\n"
+                "  Likely root cause: the plan is wrong or incomplete for what the story\n"
+                "                     actually needs, OR the build failure has a cause the\n"
+                "                     coding model cannot see (check validation-report.txt).\n"
+                "  Recommendation   : a human should read the plan's Impacted Files block\n"
+                "                     against the real failure, then re-plan. The change\n"
+                "                     has NOT advanced.\n"
+                + _scope_detail(self.repo_root, run) +
+                "  ===================================================\n"
+            )
+            self.log(halt_msg)
+            run.last_feedback = halt_msg
+            run.status = "halted"
+            run.halt_gate = HG.SCOPE
+            run.save(self.harness_dir)
+            return run
+
+        # ---- PLAN PATH CHECK ----
+        # Runs after prompt_steps, before any code is written. The planning phase
+        # can produce a perfectly reasonable-looking plan against packages that do
+        # not exist — it did on run OP0-014, inferring com.example.bookservice from
+        # the project name without reading the tree. The coding phase cannot create
+        # directories, so such a plan is unexecutable, and discovering that in
+        # coding costs a full expensive phase. A directory listing costs nothing.
+        if phase.id == "prompt_steps" and code == ExitCode.OK:
+            try:
+                from plan_check import check_plan, halt_message as _plan_msg
+                from config import HarnessConfig as _HCp
+                _cfgp = _HCp.load(self.harness_dir, repo_root=self.repo_root)
+                _pf = self.repo_root / ".harness" / "prompt-steps.md"
+                _pr = check_plan(self.repo_root, _pf, _cfgp.target_module, log=self.log)
+                if _pr.missing_dirs:
+                    _m = _plan_msg(_pr, _pf)
+                    self.log(_m)
+                    run.status = "halted"
+                    run.halt_gate = HG.SCOPE
+                    run.halt_detail = "plan references directories that do not exist"
+                    run.last_feedback = _m
+                    run.save(self.harness_dir)
+                    return run
+                if _pr.checked:
+                    self.log(f"  [harness] plan paths: {_pr.checked} checked, all resolve")
+            except Exception as _e:
+                self.log(f"  [harness] plan path check skipped ({type(_e).__name__})")
+
+        # ---- DECLARED BLOCKER: a phase asked for human help ----
+        # Checked before everything else, including the success path: a phase can
+        # complete its writes and still be unable to finish the job, and that
+        # declaration must not be buried under a green exit code.
+        #
+        # This is the counterpart to the write boundary. The boundary stops an
+        # agent doing what it must not; this lets it SAY what it needs instead of
+        # thrashing against the rule. A run that halts here has cost one phase,
+        # not three retries and a confusing cap message.
+        try:
+            from blocked import (read_declaration, looks_like_build_file,
+                                 halt_message, BLOCKED_FILE)
+            _decl = read_declaration(self.repo_root)
+            _detected = None if _decl.declared else looks_like_build_file(
+                getattr(run, "denied_writes", None))
+        except Exception:
+            _decl, _detected, BLOCKED_FILE = None, None, ".harness/blocked.md"
+
+        if _decl is not None and (_decl.declared or _detected):
+            msg = halt_message(run.feature_id, phase.id, _decl, _detected)
+            if _detected and not _decl.declared:
+                msg += ("  (The phase tried to write this file rather than declaring it.\n"
+                        "   The write was refused; nothing was changed.)\n")
+            self.log(msg)
+            run.status = "halted"
+            run.halt_gate = HG.MANUAL_CHANGE_REQUIRED
+            run.halt_detail = (_decl.needs or f"manual change needed in {_detected}")[:200]
+            run.last_feedback = msg
+            run.save(self.harness_dir)
+            return run
+
+        # ---- apply the transition ----
+        if code in _HALTING:
+            run.status = "halted"
+            run.halt_gate = HG.from_exit_code(code)
+
+            # A write-boundary halt previously produced no summary at all — just
+            # "HALTED by an interlock, inspect the log above". The individual
+            # denials ARE logged as they happen, but they sit among dozens of
+            # approved-read lines, so the developer had to reconstruct what went
+            # wrong. Say it plainly, once, at the point of failure.
+            if run.halt_gate == HG.WRITE_BOUNDARY:
+                _denied = getattr(run, "denied_writes", None) or []
+                msg = (
+                    "\n  ============= WRITE BOUNDARY: HALTED =============\n"
+                    f"  The '{phase.id}' phase tried to write outside the paths it is\n"
+                    "  allowed to touch. The write was refused; nothing was changed.\n"
+                )
+                if _denied:
+                    msg += "  Refused:\n"
+                    for d in _denied[:10]:
+                        msg += f"    - {d}\n"
+                    if len(_denied) > 10:
+                        msg += f"    ... and {len(_denied) - 10} more\n"
+                else:
+                    msg += ("  Search this log for '! ' lines in the phase above to see\n"
+                            "  which paths were refused.\n")
+                msg += (
+                    "  Why this matters : each phase owns one kind of output. Coding writes\n"
+                    "                     production source, unit testing writes tests, and\n"
+                    "                     generated code is nobody's to hand-edit. Letting a\n"
+                    "                     phase write outside that removes the guarantee the\n"
+                    "                     gate exists to give.\n"
+                    "  Common causes    : the story asks for something the phase does not own\n"
+                    "                     (tests during coding, an OpenAPI spec edit); the\n"
+                    "                     change needs a new dependency, which means editing\n"
+                    "                     pom.xml — outside src/main and therefore refused;\n"
+                    "                     or the plan put a file in a module the phase cannot\n"
+                    "                     write to.\n"
+                    "  Recommendation   : decide whether the refused write was legitimate. If\n"
+                    "                     it was, the story or the plan is asking the wrong\n"
+                    "                     phase to do it — fix the story's scope, or make the\n"
+                    "                     change by hand and resume. If it was not, the story\n"
+                    "                     should say so explicitly in Out of Scope.\n"
+                    "  ==================================================\n"
+                )
+                self.log(msg)
+                run.last_feedback = msg
+
+            run.save(self.harness_dir)
+            return run
+
+        if code == ExitCode.REJECTED:
+            # stay put; feedback already recorded on run by the gate
+            run.approvals[phase.id] = "rejected"
+            run.status = "running"
+            run.save(self.harness_dir)
+            return run
+
+        if code in (ExitCode.OK, ExitCode.AWAITING_APPROVAL):
+            if phase.id not in run.completed_phases:
+                run.completed_phases.append(phase.id)
+
+            # ---- CONTEXT GATE (clarifications + feasibility) ----
+            # One scan, two markers, one halt path:
+            #   [NEEDS CLARIFICATION] -> the STORY is ambiguous; the BA answers it
+            #   [BLOCKER]: (CLASS)    -> THIS REPO cannot build it as written;
+            #                            re-scope, sequence, or move it
+            # The remedies differ, so the log distinguishes them even though the
+            # mechanism is shared. Neither may be silently guessed into code.
+            if getattr(phase, "scan_clarifications", False):
+                from clarification import scan_context as _scan
+                from config import HarnessConfig as _HC
+                _cfg = _HC.load(self.harness_dir)
+                _bmode = (getattr(_cfg, "blocker_gate", "blocking") or "blocking").strip().lower()
+
+                cr = _scan(self.repo_root, _cfg.context_output_dir,
+                           check_feasibility=(_bmode != "off"))
+
+                # Report the feasibility posture BEFORE any halt, so the operator
+                # can always tell whether the check ran. A gate that is quietly
+                # switched off is worse than no gate: the log still looks assured.
+                if _bmode == "off":
+                    self.log("  [harness] feasibility check: OFF (blocker_gate: off) "
+                             "— story feasibility was not assessed")
+                elif _bmode != "blocking":
+                    self.log("  [harness] feasibility check is ADVISORY — blockers "
+                             "will be reported but will NOT halt this run")
+                if cr.verdict == "MISSING" and _bmode != "off":
+                    self.log("  [harness] feasibility: no VERDICT line in the context "
+                             "file — the assessment may not have run")
+                if cr.downgraded:
+                    self.log("  [harness] feasibility: NO_GO asserted without a "
+                             "recognised blocker class — downgraded to GO")
+                for a in cr.advisory:
+                    self.log("      (note) " + a)
+
+                # --- clarifications: always blocking ---
+                if cr.items:
+                    self.log(f"  ! NEEDS_CLARIFICATION — {len(cr.items)} item(s) "
+                             f"unresolved in {cr.scanned_file}")
+                    for it in cr.items:
+                        self.log("      • " + it)
+                    run.status = "needs_input"
+                    run.halt_gate = HG.CLARIFICATION
+                    run.save(self.harness_dir)
+                    return run
+
+                # --- blockers: blocking unless the gate is advisory/off ---
+                if cr.blockers:
+                    self.log(f"  ! NOT_FEASIBLE — {len(cr.blockers)} blocker(s) in "
+                             f"{cr.scanned_file}")
+                    for b in cr.blockers:
+                        self.log("      • " + b)
+                    if _bmode == "blocking":
+                        self.log("    The story cannot be built in this repository as "
+                                 "written. Re-scope it, sequence it behind the work "
+                                 "that adds the missing piece, or move it to the "
+                                 "service that owns the concern. To proceed anyway, "
+                                 "set blocker_gate: advisory in .harness/config.yaml.")
+                        run.status = "needs_input"
+                        run.halt_gate = HG.FEASIBILITY
+                        run.save(self.harness_dir)
+                        return run
+
+                _v = cr.verdict if cr.verdict in ("GO", "NO_GO") else "not assessed"
+                self.log(f"  [harness] context gate: clarifications clear | "
+                         f"feasibility {_v}")
+
+            # ---- AC CONFORMANCE GATE ----
+            # Distinct from the review gate directly below. Review asks whether
+            # the code that EXISTS is correct; this asks whether every acceptance
+            # criterion HOLDS. A well-written change can pass review with a
+            # criterion silently unimplemented — nothing in the diff is wrong,
+            # because the problem is code that is absent.
+            #
+            # The gate checks COUNT as well as verdict: a validator that rules on
+            # six of seven criteria and reports PASS is indistinguishable in the
+            # log from one that checked all seven, so a criterion with no verdict
+            # is treated as unvalidated rather than satisfied. Same rule as the
+            # prompt-steps coverage matrix — a blank cell must never read as a pass.
+            if getattr(phase, "validation_gate", False):
+                from config import HarnessConfig as _HCv
+                _cfgv = _HCv.load(self.harness_dir)
+                _amode = (getattr(_cfgv, "ac_gate", "blocking") or "blocking").strip().lower()
+                if _amode == "off":
+                    self.log("  [harness] AC conformance gate: OFF (ac_gate: off) "
+                             "— criteria were not checked")
+                else:
+                    from ac_validation import scan_validation as _scan_ac
+                    vr = _scan_ac(self.repo_root, self.harness_dir,
+                                  _cfgv.context_output_dir)
+                    if _amode != "blocking":
+                        self.log("  [harness] AC conformance gate is ADVISORY — "
+                                 "unmet criteria will NOT halt this run")
+                    self.log(f"  [harness] AC conformance: {vr.verdict} "
+                             f"(met {len(vr.met)} · not met {len(vr.not_met)} · "
+                             f"unverifiable {len(vr.unverifiable)})")
+                    for ac in vr.not_met:
+                        self.log(f"      ! {ac} NOT MET")
+                    for ac in vr.unverifiable:
+                        self.log(f"      ? {ac} could not be verified")
+                    for ac in vr.unvalidated:
+                        self.log(f"      ? {ac} has no verdict — not validated")
+
+                    _blocking = bool(vr.not_met) or bool(vr.unvalidated) or (
+                        bool(vr.unverifiable) and getattr(_cfgv, "halt_on_inconclusive", True))
+
+                    if _blocking and _amode == "blocking":
+                        run.ac_attempts = getattr(run, "ac_attempts", 0) + 1
+                        _loop = _cfgv.ac_loopback_phase
+                        if _loop and run.ac_attempts <= _cfgv.max_ac_retries:
+                            self.log(f"  ! AC_NOT_MET — looping back to '{_loop}' "
+                                     f"(attempt {run.ac_attempts}/{_cfgv.max_ac_retries})")
+                            _detail = "\n".join(
+                                [f"- {a}: acceptance criterion NOT MET" for a in vr.not_met] +
+                                [f"- {a}: could not be verified" for a in vr.unverifiable] +
+                                [f"- {a}: no verdict was produced" for a in vr.unvalidated])
+                            run.last_feedback = (
+                                "AC CONFORMANCE FAILED. The code does not satisfy every "
+                                "acceptance criterion in context.md. Fix the production "
+                                "code so each criterion below holds as written — do NOT "
+                                "reword or narrow a criterion to fit the code.\n"
+                                + _detail + "\n\nFull detail: .harness/validation.md")
+                            run.iterations[_loop] = 0
+                            run.approvals[_loop] = "rejected"
+                            run.current_phase = _loop
+                            run.status = "running"
+                            run.save(self.harness_dir)
+                            return run
+                        self.log("    Retry budget exhausted. The delivered code does "
+                                 "not meet the acceptance criteria — a human needs to "
+                                 "decide whether the code or the criteria are wrong. "
+                                 "See .harness/validation.md.")
+                        run.status = "needs_input"
+                        run.halt_gate = HG.AC_CONFORMANCE
+                        run.save(self.harness_dir)
+                        return run
+
+            # ---- CODE REVIEW GATE ----
+            # After code_review, parse the independent reviewer's structured verdict.
+            # CHANGES_REQUESTED => loop back to coding with the issues as feedback,
+            # bounded by max_review_retries; on exhaustion halt + flag for a human.
+            if getattr(phase, "review_gate", False):
+                from review import parse_review
+                from config import HarnessConfig as _HC
+                cfg = _HC.load(self.harness_dir)
+                rv = parse_review(self.repo_root / ".harness" / "review.md",
+                                  written_after=_phase_started)
+
+                # STALE VERDICT => the reviewer produced NOTHING this attempt and
+                # the file on disk is a leftover. Looping back would re-feed an
+                # already-fixed issue and burn the retry cap for nothing (exactly
+                # what happened in run 29181773991). This is a harness/permission
+                # fault, so halt at once and name it — do NOT spend a retry.
+                if rv.stale:
+                    self.log("  ! CODE REVIEW GATE: STALE VERDICT — review.md was not "
+                             "written during this attempt.")
+                    halt_msg = (
+                        "\n  ============ CODE REVIEW GATE: HALTED (STALE VERDICT) ============\n"
+                        "  The reviewer did NOT write a verdict on this attempt; the\n"
+                        "  review.md on disk is left over from an earlier attempt.\n"
+                        "  This is a HARNESS/PERMISSION failure, not a code defect —\n"
+                        "  the stale verdict was NOT used, and no retry was consumed.\n"
+                        f"  Reviewer file      : {rv.scanned_file}\n"
+                        "  Likely cause       : the reviewer could not write its output\n"
+                        "                       file (e.g. read permission on its own\n"
+                        "                       artifact was denied — create/edit must\n"
+                        "                       read the target before writing it), so it\n"
+                        "                       emitted the verdict to chat instead.\n"
+                        "  Recommendation     : inspect the phase's permission decisions in\n"
+                        "                       the log above ('read denied' lines), then\n"
+                        "                       re-run. The change has NOT advanced.\n"
+                        "  ==================================================================\n"
+                    )
+                    self.log(halt_msg)
+                    run.last_feedback = halt_msg
+                    run.status = "halted"
+                    run.halt_gate = HG.CODE_REVIEW
+                    run.save(self.harness_dir)
+                    return run
+
+                if rv.passed:
+                    self.log("  [harness] code review gate: PASS")
+                else:
+                    run.review_attempts += 1
+                    loop = cfg.review_loopback_phase
+                    reason = ("no parseable VERDICT in review.md"
+                              if not rv.parse_ok else "reviewer requested changes")
+                    if loop and run.review_attempts <= cfg.max_review_retries:
+                        self.log(f"  ! CODE_REVIEW_CHANGES_REQUESTED ({reason}) — looping "
+                                 f"back to '{loop}' "
+                                 f"(attempt {run.review_attempts}/{cfg.max_review_retries})")
+                        for it in rv.issues:
+                            self.log("      • " + it)
+                        issues_block = "\n".join(f"- {i}" for i in rv.issues) or "- (see review.md)"
+                        run.halt_detail = "code_review: changes requested"
+                        run.last_feedback = (
+                            "An INDEPENDENT code reviewer requested changes. Fix the "
+                            "production code to address every issue below. Do not edit "
+                            "tests. Do not argue with the review — implement the fixes.\n"
+                            f"Reviewer issues:\n{issues_block}"
+                        )
+                        run.iterations[loop] = 0
+                        run.approvals[loop] = "rejected"
+                        run.current_phase = loop
+                        run.status = "running"
+                        run.save(self.harness_dir)
+                        return run
+
+                    # review retries exhausted -> HALT and flag for human
+                    self.log(f"  ! CODE_REVIEW_CHANGES_REQUESTED — retries exhausted "
+                             f"({run.review_attempts - 1}/{cfg.max_review_retries}); halting")
+                    issues_block = "\n".join(f"    - {i}" for i in rv.issues) or "    - (see review.md)"
+                    halt_msg = (
+                        "\n  ================ CODE REVIEW GATE: HALTED ================\n"
+                        f"  What was attempted : the harness looped back to "
+                        f"'{cfg.review_loopback_phase}' {run.review_attempts - 1} time(s) "
+                        f"to address independent-reviewer findings.\n"
+                        f"  Current status     : reviewer still reports "
+                        f"{'an unparseable verdict' if not rv.parse_ok else 'unresolved issues'} "
+                        f"after {cfg.max_review_retries} retries (NOT passed).\n"
+                        f"  Outstanding issues :\n{issues_block}\n"
+                        f"  Reviewer file      : {rv.scanned_file}\n"
+                        "  Recommendation     : a human should review the change and the "
+                        "reviewer notes together — either the code needs a fix the coding "
+                        "model can't converge on, or the review is over-strict and a person "
+                        "should adjudicate. The change has NOT advanced to testing.\n"
+                        "  =========================================================\n"
+                    )
+                    self.log(halt_msg)
+                    run.last_feedback = halt_msg
+                    run.status = "halted"
+                    run.halt_gate = HG.CODE_REVIEW
+                    run.save(self.harness_dir)
+                    return run
+
+            # ---- DETERMINISTIC VALIDATION GATE ----
+            # The harness (not the agent) runs the tests. Red => halt before advancing.
+            if phase.validate_after:
+                if self._validator is not None:
+                    vr = self._validator(self.repo_root, self.harness_dir, self.log)
+                else:
+                    from validation import run_validation
+                    vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
+                                        changed_files=run.changed_main_files)
+                self.log(f"  [harness] validation: {vr.summary} (exit {vr.exit_code})")
+                if not vr.passed:
+                    from config import HarnessConfig
+                    cfg = HarnessConfig.load(self.harness_dir)
+
+                    kind = getattr(vr, "failure_kind", None) or "test"
+
+                    # ============================================================
+                    # COVERAGE MISS: tests pass but per-change coverage < target.
+                    # Loop back to unit_testing to ADD TESTS (never touch source),
+                    # on a SEPARATE retry budget. On exhaustion, halt with a
+                    # detailed, human-actionable message.
+                    # ============================================================
+                    if kind == "coverage":
+                        # ---- NOTHING CHANGED: not a coverage problem at all ----
+                        # If the coding phase produced no production changes there is
+                        # nothing for the coverage gate to measure, and looping back
+                        # to unit_testing "to add tests" cannot possibly succeed —
+                        # there is no changed class to cover. Observed in run
+                        # 33164146030: the story was already implemented in the repo,
+                        # the coding agent made zero write requests, and the harness
+                        # still looped twice and burned ~15 credits before halting
+                        # with a message about coverage thresholds that sent the
+                        # operator looking at JaCoCo rather than at the story.
+                        #
+                        # Halt immediately with the actual cause.
+                        _changed = getattr(run, "changed_main_files", None) or []
+                        if not _changed:
+                            self.log("\n  ============ NO PRODUCTION CHANGES ============\n")
+                            self.log("  The coding phase produced no changes under the "
+                                     "application module's main source.")
+                            self.log("  Coverage cannot be measured because there is no "
+                                     "changed class to measure — this is NOT a coverage "
+                                     "shortfall, and adding tests cannot resolve it.")
+                            self.log("")
+                            self.log("  Most likely: this story is ALREADY IMPLEMENTED in "
+                                     "the repository, so the coding phase found the work "
+                                     "done and wrote nothing.")
+                            self.log("  Check the log for the coding phase — if it made no "
+                                     "write requests, that is what happened.")
+                            self.log("")
+                            self.log("  Other possibilities: the plan scoped the change "
+                                     "outside src/main, or the story asks for something "
+                                     "the codebase already does.")
+                            self.log("  ==============================================\n")
+                            run.status = "halted"
+                            run.halt_gate = HG.OTHER
+                            run.halt_detail = ("no production changes were made — story may "
+                                               "already be implemented")
+                            run.last_feedback = (
+                                "The coding phase made no changes to production source. "
+                                "Coverage cannot be measured. Verify whether this story is "
+                                "already implemented in the repository."
+                            )
+                            run.save(self.harness_dir)
+                            return run
+
+                        run.coverage_attempts += 1
+                        cov_loop = cfg.coverage_loopback_phase
+                        pct = getattr(vr, "coverage_pct", None)
+                        target = getattr(vr, "coverage_target", None) or cfg.min_coverage
+                        measured = getattr(vr, "coverage_classes", []) or []
+                        pct_str = f"{pct:.1f}%" if isinstance(pct, (int, float)) else "unmeasurable"
+
+                        if cov_loop and run.coverage_attempts <= cfg.max_coverage_retries:
+                            self.log(
+                                f"  ! COVERAGE_BELOW_THRESHOLD — looping back to "
+                                f"'{cov_loop}' to add tests "
+                                f"(attempt {run.coverage_attempts}/{cfg.max_coverage_retries}); "
+                                f"changed-class coverage {pct_str} < {target:.1f}%")
+                            run.last_feedback = (
+                                "The tests PASS, but per-change code coverage is below the "
+                                f"required {target:.1f}% for the changed class(es). "
+                                f"Current changed-class coverage: {pct_str}. "
+                                "ADD or STRENGTHEN unit tests to cover the untested branches "
+                                "and lines of the changed production code. "
+                                "You MUST NOT modify any production/source code — only add "
+                                "tests under src/test. "
+                                + (f"Classes measured: {', '.join(measured)}. " if measured else "")
+                                + "Coverage detail:\n" + vr.output_tail
+                            )
+                            # reset ONLY the unit_testing iteration budget so it can act
+                            # Recorded so a later PHASE_RUN_CAP halt can name the gate
+                            # that kept sending work back, instead of a generic message.
+                            run.halt_detail = "coverage: below threshold"
+                            run.iterations[cov_loop] = 0
+                            run.approvals[cov_loop] = "rejected"
+                            run.current_phase = cov_loop
+                            run.status = "running"
+                            run.save(self.harness_dir)
+                            return run
+
+                        # coverage retries exhausted -> HALT with recommendation
+                        self.log(
+                            f"  ! COVERAGE_BELOW_THRESHOLD — retries exhausted "
+                            f"({run.coverage_attempts - 1}/{cfg.max_coverage_retries}); halting")
+                        halt_msg = (
+                            "\n  ================ COVERAGE GATE: HALTED ================\n"
+                            f"  What was attempted : the harness looped back to "
+                            f"'{cfg.coverage_loopback_phase}' {run.coverage_attempts - 1} "
+                            f"time(s) to add unit tests, without modifying production code.\n"
+                            f"  Current status     : changed-class {cfg.coverage_metric} "
+                            f"coverage = {pct_str}, required = {target:.1f}% "
+                            f"(NOT met).\n"
+                            f"  Changed class(es)  : "
+                            f"{', '.join(run.changed_main_files) if run.changed_main_files else '(none recorded)'}\n"
+                            f"  Measured in report : "
+                            f"{', '.join(measured) if measured else '(none matched JaCoCo rows)'}\n"
+                            "  The tests that DO exist are green; only the coverage "
+                            "threshold blocks the PR.\n"
+                            "  Ways forward:\n"
+                            "    1. Add the missing tests by hand:\n"
+                            f"         git checkout harness-wip/{run.feature_id}\n"
+                            "       write the tests, push, then re-run with resume=true "
+                            f"and start_phase={cfg.coverage_loopback_phase}.\n"
+                            "    2. If the uncovered lines are not meaningfully testable "
+                            "(Spring @Configuration classes, data holders, defensive "
+                            "branches), lower min_coverage in the SERVICE repo's "
+                            ".harness/config.yaml — and record why. Do this because the "
+                            "bar is wrong, not because this run failed.\n"
+                            "    3. Resume from "
+                            f"'{cfg.coverage_loopback_phase}' for a fresh set of attempts. "
+                            "Weakest option: same inputs, different sample.\n"
+                            "  ======================================================\n"
+                        )
+                        self.log(halt_msg)
+                        self.log("  --- coverage/report tail ---\n" + vr.output_tail)
+                        run.last_feedback = halt_msg
+                        run.status = "halted"
+                        run.halt_gate = HG.COVERAGE
+                        run.save(self.harness_dir)
+                        return run
+
+                    # ============================================================
+                    # BUILD/TEST FAILURE (red): loop back to whichever phase OWNS
+                    # the broken file.
+                    #
+                    # Historically this always went to 'coding' with feedback that
+                    # said "Do not edit tests". That is correct when production code
+                    # is at fault, and actively harmful when the TEST is the thing
+                    # that will not compile: 'coding' may only write src/main, so it
+                    # structurally CANNOT fix a broken test. Observed in run
+                    # 31253969777 — a reactive WebClient mock in
+                    # CatalogClientImplUnitTest failed to compile on Mockito generic
+                    # wildcards; the harness sent it to 'coding' three times, which
+                    # flailed at production code and even invented a duplicate
+                    # BookController in the wrong package, then halted with the
+                    # retry budget spent and the actual defect untouched.
+                    # ============================================================
+                    run.validation_attempts += 1
+                    test_side = _failure_is_in_tests(vr.output_tail)
+
+                    # ALTERNATE ON REPEAT. A failing test can be the fault of
+                    # either side, and no heuristic reads a stack trace reliably
+                    # enough to be right twice. If the previous attempt sent this
+                    # to one phase and the build is still red, that phase either
+                    # could not fix it or fixed the wrong thing — so try the other
+                    # one rather than spending the whole retry budget on a
+                    # classification that has already been shown not to work.
+                    _prev = getattr(run, "last_validation_loopback", "") or ""
+                    _would_be = (cfg.test_failure_loopback_phase if test_side
+                                 else cfg.validation_loopback_phase)
+                    if _prev and _prev == _would_be and run.validation_attempts > 1:
+                        test_side = not test_side
+                        self.log(f"  [harness] '{_prev}' already had this failure and the "
+                                 f"build is still red — routing to the other side instead")
+                    if test_side:
+                        loopback = cfg.test_failure_loopback_phase
+                        fix_instruction = (
+                            "The build FAILED while compiling or running the TESTS. "
+                            "The defect is in the TEST code, not the production code. "
+                            "Fix the test source so it compiles and passes. Do NOT ask "
+                            "for production code changes. Failure output:\n"
+                        )
+                    else:
+                        loopback = cfg.validation_loopback_phase
+                        fix_instruction = (
+                            "The test build FAILED. Fix the production code so tests pass. "
+                            "Do not edit tests. Failure output:\n"
+                        )
+                    if loopback and run.validation_attempts <= cfg.max_validation_retries:
+                        # CONDITIONAL TRANSITION (known edge, not dynamic):
+                        # red build -> back to the phase that owns the broken file,
+                        # carrying the failure as feedback, and let it fix + re-validate.
+                        # Log the failure detail on EVERY loopback, not only on the
+                        # final one. Previously the tail went into last_feedback for
+                        # the agent but never to the operator, so a run that looped
+                        # three times showed three identical "BUILD FAILURE (exit 1)"
+                        # lines and nothing about WHY — the actual compile error was
+                        # invisible in the log that a human reads.
+                        self.log("  --- build/test failure tail ---\n" + vr.output_tail)
+                        self.log(f"  ! VALIDATION_FAILED ({'test-side' if test_side else 'main-side'}) "
+                                 f"— looping back to '{loopback}' "
+                                 f"(attempt {run.validation_attempts}/{cfg.max_validation_retries})")
+                        run.halt_detail = "test_build: build or tests failing"
+                        run.last_feedback = fix_instruction + vr.output_tail
+                        # reset iteration budget for the loopback phase so it can act
+                        run.last_validation_loopback = loopback
+                        run.iterations[loopback] = 0
+                        run.approvals[loopback] = "rejected"  # forces re-run semantics
+                        run.current_phase = loopback
+                        run.status = "running"
+                        run.save(self.harness_dir)
+                        return run
+
+                    # retries exhausted (or loopback disabled) -> halt for a human
+                    self.log(f"  ! VALIDATION_FAILED — retries exhausted "
+                             f"({run.validation_attempts-1}/{cfg.max_validation_retries}); halting")
+                    self.log("  --- test output tail ---\n" + vr.output_tail)
+                    run.status = "halted"
+                    run.halt_gate = HG.TEST_BUILD
+                    run.save(self.harness_dir)
+                    return run
+
+            if phase.human_gate and run.approvals.get(phase.id) != "approved":
+                # pause for the human; resolve_gate() resumes us
+                run.status = "awaiting_approval"
+                run.save(self.harness_dir)
+                return run
+
+            # advance
+            nxt = next_phase(phase.id)
+            if nxt is None:
+                run.status = "done"
+            else:
+                run.current_phase = nxt.id
+                run.status = "running"
+            run.save(self.harness_dir)
+            return run
+
+        # unknown code — fail safe by halting
+        run.status = "halted"
+        run.halt_gate = HG.OTHER
+        run.halt_detail = f"unmapped exit code {int(code)}"
+        run.save(self.harness_dir)
+        return run
+
+    def resolve_gate(self, run: RunState, approved: bool, feedback: str = "") -> RunState:
+        """Apply a human decision to a phase that is awaiting approval."""
+        phase = self._phase(run.current_phase)
+        if run.status != "awaiting_approval":
+            raise RuntimeError(f"Phase '{phase.id}' is not awaiting approval")
+
+        if approved:
+            run.approvals[phase.id] = "approved"
+            run.last_feedback = None
+            # stamp the execution record with the human's approval (coding phase)
+            if getattr(phase, "record_execution", False):
+                try:
+                    from execution_record import stamp_approval
+                    stamp_approval(self.harness_dir / "prompt-steps.md", True)
+                except Exception:
+                    pass
+            nxt = next_phase(phase.id)
+            if nxt is None:
+                run.status = "done"
+            else:
+                run.current_phase = nxt.id
+                run.status = "running"
+        else:
+            run.approvals[phase.id] = "rejected"
+            run.last_feedback = feedback
+            if getattr(phase, "record_execution", False):
+                try:
+                    from execution_record import stamp_approval
+                    stamp_approval(self.harness_dir / "prompt-steps.md", False, feedback)
+                except Exception:
+                    pass
+            run.status = "running"   # re-run the same phase with feedback
+        run.save(self.harness_dir)
+        return run
+
+    def run_until_pause(self, run: RunState, max_steps: int = 50) -> RunState:
+        """Drive steps until the machine needs a human or finishes (or safety cap)."""
+        steps = 0
+        while run.status == "running" and steps < max_steps:
+            run = self.step(run)
+            steps += 1
+        return run

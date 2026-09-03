@@ -1,0 +1,453 @@
+# =============================================================================
+# SDLC-Harness/.github/workflows/harness.yml
+# THE REUSABLE ENGINE WORKFLOW  (lives in the SDLC-Harness repo)
+#
+# Runs in the CALLER's repo context. Supplies the engine + orchestration.
+#
+# THREE CHECKOUTS (a reusable workflow brings none of its own files):
+#   1. the CALLER's service repo  -> ./service   (the code the harness works on)
+#   2. this SDLC-Harness repo   -> ./engine    (the Python engine under harness/)
+#   3. YOUR-TOOLKIT-REPO            -> ./toolkit   (shared skills + instructions)
+#
+# CENTRAL TOOLKIT MODEL: skills/instructions are NOT committed to service repos
+# (they stay gitignored there). The workflow copies them from the central toolkit
+# into service/.github/ at run time, so the engine finds them at repo_root/.github
+# — present for the run, never committed. One source of truth; update once.
+#
+# FLAT IMPORTS: engine modules import each other flatly (no __init__.py), so run.py
+# is executed from INSIDE engine/harness (working-directory); --repo is ../../service.
+#
+# -----------------------------------------------------------------------------
+# WHY engine_repo / toolkit_repo ARE INPUTS AND NOT ${{ github.repository_owner }}
+# -----------------------------------------------------------------------------
+# These two checkouts previously used ${{ github.repository_owner }}, which is the
+# owner of the CALLING repo — not the owner of the engine. That silently worked for
+# the harness author (same account) and broke for every other user: a joiner who
+# forked sample-book-service got `repository: <their-name>/SDLC-Harness`, which
+# does not exist. actions/checkout logged "Repository not found" but did NOT fail
+# the step, so the run limped on and died later with a misleading
+# "No such file or directory: engine/harness".
+#
+# The engine and toolkit live at a FIXED, canonical location regardless of who runs
+# the harness. They are inputs (not literals) so a fork of the whole toolchain — or
+# the eventual move into the BCBSM org — is a one-line change in the caller, with
+# no edit to this file.
+# =============================================================================
+name: Harness (engine)
+
+on:
+  workflow_call:
+    inputs:
+      feature_id:
+        description: "Story / feature id to run"
+        required: true
+        type: string
+      java-version:
+        required: false
+        default: "17"
+        type: string
+      python-version:
+        required: false
+        default: "3.13"
+        type: string
+      node-version:
+        required: false
+        default: "20"
+        type: string
+      engine_ref:
+        description: "Tag/branch of SDLC-Harness to run"
+        required: false
+        default: "v1"
+        type: string
+      toolkit_ref:
+        description: "Tag/branch of YOUR-TOOLKIT-REPO to load (skills + instructions)"
+        required: false
+        default: "main"
+        type: string
+      engine_repo:
+        description: "owner/repo holding the harness engine. Canonical location — NOT the caller's account."
+        required: false
+        default: "YOUR-ORG/SDLC-Harness"
+        type: string
+      toolkit_repo:
+        description: "owner/repo holding the shared skills + instructions."
+        required: false
+        default: "YOUR-ORG/YOUR-TOOLKIT-REPO"
+        type: string
+      resume:
+        description: >-
+          Continue a halted run from its working branch instead of starting over.
+          Checks out harness-wip/<feature_id>, keeps the phases that already
+          passed, and skips `init` so run-state.json survives. Use after fixing
+          code by hand. Leave false for a fresh run.
+        required: false
+        default: false
+        type: boolean
+      start_phase:
+        description: >-
+          When resuming, the phase to re-enter at (e.g. code_review, coding,
+          unit_testing). Blank resumes where the run halted, which is what you
+          want after fixing code and wanting the same gate re-evaluated.
+        required: false
+        default: ""
+        type: string
+    secrets:
+      COPILOT_GITHUB_TOKEN:
+        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW, Copilot Requests: Read)"
+        required: true
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # --- 1. the CALLER's service repo -> ./service ---
+      # On resume, check out the WORKING BRANCH rather than the default branch.
+      # That branch carries the source the agent wrote, any fix a human pushed on
+      # top of it, and .harness/run-state.json — without it there is nothing to
+      # resume from and the run would silently start over.
+      - name: Checkout target service repo
+        uses: actions/checkout@v4
+        with:
+          path: service
+          fetch-depth: 0
+          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || github.ref }}
+
+      - name: Verify resume state
+        if: inputs.resume
+        working-directory: service
+        run: |
+          if [ ! -f .harness/run-state.json ]; then
+            echo "::error title=Nothing to resume::harness-wip/${{ inputs.feature_id }} has no .harness/run-state.json."
+            echo ""
+            echo "Resume needs a previous run's state. Either this feature has never"
+            echo "run, or the working branch was deleted. Re-trigger with resume=false"
+            echo "to start a fresh run."
+            exit 1
+          fi
+          echo "Resuming from harness-wip/${{ inputs.feature_id }}:"
+          python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
+
+      # --- 2. THIS engine repo -> ./engine ---
+      # No token needed when the engine repo is readable by the runner's default
+      # credentials — a public repo, or a private repo in the same organisation
+      # with Actions access granted. If the checkout fails, that access is the
+      # first thing to check.
+      # need a token that can read it — see the note in step 2b.
+      - name: Checkout SDLC-Harness
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.engine_repo }}
+          ref: ${{ inputs.engine_ref }}
+          path: engine
+
+      # --- 2b. FAIL LOUDLY if the engine did not actually arrive ---
+      # actions/checkout can report "Repository not found" without failing the step,
+      # leaving an empty directory. Without this guard the job continues and dies
+      # several steps later with an unrelated-looking path error, which is what sent
+      # the first external user debugging in the wrong place entirely.
+      - name: Verify engine checkout
+        run: |
+          if [ ! -d engine/harness ] || [ ! -f engine/harness/run.py ]; then
+            echo "::error title=Engine checkout failed::Could not read ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}."
+            echo ""
+            echo "Checked for engine/harness/run.py — not found."
+            echo "Likely causes:"
+            echo "  * the repo/ref does not exist (check the tag '${{ inputs.engine_ref }}' is pushed)"
+            echo "  * the repo is private and this run has no credentials that can read it"
+            echo ""
+            echo "Contents of ./engine:"
+            ls -la engine 2>/dev/null || echo "  (directory missing)"
+            exit 1
+          fi
+          echo "Engine OK: ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}"
+
+      # --- 3. the central toolkit -> ./toolkit (skills + instructions) ---
+      # ACCESS: the toolkit repo must be readable by this run. In an organisation
+      # that means granting the token (or the workflow) read access to it —
+      # normal org repository access. The token is passed explicitly rather than
+      # relying on default credentials, so a private toolkit works without
+      # making it public.
+      # Workable options: make YOUR-TOOLKIT-REPO public, or host both repos in an org
+      # where members' tokens can be granted access (the BCBSM case).
+      - name: Checkout YOUR-TOOLKIT-REPO
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.toolkit_repo }}
+          ref: ${{ inputs.toolkit_ref }}
+          path: toolkit
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+
+      # --- 3a. FAIL LOUDLY if the toolkit did not arrive ---
+      # Without skills/instructions the agent still runs, but produces code that
+      # ignores every house convention — a silent quality failure that is much worse
+      # than a loud stop, because the run goes green and the output is wrong.
+      - name: Verify toolkit checkout
+        run: |
+          if [ ! -d toolkit/skills ] && [ ! -d toolkit/instructions ]; then
+            echo "::error title=Toolkit checkout failed::Could not read ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}."
+            echo ""
+            echo "Neither toolkit/skills nor toolkit/instructions is present."
+            echo "If YOUR-TOOLKIT-REPO is private, your fine-grained PAT cannot read it"
+            echo "unless the repo is owned by your own account or an org that has"
+            echo "granted your token access."
+            echo ""
+            echo "Contents of ./toolkit:"
+            ls -la toolkit 2>/dev/null || echo "  (directory missing)"
+            exit 1
+          fi
+          echo "Toolkit OK: ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}"
+
+      # --- 3b. place toolkit skills/instructions into the service checkout ---
+      # The engine loads capability from <service>/.github/skills and
+      # <service>/.github/instructions. We copy them in for THIS run only — they
+      # are never committed back, so the central-toolkit model is preserved.
+      - name: Load toolkit into service workspace
+        run: |
+          mkdir -p service/.github
+          if [ -d toolkit/skills ]; then
+            cp -r toolkit/skills service/.github/
+          fi
+          if [ -d toolkit/instructions ]; then
+            cp -r toolkit/instructions service/.github/
+          fi
+          echo "Loaded skills/instructions from ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}"
+
+      # --- 4. toolchains ---
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      # --- 5. install deps + Copilot CLI ---
+      - name: Install harness dependencies
+        run: pip install -r engine/requirements.txt
+
+      - name: Install GitHub Copilot CLI
+        run: npm install -g @github/copilot
+
+      # --- 6. run the harness (from inside engine/harness for flat imports) ---
+      # `init` WIPES run-state.json, so it must not run when resuming — that was
+      # the whole reason a halted run could only ever start over.
+      - name: Initialize run (fresh runs only)
+        if: ${{ !inputs.resume }}
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          python run.py init \
+            --repo ../../service \
+            --feature "${{ inputs.feature_id }}"
+
+      # Rewind the loaded state to the phase we are re-entering, and reset the
+      # retry budgets that stopped the last run — otherwise the gate that halted
+      # it fires again before the agent ever sees the human's fix.
+      - name: Rewind state (resume only)
+        if: inputs.resume
+        working-directory: engine/harness
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          if [ -n "${{ inputs.start_phase }}" ]; then
+            python resume.py --repo ../../service --phase "${{ inputs.start_phase }}"
+          else
+            python resume.py --repo ../../service
+          fi
+
+      - name: Autorun (all phases)
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: "harness-bot"
+          GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
+          GIT_COMMITTER_NAME: "harness-bot"
+          GIT_COMMITTER_EMAIL: "harness-bot@users.noreply.github.com"
+          # Read by metrics.py. GITHUB_ACTOR / RUN_ID / REPOSITORY are provided
+          # by Actions; these three are not.
+          HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
+          HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
+          HARNESS_RESUMED: ${{ inputs.resume }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          python run.py autorun --repo ../../service
+
+      # --- 7. collect audit files into service/audit/ (local copy) ---
+      - name: Collect audit
+        if: always()
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          python run.py collect-audit --repo ../../service || true
+
+      # --- 8. push the WORKING BRANCH — ALWAYS (success OR halt) ---
+      # This is what makes a halted run resumable, and it is the piece that was
+      # missing: on a halt, step 9 never ran, so the agent's source changes were
+      # discarded with the runner. Only the audit trail survived — enough to read
+      # what happened, not enough to continue.
+      #
+      # harness-wip/<feature> is deliberately NOT run-scoped: resume has to find it
+      # by name, and a run_id suffix would make it unfindable. It is force-pushed
+      # because it is a working branch, not history — the immutable per-run record
+      # is the audit branch below.
+      #
+      # A human fixing code by hand works on THIS branch, pushes, and re-triggers
+      # with resume=true. Their commit and the harness's output then share one
+      # lineage instead of racing on separate branches.
+      - name: Push working branch (always)
+        if: always() && hashFiles('engine/harness/run.py') != ''
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          WIP_BRANCH="harness-wip/${FEATURE}"
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          # -B with no start point keeps the working tree and just moves the ref,
+          # so nothing the agent wrote is lost.
+          git checkout -B "$WIP_BRANCH"
+          git add -A 2>/dev/null || true
+          STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit on $WIP_BRANCH."
+          else
+            git commit -m "Harness WIP [$FEATURE] at $STATUS (run ${{ github.run_id }})"
+          fi
+          git push -f origin "$WIP_BRANCH"
+          echo "::notice title=Working branch::$WIP_BRANCH — resume from here with resume=true"
+
+      # --- 8a. publish the metrics record to a long-lived branch — ALWAYS ---
+      # Metrics live on their OWN branch, not the working branch: the working
+      # branch is force-pushed on every resume, which would discard history, and
+      # metrics are the one artifact that must accumulate across runs.
+      #
+      # One file per run (metrics/<yyyy>/<mm>/<feature>-<run_id>.json) means two
+      # concurrent runs never touch the same path, so this merges cleanly without
+      # locking. The rebase loop below covers the narrow window where two runs
+      # push within seconds of each other.
+      #
+      # Never fails the job: a metrics push that broke a build would be worse than
+      # no metrics at all.
+      - name: Publish metrics record (always)
+        if: always() && hashFiles('engine/harness/run.py') != ''
+        working-directory: service
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set +e
+          if [ ! -d metrics ]; then
+            echo "No metrics record produced; nothing to publish."
+            exit 0
+          fi
+          # (the two early exits below run BEFORE the orphan checkout, so they
+          #  need no return; the ones after it do — see RETURN_TO)
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          # Remember where we are. This step checks out an ORPHAN branch, and an
+          # orphan shares no history with main — so every later step (audit
+          # branch, PR branch) inherited that and `gh pr create` failed with
+          # "has no history in common with main". Return before finishing.
+          RETURN_TO=$(git rev-parse --abbrev-ref HEAD)
+          TMP=$(mktemp -d)
+          cp -r metrics/* "$TMP"/ 2>/dev/null
+          git fetch origin harness-metrics 2>/dev/null
+          if git rev-parse --verify origin/harness-metrics >/dev/null 2>&1; then
+            git checkout -B harness-metrics origin/harness-metrics
+          else
+            # Orphan: metrics share no history with the code, and keeping them
+            # separate stops the branch carrying every source commit too.
+            git checkout --orphan harness-metrics
+            git rm -rf . >/dev/null 2>&1
+          fi
+          mkdir -p metrics
+          cp -r "$TMP"/* metrics/ 2>/dev/null
+          git add metrics
+          if git diff --cached --quiet; then
+            echo "No new metrics to publish."
+            git checkout "$RETURN_TO" 2>/dev/null || true
+            exit 0
+          fi
+          git commit -m "Metrics: ${{ inputs.feature_id }} run ${{ github.run_id }}"
+          for i in 1 2 3; do
+            git push origin harness-metrics && break
+            echo "Push raced with another run; rebasing (attempt $i)."
+            git fetch origin harness-metrics && git rebase origin/harness-metrics || break
+          done
+          echo "::notice title=Metrics published::harness-metrics branch"
+          git checkout "$RETURN_TO" 2>/dev/null || git checkout -B "$RETURN_TO"
+
+      # --- 8b. snapshot the run to an immutable audit branch — ALWAYS ---
+      # Per-run, never force-pushed: the record of what this particular run did.
+      # Points at the same commit as the working branch, so it captures the code,
+      # the state and the artifacts together.
+      - name: Snapshot audit branch (always)
+        if: always() && hashFiles('engine/harness/run.py') != ''
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          # Sortable and readable: date first so a lexical branch listing is also
+          # chronological, then the outcome so a glance tells you which runs
+          # succeeded, then the run id so a branch still maps back to its Actions
+          # run. Grouped under <feature>/ so GitHub's branch list nests them.
+          # No colons — git branch names forbid them.
+          STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          case "$STATUS" in
+            done)        OUTCOME=ok ;;
+            halted)      OUTCOME=halted ;;
+            needs_input) OUTCOME=needs-input ;;
+            *)           OUTCOME=unknown ;;
+          esac
+          AUDIT_BRANCH="harness-audit/${FEATURE}/${STAMP}-${OUTCOME}-${{ github.run_id }}"
+          git checkout -B "$AUDIT_BRANCH"
+          git push origin "$AUDIT_BRANCH"
+          echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
+
+      # --- 9. raise the code PR — ONLY on success ---
+      # Branches from the working branch, which by now holds everything the run
+      # produced. Run-scoped so each successful run gets its own reviewable PR.
+      - name: Open pull request with the change (success only)
+        if: success()
+        working-directory: service
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          # Same scheme as the audit branch. No outcome segment — this branch only
+          # exists on success.
+          STAMP=$(date -u +%Y%m%d-%H%M)
+          BRANCH="harness/${FEATURE}/${STAMP}-${{ github.run_id }}"
+          git config user.name "harness-bot"
+          git config user.email "harness-bot@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git push origin "$BRANCH"
+          if [ -f .harness/pr-body.md ]; then
+            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base main --head "$BRANCH" || echo "PR create skipped"
+          else
+            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base main --head "$BRANCH" || echo "PR create skipped"
+          fi
+
+      # --- 10. tell the human how to continue when the run halted ---
+      - name: Explain how to resume (halt only)
+        if: failure() && hashFiles('engine/harness/run.py') != ''
+        run: |
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run."
