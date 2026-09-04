@@ -120,8 +120,8 @@ def cmd_autorun(args):
     if credits_before is not None:
         # GitHub's billing counter lags the requests that produced it. Reading it
         # the instant the last phase returns catches a figure that is still
-        # settling, so the delta UNDER-reports: measured on run 33167xxxxx, the
-        # harness reported 28.12 while the settled page figure moved by ~37.
+        # settling, so the delta UNDER-reports — the figure read immediately can
+        # fall well short of the settled billing-page total.
         # A short pause recovers most of that. It is not a guarantee — the delta
         # is labelled a lower bound in the report for the same reason.
         _LAG_WAIT = int(os.environ.get("HARNESS_CREDIT_SETTLE_SECONDS", "45"))

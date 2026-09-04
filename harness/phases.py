@@ -48,9 +48,9 @@ class Phase:
     # fresh write is the only way the artifact can exist afterwards.
     #
     # This is what makes a "was it written THIS attempt?" gate sound. Without it a
-    # retry can silently inherit the previous attempt's file: in run 31235571294 the
-    # reviewer read the existing review.md, judged its PASS still accurate, wrote
-    # nothing, and the gate correctly-but-unhelpfully halted on STALE VERDICT.
+    # retry can silently inherit the previous attempt's file: the reviewer reads the
+    # existing review.md, judges its PASS still accurate, writes nothing, and the
+    # gate correctly-but-unhelpfully halts on STALE VERDICT.
     # Only paths inside the phase's own allowed_writes belong here.
     clear_before_run: tuple = field(default_factory=tuple)
     # If True, after this phase the harness scans the context output for

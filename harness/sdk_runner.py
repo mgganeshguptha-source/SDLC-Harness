@@ -384,8 +384,8 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
 # ---------------------------------------------------------------------------
 # PUSH-MODE CODE REVIEW (diff-scoping)
 #
-# Instead of telling the reviewer "go read the repo" (pull mode — 15+ tool
-# calls, unbounded exploration, ~557K tokens observed on a loopback pass),
+# Instead of telling the reviewer "go read the repo" (pull mode — many tool
+# calls and unbounded, token-heavy exploration),
 # the harness gathers the review material DETERMINISTICALLY (zero LLM tokens)
 # and inlines it into the prompt:
 #   1. git diff HEAD -- src/main          (the exact production change)
@@ -494,11 +494,11 @@ def _build_review_dossier(repo_root: Path, log=print) -> str | None:
 def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
     """Inline EVERYTHING the test author needs, so it never explores the repo.
 
-    Backlog #6: unit_testing was ~223K tokens because, given only the story, the
+    Backlog #6: unit_testing was token-heavy because, given only the story, the
     agent hunted for the class under test AND for existing test conventions.
     First attempt at this inlined only the changed production source and left
     reads enabled with a 'you MAY still read test files' note — the agent took
-    the invitation (6 reads + grep) and tokens barely moved (~2%).
+    the invitation (still reading and grepping) and token use barely moved.
 
     So we now push the three things it was actually looking for:
       1. the changed production source (full current content),
@@ -751,8 +751,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     # coding prompt: state the APPROVED file list explicitly. The scope gate will
     # halt the phase if it creates production files the plan never listed, so it is
     # only fair (and far cheaper) to tell it the boundary up front rather than catch
-    # it afterwards. In run 29182275947 the coding phase, given only "BUILD FAILURE",
-    # invented a whole second Owner/Pet class hierarchy to route around the error.
+    # it afterwards. A coding phase given only "BUILD FAILURE" can otherwise invent
+    # a whole second copy of a domain class hierarchy to route around the error.
     _approved_block = ""
     try:
         from execution_record import _approved_paths_from_plan
@@ -1000,7 +1000,7 @@ class SdkAgentRunner:
 
         # #6: unit_testing context dossier — inline the changed production code +
         # plan so the test author doesn't burn tokens rediscovering the class
-        # under test (~223K observed). Reads stay enabled (tests need fixtures).
+        # under test. Reads stay enabled (tests need fixtures).
         unittest_dossier: str | None = None
         if phase.id == "unit_testing":
             unittest_dossier = _build_unittest_dossier(repo_root, log=self.log)
@@ -1047,11 +1047,11 @@ class SdkAgentRunner:
                 # CRITICAL EXEMPTION: the phase's OWN OUTPUT FILE must stay
                 # readable. The SDK's create/edit tools READ the target before
                 # writing it — so a blanket read-deny silently makes the phase
-                # unable to write its own artifact. Observed in run 29181773991:
-                # the reviewer PASSED the code on attempts 2 and 3, could not
-                # write review.md, fell back to shell (denied), and emitted the
-                # verdict to chat instead. The harness then re-parsed the STALE
-                # review.md from attempt 1 and looped until the retry cap blew.
+                # unable to write its own artifact. For example: a reviewer PASSES
+                # the code on later attempts, cannot write review.md, falls back to
+                # shell (denied), and emits the verdict to chat instead. The
+                # harness then re-parses the STALE review.md from an earlier attempt
+                # and loops until the retry cap blows.
                 #
                 # Rule: if the phase is allowed to WRITE a path, it may READ it.
                 target = (getattr(request, "file_name", "")

@@ -81,13 +81,12 @@ class PhaseExecutor:
         # the agent runs, so a fresh write is the ONLY way it can exist afterwards.
         #
         # Without this, a retry loop can silently reuse a previous attempt's file.
-        # Observed in run 31235571294: attempt 1 wrote review.md with VERDICT: PASS;
-        # a later coding loop re-entered code_review, the reviewer READ the existing
-        # review.md, judged it still accurate, and wrote nothing ("The review file
-        # already exists and contains a comprehensive VERDICT: PASS analysis").
-        # The gate then correctly reported STALE VERDICT and halted — a live, correct
-        # review was indistinguishable from a stale one because the artifact predated
-        # the attempt. Deleting it first makes "file exists" == "reviewer wrote it
+        # For example: attempt 1 writes review.md with VERDICT: PASS; a later coding
+        # loop re-enters code_review, the reviewer READS the existing review.md,
+        # judges it still accurate, and writes nothing. The gate then correctly
+        # reports STALE VERDICT and halts — a live, correct review is
+        # indistinguishable from a stale one because the artifact predated the
+        # attempt. Deleting it first makes "file exists" == "reviewer wrote it
         # this attempt", which is exactly what the gate is asserting.
         #
         # Only files the phase is allowed to write are cleared, so this can never
@@ -240,9 +239,9 @@ class PhaseExecutor:
                     plan_file, self.repo_root, result.attempted_writes, phase.id)
 
                 # SCOPE GATE (part 2/2): the detection above used to be advisory —
-                # it warned and let the run continue. That is how a coding phase was
-                # able to invent a whole second Owner/Pet class hierarchy nobody
-                # asked for (run 29182275947), poisoning every downstream phase.
+                # it warned and let the run continue. That is how a coding phase can
+                # invent a whole second copy of a domain class hierarchy nobody
+                # asked for, poisoning every downstream phase.
                 #
                 # Split the additions: an unplanned EDIT to an existing file is a
                 # warning (a real fix may legitimately need it); CREATING a new

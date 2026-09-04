@@ -114,10 +114,9 @@ def _failure_is_in_tests(output: str) -> bool:
     # ---- signatures that are unambiguously the TEST's own fault ----
     # A failing assertion usually means production is wrong, but some runtime
     # failures can only come from the test itself, and routing those to 'coding'
-    # sends work to a phase that may not write test files at all. Observed in run
-    # 33199xxxxx: an unstubbed mock returned null, the NPE was classified
-    # main-side, and 'coding' was asked twice to fix a defect in a test it is
-    # forbidden from touching.
+    # sends work to a phase that may not write test files at all. For example: an
+    # unstubbed mock returns null, the NPE is classified main-side, and 'coding'
+    # is asked to fix a defect in a test it is forbidden from touching.
     low = text.lower()
     test_only = (
         # Mockito misuse: unnecessary stubbing, wrong argument matchers, etc.
@@ -184,10 +183,10 @@ class StateMachine:
         # so it holds no matter which gate caused the re-entry. The review,
         # coverage and validation budgets are separate counters that cannot see
         # each other, and each loopback resets iterations[phase] to 0 — so without
-        # this a phase can run far more often than any one cap implies
-        # (run 31257053514: unit_testing ran 6x while every individual counter
-        # stayed within limits, burning ~15 minutes and the credit budget on a
-        # failure the agent could not diagnose).
+        # this a phase can run far more often than any one cap implies (e.g. a
+        # phase running 6x while every individual counter stays within limits,
+        # burning time and the credit budget on a failure the agent could not
+        # diagnose).
         #
         # Stored under a namespaced key in the existing iterations dict because
         # that dict already persists across saves; the "__runs__:" prefix cannot
@@ -644,9 +643,9 @@ class StateMachine:
 
                 # STALE VERDICT => the reviewer produced NOTHING this attempt and
                 # the file on disk is a leftover. Looping back would re-feed an
-                # already-fixed issue and burn the retry cap for nothing (exactly
-                # what happened in run 29181773991). This is a harness/permission
-                # fault, so halt at once and name it — do NOT spend a retry.
+                # already-fixed issue and burn the retry cap for nothing. This is a
+                # harness/permission fault, so halt at once and name it — do NOT
+                # spend a retry.
                 if rv.stale:
                     self.log("  ! CODE REVIEW GATE: STALE VERDICT — review.md was not "
                              "written during this attempt.")
@@ -756,12 +755,12 @@ class StateMachine:
                         # If the coding phase produced no production changes there is
                         # nothing for the coverage gate to measure, and looping back
                         # to unit_testing "to add tests" cannot possibly succeed —
-                        # there is no changed class to cover. Observed in run
-                        # 33164146030: the story was already implemented in the repo,
-                        # the coding agent made zero write requests, and the harness
-                        # still looped twice and burned ~15 credits before halting
-                        # with a message about coverage thresholds that sent the
-                        # operator looking at JaCoCo rather than at the story.
+                        # there is no changed class to cover. For example: the story
+                        # is already implemented in the repo, the coding agent makes
+                        # zero write requests, and the harness still loops and burns
+                        # credits before halting with a message about coverage
+                        # thresholds that sends the operator looking at JaCoCo
+                        # rather than at the story.
                         #
                         # Halt immediately with the actual cause.
                         _changed = getattr(run, "changed_main_files", None) or []
@@ -879,13 +878,12 @@ class StateMachine:
                     # said "Do not edit tests". That is correct when production code
                     # is at fault, and actively harmful when the TEST is the thing
                     # that will not compile: 'coding' may only write src/main, so it
-                    # structurally CANNOT fix a broken test. Observed in run
-                    # 31253969777 — a reactive WebClient mock in
-                    # CatalogClientImplUnitTest failed to compile on Mockito generic
-                    # wildcards; the harness sent it to 'coding' three times, which
-                    # flailed at production code and even invented a duplicate
-                    # BookController in the wrong package, then halted with the
-                    # retry budget spent and the actual defect untouched.
+                    # structurally CANNOT fix a broken test. For example: a reactive
+                    # WebClient mock in a unit test fails to compile on Mockito
+                    # generic wildcards; routing it to 'coding' repeatedly makes that
+                    # phase flail at production code — even inventing a duplicate
+                    # controller in the wrong package — then halt with the retry
+                    # budget spent and the actual defect untouched.
                     # ============================================================
                     run.validation_attempts += 1
                     test_side = _failure_is_in_tests(vr.output_tail)

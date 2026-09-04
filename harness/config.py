@@ -147,7 +147,7 @@ class HarnessConfig:
     #
     # NOTE on gpt-5-mini: it was previously treated as free ("included"). That is
     # WRONG under usage-based billing — it bills at $0.25/$0.025/$2.00 per 1M.
-    # Treating it as 0 under-reported a real run by ~2.2x (7.3 cr est vs 16 cr billed).
+    # Treating it as 0 materially under-reported real runs.
     model_rates: dict = field(default_factory=lambda: {
         # OpenAI
         "gpt-5-mini":        [0.25, 0.025, 2.00],
@@ -198,11 +198,11 @@ class HarnessConfig:
     #
     # The review / coverage / validation budgets are independent counters that do
     # not see each other, and every loopback resets iterations[phase] to 0. So a
-    # phase can re-enter far more often than any single cap suggests: observed in
-    # run 31257053514, unit_testing ran SIX times (2 coverage retries + 3
-    # validation retries + the original) while each individual counter stayed
-    # inside its limit. This is the backstop that makes "it will stop" true
-    # regardless of which combination of gates is firing.
+    # phase can re-enter far more often than any single cap suggests — e.g. one
+    # phase running six times (2 coverage retries + 3 validation retries + the
+    # original) while each individual counter stays inside its limit. This is the
+    # backstop that makes "it will stop" true regardless of which combination of
+    # gates is firing.
     max_phase_runs: int = 3
 
     # --- feasibility half of the context gate ---
@@ -306,10 +306,10 @@ class HarnessConfig:
         "context":      ["build-context", "analyze-service"],
         "prompt_steps": ["build-prompt-steps"],
         # analyze-service is deliberately NOT loaded here. It recursively traces
-        # downstream API calls — far heavier than a design phase needs, and in run
-        # 33167xxxxx it drove 24 exploration tool calls and 228K tokens until the
-        # phase ran out of turns without ever writing design.md. build-design does
-        # its own bounded read of the code.
+        # downstream API calls — far heavier than a design phase needs. Loaded in
+        # design it can drive dozens of exploration tool calls and hundreds of
+        # thousands of tokens until the phase runs out of turns without ever
+        # writing design.md. build-design does its own bounded read of the code.
         "design":       ["build-design"],
         "coding":       ["security-review"],
         "code_review":  ["security-review", "review-angular-code"],
@@ -323,12 +323,12 @@ class HarnessConfig:
     # if one of its stacks is in repo_stacks; a skill NOT listed here is
     # stack-neutral and always loads.
     #
-    # Why (run 31252416919): repo_stacks=["backend"] correctly excluded Angular
-    # INSTRUCTIONS, but phase_skills was applied verbatim, so review-angular-code
-    # — a skill about Angular naming conventions, RxJS and NgRx — was loaded to
-    # review a Java WebFlux service. An Angular code-quality rubric pointed at
-    # reactive Java is a standing invitation to nitpick style, which is what the
-    # reviewer then did.
+    # A stack-specific skill must be filtered by repo_stacks the same way
+    # instruction subfolders are. Without this, repo_stacks=["backend"] correctly
+    # excludes Angular INSTRUCTIONS but phase_skills is still applied verbatim, so
+    # a skill like review-angular-code — Angular naming conventions, RxJS, NgRx —
+    # loads to review a Java WebFlux service. An Angular code-quality rubric
+    # pointed at reactive Java is a standing invitation to nitpick style.
     skill_stacks: dict = field(default_factory=lambda: {
         "review-angular-code": ["angular-frontend", "ionic", "frontend"],
     })
@@ -459,10 +459,10 @@ class HarnessConfig:
 
         Repo-LEVEL artefacts are NOT prefixed. `docs/**` belongs to the repository,
         not to one Maven module — an aggregator repo has a single docs/ tree at the
-        root describing the whole service. Prefixing it sent the documentation phase
-        looking for <module>/docs/**, so the agent's correct write to docs/<story>.md
-        was denied as a boundary violation (observed run 31238791178). The same
-        reasoning already keeps .harness/** and .github/** at the root.
+        root describing the whole service. Prefixing it would send the documentation
+        phase looking for <module>/docs/**, so a correct write to docs/<story>.md
+        gets denied as a boundary violation. The same reasoning already keeps
+        .harness/** and .github/** at the root.
 
         Single-module repos (target_module empty) are unchanged — petclinic still works.
         """
@@ -651,21 +651,18 @@ class HarnessConfig:
 
         # CACHE-WRITE: reported by the SDK, but deliberately NOT priced.
         #
-        # GitHub publishes a separate cache-write rate for Anthropic models
-        # ($1.25/1M for Haiku 4.5), so charging it looked correct on paper. It is
-        # not, measured against real billing:
-        #     run 29174592092 (16 cr billed): excl. cache-write -> 14.5 cr  (91%)
-        #     run 29181773991 (27 cr billed): excl. cache-write -> 25.3 cr  (94%)
-        #                                     incl. cache-write -> 36.8 cr (136%)
-        # Two runs, both accurate when cache-write is excluded, both badly over
-        # when it is included. The most likely explanation is that the SDK's
+        # GitHub publishes a separate cache-write rate for Anthropic models, so
+        # charging it looks correct on paper. Measured against real billing it is
+        # not: totals reconcile closely when cache-write is excluded and run well
+        # over actual when it is included. The most likely explanation is that the
+        # SDK's
         # cache_write counter is not the billable class GitHub's rate refers to
         # (or those tokens are already inside `input`). Either way: measurement
         # beats inference. We report the count and do not charge for it.
         cw_rate = (self.cache_write_rates or {}).get(model)
         _ = (cw_rate, cache_write_tokens)  # intentionally unused — see above
 
-        # The estimate now runs slightly UNDER actual (~91-94%), so it is a lower
+        # The estimate now runs slightly UNDER actual, so it is a lower
         # bound rather than an upper one.
         partial = False
 

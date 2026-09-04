@@ -242,9 +242,9 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     # Maven's tail on a TEST failure says only "See .../surefire-reports for the
     # individual test results" — the actual failing test, assertion and stack trace
     # live in files on disk. Without them the loopback feedback carries no
-    # diagnosis, so the fixing phase is reduced to guessing: in run 31257053514 it
-    # burned every retry speculating (e.g. "switching to @Slf4j avoids missing
-    # Log4j classes at test runtime") because it never saw the actual error.
+    # diagnosis, so the fixing phase is reduced to guessing — burning every retry
+    # speculating (e.g. "switching to @Slf4j avoids missing Log4j classes at test
+    # runtime") because it never saw the actual error.
     # Pull the failure detail out of the reports and attach it to the feedback.
     if proc.returncode != 0 and "surefire-reports" in out:
         detail = _surefire_failures(repo_root, log=log)

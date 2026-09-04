@@ -77,10 +77,10 @@ def _is_agent_scratch(path: str) -> bool:
 
     They were being judged against the phase's repo-relative write globs, which
     they can never match, so an agent that paused to write itself a note was
-    killed with BOUNDARY_VIOLATION (observed run 31493208647: unit_testing wrote
-    test-coverage-summary.md to its session dir mid-coverage-loop and halted the
-    run). The behaviour is non-deterministic — it only fires when the model
-    happens to take notes — which makes it especially confusing to diagnose.
+    killed with BOUNDARY_VIOLATION — e.g. a phase writing a scratch coverage
+    summary to its session dir mid-loop, which then halts the run. The behaviour
+    is non-deterministic — it only fires when the model happens to take notes —
+    which makes it especially confusing to diagnose.
 
     This exception is deliberately NARROW. It matches only the session-state
     path, not the home directory generally: writes to ~/.ssh, ~/.gitconfig, the

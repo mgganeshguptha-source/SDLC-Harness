@@ -40,12 +40,12 @@ _PASS_TOKENS = {"pass", "approve", "approved"}
 # Only these classes of finding may BLOCK a change. Anything else the reviewer
 # raises is advisory and must not loop the pipeline back to coding.
 #
-# Why (run 31252416919): the reviewer's sole remaining objection was that
-# fetchBookByAuthor() used intermediate local variables instead of fluent
-# chaining "like fetchBook() does" — correct code, purely a consistency
-# preference. It burned both retries and HALTED the story at the cap, ~15
-# credits spent converging on cosmetics. A style opinion must never be able to
-# stop a run; it belongs in the review notes for a human to weigh.
+# A reviewer's sole objection can be purely cosmetic — e.g. that a method used
+# intermediate local variables instead of fluent chaining "like the sibling
+# method does" — correct code, purely a consistency preference. Left unchecked
+# it can burn both retries and HALT the story at the cap, credits spent
+# converging on cosmetics. A style opinion must never be able to stop a run; it
+# belongs in the review notes for a human to weigh.
 #
 # The prompt asks the reviewer to tag each [ISSUE] with its class. This is the
 # deterministic half: markdown asks, code enforces. An issue whose class is not
@@ -113,12 +113,12 @@ def parse_review(review_file: Path, written_after: float | None = None) -> Revie
     ran. If review.md was not modified after that instant, it is a LEFTOVER from
     a previous attempt and must NOT be trusted.
 
-    Why this exists (run 29181773991): the reviewer was unable to write review.md
-    (its read permission was denied, and create/edit reads the target first). It
-    emitted "VERDICT: PASS" to chat instead. The harness re-parsed the STALE
-    CHANGES_REQUESTED file from attempt 1, looped back on an already-fixed issue,
-    and burned the retry cap. A stale verdict is worse than no verdict: it is a
-    confident answer to the wrong question. Fail closed and say so.
+    Why this exists: if the reviewer is unable to write review.md (e.g. read
+    permission denied, and create/edit reads the target first) it may emit
+    "VERDICT: PASS" to chat instead. The harness then re-parses the STALE
+    CHANGES_REQUESTED file from a prior attempt, loops back on an already-fixed
+    issue, and burns the retry cap. A stale verdict is worse than no verdict: it
+    is a confident answer to the wrong question. Fail closed and say so.
     """
     if not review_file.exists():
         return ReviewResult(passed=False, verdict=None, issues=[],
