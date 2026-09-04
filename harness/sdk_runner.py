@@ -57,22 +57,74 @@ def _parse_frontmatter_applyto(text: str) -> str | None:
     return None
 
 
+def _glob_to_regex(glob: str) -> str:
+    """Translate a path glob into a regex.
+
+      **/   matches zero or more leading directories
+      **    matches anything, including path separators
+      *     matches within a single path segment (no '/')
+      ?     matches a single non-separator character
+
+    Used only for the coarse scope-intersection test below; not a full
+    gitignore-grade implementation, but correct for the applyTo / phase-scope
+    globs the harness uses. Stdlib only — the engine stays dependency-free.
+    """
+    i, n, out = 0, len(glob), ["^"]
+    while i < n:
+        if glob[i:i + 3] == "**/":
+            out.append("(?:[^/]+/)*"); i += 3
+        elif glob[i:i + 2] == "**":
+            out.append(".*"); i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*"); i += 1
+        elif glob[i] == "?":
+            out.append("[^/]"); i += 1
+        else:
+            out.append(re.escape(glob[i])); i += 1
+    out.append("$")
+    return "".join(out)
+
+
+def _samples_from_glob(g: str) -> list:
+    """A few concrete sample paths the glob could match, so intersection can be
+    tested against a phase scope. The fillers cover both shallow nesting and the
+    common src/main/java, src/test/java layouts, so a '**/'-leading applyTo
+    (e.g. '**/controller/**/*.java') can still be recognised as living under a
+    'src/main/**' scope."""
+    outs = set()
+    for lead, bare in (("a/", "a"),
+                       ("a/b/", "a/b"),
+                       ("src/main/java/", "src/main/java"),
+                       ("src/test/java/", "src/test/java")):
+        s = (g.replace("**/", lead).replace("**", bare)
+              .replace("*", "x").replace("?", "x"))
+        outs.add(s)
+    return list(outs)
+
+
 def _glob_intersects_scope(apply_to: str, scope_globs: list) -> bool:
     """Does an instruction's applyTo intersect the phase's file scope?
-    '**' always matches (always-on guardrail). Otherwise check prefix overlap
-    between the applyTo patterns and the phase scope patterns."""
+
+    True when some file matching applyTo could lie within one of the phase's
+    scope directories. An applyTo of '**' (or no frontmatter, handled by the
+    caller) is an always-on guardrail and matches every phase.
+
+    This replaces the earlier literal-prefix test, which discarded any glob
+    whose prefix began with '**' — silently dropping '**/controller/**/*.java'
+    and the other reactive instruction files from every phase.
+    """
     patterns = [p.strip() for p in apply_to.split(",") if p.strip()]
+    scope_res = [(sc, re.compile(_glob_to_regex(sc))) for sc in scope_globs]
     for pat in patterns:
         if pat == "**":
             return True
-        # reduce a glob to its literal directory prefix for a coarse overlap test
-        pat_prefix = pat.split("*", 1)[0].rstrip("/")
-        for sc in scope_globs:
-            sc_prefix = sc.split("*", 1)[0].rstrip("/")
-            if not pat_prefix or not sc_prefix:
+        pat_re = re.compile(_glob_to_regex(pat))
+        for sample in _samples_from_glob(pat):
+            if not pat_re.match(sample):
                 continue
-            if pat_prefix.startswith(sc_prefix) or sc_prefix.startswith(pat_prefix):
-                return True
+            for sc, sc_re in scope_res:
+                if sc == "**" or sc_re.match(sample):
+                    return True
     return False
 
 

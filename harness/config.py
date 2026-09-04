@@ -279,13 +279,26 @@ class HarnessConfig:
     # file loads in a phase if its `applyTo` glob intersects the phase's scope.
     # applyTo "**" files are always-on guardrails (load in every phase).
     # Keyed by phase id.
+    # Stack-NEUTRAL scopes so one engine serves Java, Kotlin and (via a per-repo
+    # override) Angular. Language specificity lives in the instruction files'
+    # own applyTo frontmatter, not here. A repo whose sources are not under
+    # src/main / src/test (e.g. Angular's src/app) overrides this whole dict in
+    # its .harness/config.yaml.
+    #
+    # code_review and validation were previously ABSENT — a missing key yields an
+    # empty scope, which under selective_capability dropped every path-scoped
+    # instruction (naming, error-handling, reactive, OWASP) from those phases,
+    # leaving the reviewer only the always-on guardrails. They are now included.
     phase_file_scope: dict = field(default_factory=lambda: {
-        "context":      ["src/main/java/**", "src/main/**"],
-        "prompt_steps": ["src/main/java/**", "src/main/**"],
-        "coding":       ["src/main/java/**"],
-        "unit_testing": ["src/test/java/**"],
+        "context":       ["src/**"],
+        "design":        ["src/main/**"],
+        "prompt_steps":  ["src/**"],
+        "coding":        ["src/main/**"],
+        "code_review":   ["src/main/**"],
+        "unit_testing":  ["src/test/**"],
+        "validation":    ["src/main/**", "src/test/**"],
         "documentation": ["docs/**"],
-        "raise_pr":     [],
+        "raise_pr":      [],
     })
     # Which named skills (folder names under .github/skills) load in which phase.
     # Skills have no path scope, so this mapping is explicit.
