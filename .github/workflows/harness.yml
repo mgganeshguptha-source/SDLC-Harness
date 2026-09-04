@@ -441,9 +441,9 @@ jobs:
           git checkout -B "$BRANCH"
           git push origin "$BRANCH"
           if [ -f .harness/pr-body.md ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base main --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "${{ github.ref_name }}" --head "$BRANCH" || echo "PR create skipped"
           else
-            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base main --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "${{ github.ref_name }}" --head "$BRANCH" || echo "PR create skipped"
           fi
 
       # --- 10. tell the human how to continue when the run halted ---
