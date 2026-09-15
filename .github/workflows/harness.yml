@@ -447,8 +447,16 @@ jobs:
           fi
 
       # --- 9. raise the code PR — ONLY on success ---
-      # Branches from the working branch, which by now holds everything the run
-      # produced. Run-scoped so each successful run gets its own reviewable PR.
+      # The PR branch must contain the CODE CHANGE ONLY (src/ + docs/), never the
+      # run workspace (.harness/), the audit trail (audit/) or metrics (metrics/).
+      # Those live on their own branches (harness-audit/*, harness-metrics) and
+      # must not leak into a reviewable, mergeable PR.
+      #
+      # The working tree at this point is the WIP state and holds everything the
+      # run produced, so we do NOT branch from it. Instead we cut the PR branch
+      # CLEAN from origin/<PR_BASE> and restore only src/ and docs/ from the WIP
+      # tree on top of it. Result: the PR diff is exactly the code + docs the run
+      # changed, against the branch it will merge into — nothing else.
       - name: Open pull request with the change (success only)
         id: raise_pr
         if: success()
@@ -466,19 +474,65 @@ jobs:
           BRANCH="harness/${FEATURE}/${STAMP}-${{ github.run_id }}"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          git checkout -B "$BRANCH"
+
+          # 1) Stash the code the run produced (src/ + docs/) so it survives the
+          #    branch switch. Also stash the PR body text (used by gh below); it
+          #    lives under .harness/ which we deliberately leave behind, so copy it
+          #    out first. Everything else (.harness/, audit/, metrics/) is dropped.
+          WORKTREE="$(mktemp -d)"
+          if [ -d src ]; then cp -a src "$WORKTREE/src"; fi
+          if [ -d docs ]; then cp -a docs "$WORKTREE/docs"; fi
+          if [ -f .harness/pr-body.md ]; then cp -a .harness/pr-body.md "$WORKTREE/pr-body.md"; fi
+
+          # 2) Cut the PR branch CLEAN from the base dev branch. This gives a tree
+          #    identical to PR_BASE — no run artefacts, correct merge parent.
+          git fetch origin "$PR_BASE"
+          git checkout -B "$BRANCH" "origin/$PR_BASE"
+
+          # 3) Lay the run's src/ and docs/ back on top of the clean base.
+          #    ($WORKTREE is kept until after the PR is opened — it still holds
+          #    pr-body.md, which the gh step below reads.)
+          if [ -d "$WORKTREE/src" ]; then rm -rf src && cp -a "$WORKTREE/src" src; fi
+          if [ -d "$WORKTREE/docs" ]; then rm -rf docs && cp -a "$WORKTREE/docs" docs; fi
+
+          # 4) Safety net: even if the base branch itself tracks these folders,
+          #    make sure no run workspace / audit / metrics content is staged.
+          git add -A
+          git reset -q -- .harness audit metrics 2>/dev/null || true
+          git rm -r --cached -q --ignore-unmatch .harness audit metrics 2>/dev/null || true
+
+          # 5) Nothing to commit means the run produced no code change under src/
+          #    or docs/ — do not raise an empty PR; keep WIP for inspection.
+          if git diff --cached --quiet; then
+            echo "::warning title=No code change to PR::No src/ or docs/ changes after clean-cut; PR skipped, WIP branch kept."
+            echo "pr_raised=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Harness: $FEATURE — code change (run ${{ github.run_id }})"
           git push origin "$BRANCH"
+
           # pr_raised gates the WIP cleanup below: the working branch is only safe
           # to delete once the change is preserved in an actual PR. A skipped or
           # failed PR create leaves pr_raised=false, so the WIP branch is KEPT and
           # the change is never lost.
-          if [ -f .harness/pr-body.md ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "$PR_BASE" --head "$BRANCH" \
+          PR_BODY="$WORKTREE/pr-body.md"
+          if [ -f "$PR_BODY" ]; then
+            gh pr create --title "Harness: $FEATURE" --body-file "$PR_BODY" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           else
             gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           fi
+          rm -rf "$WORKTREE"
+
+          # 6) Return the working tree to the WIP branch. This step cut a clean PR
+          #    branch (no audit/, no metrics/), but the LATER "Delete working
+          #    branch" step reads audit/*/run-summary.json from the working tree to
+          #    confirm status=done before removing the resume point. Switch back so
+          #    that folder is visible again. The audit branch was already snapshotted
+          #    before this step, so nothing is lost.
+          git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
       # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
       # The WIP branch (harness-wip/<feature>) is the resume point. It is safe to
