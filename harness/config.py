@@ -147,7 +147,7 @@ class HarnessConfig:
     #
     # NOTE on gpt-5-mini: it was previously treated as free ("included"). That is
     # WRONG under usage-based billing — it bills at $0.25/$0.025/$2.00 per 1M.
-    # Treating it as 0 materially under-reported real runs.
+    # Treating it as 0 under-reported a real run by ~2.2x (7.3 cr est vs 16 cr billed).
     model_rates: dict = field(default_factory=lambda: {
         # OpenAI
         "gpt-5-mini":        [0.25, 0.025, 2.00],
@@ -198,11 +198,11 @@ class HarnessConfig:
     #
     # The review / coverage / validation budgets are independent counters that do
     # not see each other, and every loopback resets iterations[phase] to 0. So a
-    # phase can re-enter far more often than any single cap suggests — e.g. one
-    # phase running six times (2 coverage retries + 3 validation retries + the
-    # original) while each individual counter stays inside its limit. This is the
-    # backstop that makes "it will stop" true regardless of which combination of
-    # gates is firing.
+    # phase can re-enter far more often than any single cap suggests: observed in
+    # run 31257053514, unit_testing ran SIX times (2 coverage retries + 3
+    # validation retries + the original) while each individual counter stayed
+    # inside its limit. This is the backstop that makes "it will stop" true
+    # regardless of which combination of gates is firing.
     max_phase_runs: int = 3
 
     # --- feasibility half of the context gate ---
@@ -279,26 +279,13 @@ class HarnessConfig:
     # file loads in a phase if its `applyTo` glob intersects the phase's scope.
     # applyTo "**" files are always-on guardrails (load in every phase).
     # Keyed by phase id.
-    # Stack-NEUTRAL scopes so one engine serves Java, Kotlin and (via a per-repo
-    # override) Angular. Language specificity lives in the instruction files'
-    # own applyTo frontmatter, not here. A repo whose sources are not under
-    # src/main / src/test (e.g. Angular's src/app) overrides this whole dict in
-    # its .harness/config.yaml.
-    #
-    # code_review and validation were previously ABSENT — a missing key yields an
-    # empty scope, which under selective_capability dropped every path-scoped
-    # instruction (naming, error-handling, reactive, OWASP) from those phases,
-    # leaving the reviewer only the always-on guardrails. They are now included.
     phase_file_scope: dict = field(default_factory=lambda: {
-        "context":       ["src/**"],
-        "design":        ["src/main/**"],
-        "prompt_steps":  ["src/**"],
-        "coding":        ["src/main/**"],
-        "code_review":   ["src/main/**"],
-        "unit_testing":  ["src/test/**"],
-        "validation":    ["src/main/**", "src/test/**"],
+        "context":      ["src/main/java/**", "src/main/**"],
+        "prompt_steps": ["src/main/java/**", "src/main/**"],
+        "coding":       ["src/main/java/**"],
+        "unit_testing": ["src/test/java/**"],
         "documentation": ["docs/**"],
-        "raise_pr":      [],
+        "raise_pr":     [],
     })
     # Which named skills (folder names under .github/skills) load in which phase.
     # Skills have no path scope, so this mapping is explicit.
@@ -306,10 +293,10 @@ class HarnessConfig:
         "context":      ["build-context", "analyze-service"],
         "prompt_steps": ["build-prompt-steps"],
         # analyze-service is deliberately NOT loaded here. It recursively traces
-        # downstream API calls — far heavier than a design phase needs. Loaded in
-        # design it can drive dozens of exploration tool calls and hundreds of
-        # thousands of tokens until the phase runs out of turns without ever
-        # writing design.md. build-design does its own bounded read of the code.
+        # downstream API calls — far heavier than a design phase needs, and in run
+        # 33167xxxxx it drove 24 exploration tool calls and 228K tokens until the
+        # phase ran out of turns without ever writing design.md. build-design does
+        # its own bounded read of the code.
         "design":       ["build-design"],
         "coding":       ["security-review"],
         "code_review":  ["security-review", "review-angular-code"],
@@ -323,12 +310,12 @@ class HarnessConfig:
     # if one of its stacks is in repo_stacks; a skill NOT listed here is
     # stack-neutral and always loads.
     #
-    # A stack-specific skill must be filtered by repo_stacks the same way
-    # instruction subfolders are. Without this, repo_stacks=["backend"] correctly
-    # excludes Angular INSTRUCTIONS but phase_skills is still applied verbatim, so
-    # a skill like review-angular-code — Angular naming conventions, RxJS, NgRx —
-    # loads to review a Java WebFlux service. An Angular code-quality rubric
-    # pointed at reactive Java is a standing invitation to nitpick style.
+    # Why (run 31252416919): repo_stacks=["backend"] correctly excluded Angular
+    # INSTRUCTIONS, but phase_skills was applied verbatim, so review-angular-code
+    # — a skill about Angular naming conventions, RxJS and NgRx — was loaded to
+    # review a Java WebFlux service. An Angular code-quality rubric pointed at
+    # reactive Java is a standing invitation to nitpick style, which is what the
+    # reviewer then did.
     skill_stacks: dict = field(default_factory=lambda: {
         "review-angular-code": ["angular-frontend", "ionic", "frontend"],
     })
@@ -365,6 +352,37 @@ class HarnessConfig:
         "**/generated/**",       # generated sources
         "**/*MapperImpl.java",   # MapStruct-generated mapper impls
     ])
+
+    # --- audit branch retention (compliance policy — the SERVICE repo owns this) ---
+    # The immutable per-run audit branch (harness-audit/<feature>/<stamp>-<outcome>-<run_id>)
+    # is written on every run, success OR halt. Whether it is RETAINED afterwards is
+    # a compliance decision, not an engine decision — so it lives here in the service
+    # repo's .harness/config.yaml, where the team that owns the repo (and its
+    # retention obligations) sets it.
+    #   True  (default) -> keep the audit branch. The safe default: for a healthcare
+    #                      client the full run trail should persist unless someone
+    #                      with retention authority chooses otherwise.
+    #   False           -> the workflow deletes the audit branch after pushing it,
+    #                      for repos where the run trail is captured elsewhere and
+    #                      per-run branches are unwanted clutter.
+    # The engine only records this value into run-summary.json; the workflow acts on
+    # it. Deleting is never the engine's job (the engine never mutates remote refs).
+    retain_audit_branch: bool = True
+
+    # --- per-phase credit settle wait (seconds) ---
+    # The metrics layer reads GitHub's AI-credit counter before and after each
+    # phase to estimate that phase's cost. That counter LAGS the requests that
+    # produced it, so this is how long to wait after a phase finishes before
+    # taking the "after" reading.
+    #   > 0  -> wait this many seconds, then read (more accurate; the counter has
+    #           had time to settle). Default 30.
+    #   0    -> read IMMEDIATELY, no wait. Faster runs, but the per-phase figure is
+    #           rough — the counter may not have caught up. Per-phase MODEL is still
+    #           recorded either way; only the credit accuracy is affected.
+    # Runtime cost note: a non-zero value is paid on EVERY phase attempt (loopbacks
+    # too), so 30s across nine phases adds ~4.5 min of pure waiting. Lower it, or
+    # set 0, on repos where fast runs matter more than per-phase credit precision.
+    credit_settle_seconds: int = 30
 
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
@@ -420,6 +438,8 @@ class HarnessConfig:
             write_exclude=(data.get("write_exclude")
                            if data.get("write_exclude") is not None
                            else cls().write_exclude),
+            retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
+            credit_settle_seconds=int(data.get("credit_settle_seconds", cls.credit_settle_seconds)),
         )
 
         # --- coverage threshold units normalization ---
@@ -459,10 +479,10 @@ class HarnessConfig:
 
         Repo-LEVEL artefacts are NOT prefixed. `docs/**` belongs to the repository,
         not to one Maven module — an aggregator repo has a single docs/ tree at the
-        root describing the whole service. Prefixing it would send the documentation
-        phase looking for <module>/docs/**, so a correct write to docs/<story>.md
-        gets denied as a boundary violation. The same reasoning already keeps
-        .harness/** and .github/** at the root.
+        root describing the whole service. Prefixing it sent the documentation phase
+        looking for <module>/docs/**, so the agent's correct write to docs/<story>.md
+        was denied as a boundary violation (observed run 31238791178). The same
+        reasoning already keeps .harness/** and .github/** at the root.
 
         Single-module repos (target_module empty) are unchanged — petclinic still works.
         """
@@ -651,18 +671,21 @@ class HarnessConfig:
 
         # CACHE-WRITE: reported by the SDK, but deliberately NOT priced.
         #
-        # GitHub publishes a separate cache-write rate for Anthropic models, so
-        # charging it looks correct on paper. Measured against real billing it is
-        # not: totals reconcile closely when cache-write is excluded and run well
-        # over actual when it is included. The most likely explanation is that the
-        # SDK's
+        # GitHub publishes a separate cache-write rate for Anthropic models
+        # ($1.25/1M for Haiku 4.5), so charging it looked correct on paper. It is
+        # not, measured against real billing:
+        #     run 29174592092 (16 cr billed): excl. cache-write -> 14.5 cr  (91%)
+        #     run 29181773991 (27 cr billed): excl. cache-write -> 25.3 cr  (94%)
+        #                                     incl. cache-write -> 36.8 cr (136%)
+        # Two runs, both accurate when cache-write is excluded, both badly over
+        # when it is included. The most likely explanation is that the SDK's
         # cache_write counter is not the billable class GitHub's rate refers to
         # (or those tokens are already inside `input`). Either way: measurement
         # beats inference. We report the count and do not charge for it.
         cw_rate = (self.cache_write_rates or {}).get(model)
         _ = (cw_rate, cache_write_tokens)  # intentionally unused — see above
 
-        # The estimate now runs slightly UNDER actual, so it is a lower
+        # The estimate now runs slightly UNDER actual (~91-94%), so it is a lower
         # bound rather than an upper one.
         partial = False
 

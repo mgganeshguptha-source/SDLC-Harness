@@ -96,7 +96,7 @@ def _get(url: str, token: str):
     req.add_header("Accept", "application/vnd.github+json")
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("X-GitHub-Api-Version", _API_VERSION)
-    req.add_header("User-Agent", "SDLC-Harness")
+    req.add_header("User-Agent", "harness-engine")
     with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
         return json.loads(r.read().decode("utf-8"))
 

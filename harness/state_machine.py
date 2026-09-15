@@ -50,6 +50,35 @@ _HALTING = {
 }
 
 
+def _read_phase_credits(when: str, phase_id: str, settle: int, log=print):
+    """Read the account's AI-credit counter around a single phase attempt.
+
+    `when` is "before" or "after" (only the "after" read waits). `settle` is the
+    wait in seconds, from the service repo's config.yaml (credit_settle_seconds):
+        > 0  -> wait `settle` seconds before the "after" read, so GitHub's
+                account-level counter (which LAGS the requests that produced it)
+                has time to catch up — a more accurate per-phase figure.
+        0    -> read IMMEDIATELY, no wait. The figure is rough (the counter may
+                not have moved yet) but the run is faster. Per-phase MODEL is
+                recorded regardless; only credit accuracy is affected.
+
+    Returns a float (credits consumed this billing month) or None when the counter
+    is unreadable (org-billed seats, missing token permission). NEVER raises: a
+    billing read must never be the reason a phase fails.
+    """
+    try:
+        if when == "after" and settle > 0:
+            log(f"  [credits] phase '{phase_id}': waiting {settle}s for the "
+                f"billing counter to settle")
+            time.sleep(settle)
+        from ai_credits import read_credits_used
+        return read_credits_used(log=log)
+    except Exception as e:
+        log(f"  [credits] phase '{phase_id}' {when}-read failed "
+            f"({e.__class__.__name__}) — recording None")
+        return None
+
+
 # Maven paths/goals that identify a failure as belonging to TEST sources.
 _TEST_PATH = re.compile(r"[/\\]src[/\\]test[/\\]", re.IGNORECASE)
 _TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
@@ -114,9 +143,10 @@ def _failure_is_in_tests(output: str) -> bool:
     # ---- signatures that are unambiguously the TEST's own fault ----
     # A failing assertion usually means production is wrong, but some runtime
     # failures can only come from the test itself, and routing those to 'coding'
-    # sends work to a phase that may not write test files at all. For example: an
-    # unstubbed mock returns null, the NPE is classified main-side, and 'coding'
-    # is asked to fix a defect in a test it is forbidden from touching.
+    # sends work to a phase that may not write test files at all. Observed in run
+    # 33199xxxxx: an unstubbed mock returned null, the NPE was classified
+    # main-side, and 'coding' was asked twice to fix a defect in a test it is
+    # forbidden from touching.
     low = text.lower()
     test_only = (
         # Mockito misuse: unnecessary stubbing, wrong argument matchers, etc.
@@ -183,10 +213,10 @@ class StateMachine:
         # so it holds no matter which gate caused the re-entry. The review,
         # coverage and validation budgets are separate counters that cannot see
         # each other, and each loopback resets iterations[phase] to 0 — so without
-        # this a phase can run far more often than any one cap implies (e.g. a
-        # phase running 6x while every individual counter stays within limits,
-        # burning time and the credit budget on a failure the agent could not
-        # diagnose).
+        # this a phase can run far more often than any one cap implies
+        # (run 31257053514: unit_testing ran 6x while every individual counter
+        # stayed within limits, burning ~15 minutes and the credit budget on a
+        # failure the agent could not diagnose).
         #
         # Stored under a namespaced key in the existing iterations dict because
         # that dict already persists across saves; the "__runs__:" prefix cannot
@@ -318,8 +348,49 @@ class StateMachine:
         # small epsilon to tolerate coarse filesystem mtime granularity.
         _phase_started = time.time() - 1.0
 
+        # Per-phase credit attribution. Read the billing counter immediately
+        # before the phase and (after a settle-wait) immediately after, so the
+        # delta is this phase attempt's estimated cost. Loopbacks re-enter here and
+        # append another entry — one per attempt. Both reads tolerate an
+        # unreadable counter (org-billed seats) by recording None; the run-level
+        # credits_actual delta remains the authoritative figure. The settle wait is
+        # the service repo's credit_settle_seconds (0 => read immediately, no wait).
+        try:
+            from config import HarnessConfig as _HCc
+            _settle = int(getattr(_HCc.load(self.harness_dir), "credit_settle_seconds", 30))
+        except Exception:
+            _settle = 30
+        _credits_before = _read_phase_credits("before", phase.id, _settle, self.log)
+
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        _credits_after = _read_phase_credits("after", phase.id, _settle, self.log)
+        _phase_credits = None
+        if _credits_before is not None and _credits_after is not None:
+            _delta = round(_credits_after - _credits_before, 4)
+            # A zero/zero pair means the counter read as 0 both times (no usage
+            # visible) — record 0.0 only if it actually moved; otherwise None so a
+            # blank counter is not mistaken for a free phase.
+            _phase_credits = _delta if not (_credits_before == 0 and _credits_after == 0) else None
+        # The model for this attempt is the tail of phase_model_log (sdk_runner
+        # appended it before the SDK call). Fall back to None for a fake/no-SDK run.
+        try:
+            _phase_model = (run.phase_model_log[-1].get("model")
+                            if run.phase_model_log else None)
+        except Exception:
+            _phase_model = None
+        try:
+            run.phase_credit_log.append({
+                "phase": phase.id,
+                "model": _phase_model,
+                "credits": _phase_credits,
+                "before": _credits_before,
+                "after": _credits_after,
+                "is_estimate": True,
+            })
+        except Exception:
+            pass
 
         # Accumulate, don't overwrite: a phase re-entered by a loopback should
         # report the total time it consumed across the run, not just the last go.
@@ -643,9 +714,9 @@ class StateMachine:
 
                 # STALE VERDICT => the reviewer produced NOTHING this attempt and
                 # the file on disk is a leftover. Looping back would re-feed an
-                # already-fixed issue and burn the retry cap for nothing. This is a
-                # harness/permission fault, so halt at once and name it — do NOT
-                # spend a retry.
+                # already-fixed issue and burn the retry cap for nothing (exactly
+                # what happened in run 29181773991). This is a harness/permission
+                # fault, so halt at once and name it — do NOT spend a retry.
                 if rv.stale:
                     self.log("  ! CODE REVIEW GATE: STALE VERDICT — review.md was not "
                              "written during this attempt.")
@@ -745,6 +816,32 @@ class StateMachine:
                     kind = getattr(vr, "failure_kind", None) or "test"
 
                     # ============================================================
+                    # ENVIRONMENT FAILURE: the build could not run at all (e.g.
+                    # ./mvnw not executable, not found, JVM launch failed). This is
+                    # OUR PLUMBING, not the work — no coding or unit_testing phase
+                    # can fix it, so halt immediately with CONFIG_ERROR instead of
+                    # looping model phases against an unfixable error (which would
+                    # burn the retry budget and real credits for nothing).
+                    # ============================================================
+                    if kind == "environment":
+                        from halt_gates import CONFIG_ERROR
+                        run.status = "halted"
+                        run.halt_gate = CONFIG_ERROR
+                        run.halt_detail = f"environment: {vr.summary}"
+                        self.log("")
+                        self.log("  ================ ENVIRONMENT FAILURE: HALTED ================")
+                        self.log("  The build tooling could not run the tests — this is an")
+                        self.log("  environment problem, not a code problem. No phase can fix it.")
+                        self.log(f"  Detail : {vr.summary}")
+                        self.log("  Likely : the Maven wrapper is not executable or not found.")
+                        self.log("           On the branch, run:")
+                        self.log("             git update-index --chmod=+x mvnw")
+                        self.log("             git commit -m 'make mvnw executable' && git push")
+                        self.log("           then re-run the harness (resume or fresh).")
+                        self.log("  ============================================================")
+                        return
+
+                    # ============================================================
                     # COVERAGE MISS: tests pass but per-change coverage < target.
                     # Loop back to unit_testing to ADD TESTS (never touch source),
                     # on a SEPARATE retry budget. On exhaustion, halt with a
@@ -755,12 +852,12 @@ class StateMachine:
                         # If the coding phase produced no production changes there is
                         # nothing for the coverage gate to measure, and looping back
                         # to unit_testing "to add tests" cannot possibly succeed —
-                        # there is no changed class to cover. For example: the story
-                        # is already implemented in the repo, the coding agent makes
-                        # zero write requests, and the harness still loops and burns
-                        # credits before halting with a message about coverage
-                        # thresholds that sends the operator looking at JaCoCo
-                        # rather than at the story.
+                        # there is no changed class to cover. Observed in run
+                        # 33164146030: the story was already implemented in the repo,
+                        # the coding agent made zero write requests, and the harness
+                        # still looped twice and burned ~15 credits before halting
+                        # with a message about coverage thresholds that sent the
+                        # operator looking at JaCoCo rather than at the story.
                         #
                         # Halt immediately with the actual cause.
                         _changed = getattr(run, "changed_main_files", None) or []
@@ -878,12 +975,13 @@ class StateMachine:
                     # said "Do not edit tests". That is correct when production code
                     # is at fault, and actively harmful when the TEST is the thing
                     # that will not compile: 'coding' may only write src/main, so it
-                    # structurally CANNOT fix a broken test. For example: a reactive
-                    # WebClient mock in a unit test fails to compile on Mockito
-                    # generic wildcards; routing it to 'coding' repeatedly makes that
-                    # phase flail at production code — even inventing a duplicate
-                    # controller in the wrong package — then halt with the retry
-                    # budget spent and the actual defect untouched.
+                    # structurally CANNOT fix a broken test. Observed in run
+                    # 31253969777 — a reactive WebClient mock in
+                    # CatalogClientImplUnitTest failed to compile on Mockito generic
+                    # wildcards; the harness sent it to 'coding' three times, which
+                    # flailed at production code and even invented a duplicate
+                    # BookController in the wrong package, then halted with the
+                    # retry budget spent and the actual defect untouched.
                     # ============================================================
                     run.validation_attempts += 1
                     test_side = _failure_is_in_tests(vr.output_tail)

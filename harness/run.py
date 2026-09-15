@@ -120,12 +120,27 @@ def cmd_autorun(args):
     if credits_before is not None:
         # GitHub's billing counter lags the requests that produced it. Reading it
         # the instant the last phase returns catches a figure that is still
-        # settling, so the delta UNDER-reports — the figure read immediately can
-        # fall well short of the settled billing-page total.
+        # settling, so the delta UNDER-reports: measured on run 33167xxxxx, the
+        # harness reported 28.12 while the settled page figure moved by ~37.
         # A short pause recovers most of that. It is not a guarantee — the delta
         # is labelled a lower bound in the report for the same reason.
-        _LAG_WAIT = int(os.environ.get("HARNESS_CREDIT_SETTLE_SECONDS", "45"))
-        if _LAG_WAIT > 0:
+        #
+        # When per-phase credit reads ran (phase_credit_log populated), the
+        # counter was already read + settled after the FINAL phase, so this
+        # run-level pause would just wait a second time for nothing. Skip it and
+        # read straight through. Otherwise honour the service repo's
+        # credit_settle_seconds (0 => read immediately).
+        _per_phase_ran = bool(getattr(run, "phase_credit_log", None))
+        try:
+            from config import HarnessConfig as _HCw
+            _LAG_WAIT = int(getattr(_HCw.load(_harness_dir(repo)),
+                                    "credit_settle_seconds", 30))
+        except Exception:
+            _LAG_WAIT = 30
+        if _per_phase_ran:
+            print("  [credits] per-phase reads already settled the counter — "
+                  "skipping the run-level wait")
+        elif _LAG_WAIT > 0:
             print(f"  [credits] waiting {_LAG_WAIT}s for the billing counter to settle")
             time.sleep(_LAG_WAIT)
         try:
@@ -261,6 +276,17 @@ def cmd_collect_audit(args):
     hd = _harness_dir(repo)
     ctx_dir = repo / ".github" / "story-context-files"
 
+    # Audit-branch retention is a compliance policy the SERVICE repo owns
+    # (.harness/config.yaml). The engine does not act on it — it only records the
+    # resolved value here so the workflow, which owns remote refs, can honour it.
+    # Load defensively: a missing/broken config must never break audit collection,
+    # so fall back to the safe default (retain).
+    try:
+        from config import HarnessConfig
+        retain_audit_branch = HarnessConfig.load(hd, repo_root=repo).retain_audit_branch
+    except Exception:
+        retain_audit_branch = True
+
     copied = []
     # newest context file (the agent may write a timestamped name)
     if ctx_dir.is_dir():
@@ -280,6 +306,9 @@ def cmd_collect_audit(args):
         "feature": feature,
         "run_id": run_id,
         "status": run.status,
+        # Compliance policy from the service repo's .harness/config.yaml. The
+        # workflow reads this to decide whether to keep the per-run audit branch.
+        "retain_audit_branch": retain_audit_branch,
         "completed_phases": run.completed_phases,
         "total_tokens": run.total_tokens,
         "phase_token_log": run.phase_token_log,
@@ -330,6 +359,30 @@ def _report(run: RunState):
             model = f"[{e.get('model','')}]"
             print(f"    {e['phase']:<14}{model:<22} "
                   f"{e['phase_tokens']:>7} tok")
+
+    # Per-phase CREDIT breakdown (estimate). One row per phase attempt, so a
+    # loopback shows as a repeated phase — that is deliberate: it reveals which
+    # re-entry burned credits. Credits are the account-level counter delta around
+    # each phase, valid only if nothing else ran on the account during it, hence
+    # "est". A blank cell means the counter was unreadable (org-billed seats).
+    _pcl = getattr(run, "phase_credit_log", None) or []
+    if _pcl:
+        print("\n  credits by phase (estimate — account-level counter):")
+        _sum = 0.0
+        _any = False
+        for e in _pcl:
+            _c = e.get("credits")
+            _model = f"[{e.get('model') or ''}]"
+            if _c is None:
+                print(f"    {e['phase']:<14}{_model:<22}      -- cr")
+            else:
+                _sum += _c
+                _any = True
+                print(f"    {e['phase']:<14}{_model:<22} {_c:>7.2f} cr")
+        if _any:
+            print(f"    {'(sum est.)':<14}{'':<22} {_sum:>7.2f} cr")
+        print("    note: per-phase figures are estimates; the authoritative total "
+              "is the run-level actual-credits delta below.")
 
     # Aggregate token counts. Cost is NOT derived from these — the billed figure
     # comes from GitHub's billing API delta printed below.

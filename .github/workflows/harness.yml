@@ -42,6 +42,15 @@ on:
         description: "Story / feature id to run"
         required: true
         type: string
+      base:
+        description: >-
+          Development branch to run against and open the PR into (e.g. PM_Sep,
+          VoC_Oct). The story file and existing code are read from this branch,
+          and the harness PR targets it. Blank uses the repository's default
+          branch.
+        required: false
+        default: ""
+        type: string
       java-version:
         required: false
         default: "17"
@@ -113,7 +122,7 @@ jobs:
         with:
           path: service
           fetch-depth: 0
-          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || github.ref }}
+          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || (inputs.base != '' && inputs.base) || github.ref }}
 
       - name: Verify resume state
         if: inputs.resume
@@ -131,10 +140,8 @@ jobs:
           python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
 
       # --- 2. THIS engine repo -> ./engine ---
-      # No token needed when the engine repo is readable by the runner's default
-      # credentials — a public repo, or a private repo in the same organisation
-      # with Actions access granted. If the checkout fails, that access is the
-      # first thing to check.
+      # No token: SDLC-Harness is public, and a public repo is readable by the
+      # runner's default credentials. If it is ever made private, every caller will
       # need a token that can read it — see the note in step 2b.
       - name: Checkout SDLC-Harness
         uses: actions/checkout@v4
@@ -165,11 +172,10 @@ jobs:
           echo "Engine OK: ${{ inputs.engine_repo }}@${{ inputs.engine_ref }}"
 
       # --- 3. the central toolkit -> ./toolkit (skills + instructions) ---
-      # ACCESS: the toolkit repo must be readable by this run. In an organisation
-      # that means granting the token (or the workflow) read access to it —
-      # normal org repository access. The token is passed explicitly rather than
-      # relying on default credentials, so a private toolkit works without
-      # making it public.
+      # NOTE ON ACCESS: while YOUR-TOOLKIT-REPO is PRIVATE, the caller's token must be
+      # able to read it. A fine-grained PAT can only be scoped to repositories owned
+      # by the token's own resource owner, so a joiner's personal PAT CANNOT read a
+      # private repo under a different account — even if they are a collaborator.
       # Workable options: make YOUR-TOOLKIT-REPO public, or host both repos in an org
       # where members' tokens can be granted access (the BCBSM case).
       - name: Checkout YOUR-TOOLKIT-REPO
@@ -323,6 +329,12 @@ jobs:
           # so nothing the agent wrote is lost.
           git checkout -B "$WIP_BRANCH"
           git add -A 2>/dev/null || true
+          # The service repo's .gitignore deliberately excludes the run workspace
+          # (.harness/run-state.json, .harness/blocked.md) so it never pollutes
+          # normal dev branches. But the WIP branch is the resume point and MUST
+          # carry that state, or `resume=true` fails with "no run-state.json".
+          # Force-add them here so they land on the WIP branch only.
+          git add -f .harness/run-state.json .harness/blocked.md 2>/dev/null || true
           STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
           if git diff --cached --quiet; then
             echo "Nothing new to commit on $WIP_BRANCH."
@@ -420,18 +432,34 @@ jobs:
           AUDIT_BRANCH="harness-audit/${FEATURE}/${STAMP}-${OUTCOME}-${{ github.run_id }}"
           git checkout -B "$AUDIT_BRANCH"
           git push origin "$AUDIT_BRANCH"
-          echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
+          # Retention is a compliance decision the SERVICE repo owns, set in
+          # .harness/config.yaml and recorded by the engine into run-summary.json.
+          # Default (or any parse failure) is RETAIN — for a healthcare client the
+          # run trail should persist unless someone with retention authority opts
+          # out. The branch is always PUSHED first, then deleted only on an explicit
+          # opt-out, so the audit snapshot exists even if the delete step is reached.
+          RETAIN=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(str(json.load(open(f[-1])).get('retain_audit_branch', True)).lower() if f else 'true')" 2>/dev/null || echo true)
+          if [ "$RETAIN" = "false" ]; then
+            git push origin --delete "$AUDIT_BRANCH" || echo "Audit branch delete skipped."
+            echo "::notice title=Audit branch not retained::retain_audit_branch=false in .harness/config.yaml — $AUDIT_BRANCH pushed then deleted (status=$STATUS)."
+          else
+            echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
+          fi
 
       # --- 9. raise the code PR — ONLY on success ---
       # Branches from the working branch, which by now holds everything the run
       # produced. Run-scoped so each successful run gets its own reviewable PR.
       - name: Open pull request with the change (success only)
+        id: raise_pr
         if: success()
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           FEATURE="${{ inputs.feature_id }}"
+          # PR targets the base dev branch the run was launched against (e.g.
+          # PM_Sep), falling back to the triggering branch when base is blank.
+          PR_BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
           # Same scheme as the audit branch. No outcome segment — this branch only
           # exists on success.
           STAMP=$(date -u +%Y%m%d-%H%M)
@@ -440,11 +468,45 @@ jobs:
           git config user.email "harness-bot@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git push origin "$BRANCH"
+          # pr_raised gates the WIP cleanup below: the working branch is only safe
+          # to delete once the change is preserved in an actual PR. A skipped or
+          # failed PR create leaves pr_raised=false, so the WIP branch is KEPT and
+          # the change is never lost.
           if [ -f .harness/pr-body.md ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "${{ github.ref_name }}" --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body-file .harness/pr-body.md --base "$PR_BASE" --head "$BRANCH" \
+              && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           else
-            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "${{ github.ref_name }}" --head "$BRANCH" || echo "PR create skipped"
+            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" \
+              && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           fi
+
+      # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
+      # The WIP branch (harness-wip/<feature>) is the resume point. It is safe to
+      # remove exactly when the run FINISHED (status=done) AND the change was
+      # captured in a PR — at that point there is nothing left to resume and the
+      # code lives on the PR branch. On a halt, needs_input, or a success where the
+      # PR step was skipped/failed, the branch is KEPT so the run can still be
+      # resumed or recovered. Never fails the job — a failed cleanup is cosmetic.
+      - name: Delete working branch (clean success only)
+        if: success() && steps.raise_pr.outputs.pr_raised == 'true'
+        working-directory: service
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          WIP_BRANCH="harness-wip/${FEATURE}"
+          # Confirm the engine's own view of the run is 'done' before deleting the
+          # resume point. run-summary.json is the machine-readable outcome the audit
+          # step already relies on; if it is missing or not 'done', keep the branch.
+          STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
+          if [ "$STATUS" != "done" ]; then
+            echo "::notice title=Working branch kept::status=$STATUS (not done) — $WIP_BRANCH retained for resume."
+            exit 0
+          fi
+          git push origin --delete "$WIP_BRANCH" \
+            && echo "::notice title=Working branch cleaned up::$WIP_BRANCH deleted (run done + PR raised)." \
+            || echo "::notice title=Working branch delete skipped::$WIP_BRANCH (already gone or protected)."
 
       # --- 10. tell the human how to continue when the run halted ---
       - name: Explain how to resume (halt only)

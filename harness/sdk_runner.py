@@ -1122,6 +1122,15 @@ class SdkAgentRunner:
         _cfg = _HC.load(repo_root / ".harness")
         phase_model = (_cfg.model_for_phase(phase.id) if _cfg else None) or self.model
         self.log(f"  [model] phase '{phase.id}' -> {phase_model}")
+        # Record the model for THIS attempt before the SDK runs, so a phase that
+        # errors mid-call still leaves a record of which model it tried. Loopbacks
+        # re-enter this method and append a fresh entry (one per attempt). The
+        # state_machine's credit reader reads the tail of this log to attribute a
+        # credit delta to the right model.
+        try:
+            run.phase_model_log.append({"phase": phase.id, "model": phase_model})
+        except Exception:
+            pass
         if phase.id == "code_review" and _cfg and _cfg.review_model_conflict():
             self.log("  [warn] reviewer model == coding model — review independence is "
                      "reduced; set review_model to a different model for a true "
@@ -1239,6 +1248,38 @@ class SdkAgentRunner:
 
                 if last_message["text"]:
                     self.log("  [agent] " + last_message["text"][:500])
+
+                # ---- ARTIFACT FALLBACK (push-mode reviewers/validators) ----
+                # In push mode the reviewer has everything inline and often emits
+                # the verdict as its CHAT MESSAGE without ever calling the write
+                # tool — so .harness/review.md is missing even though the review
+                # actually ran and PASSED. Rather than halt on ARTIFACT_MISSING or
+                # loop until the retry cap, capture the verdict from the message
+                # and write the artifact ourselves. Only do this when: the phase
+                # declares a required_artifact, that file does NOT already exist
+                # from this attempt (the model's own write wins if present), and
+                # the message actually carries a VERDICT line.
+                try:
+                    req_art = getattr(phase, "required_artifact", None)
+                    msg_text = last_message.get("text") or ""
+                    if req_art and msg_text:
+                        art_path = repo_root / req_art
+                        already_written = art_path in [
+                            (repo_root / p) if not Path(p).is_absolute() else Path(p)
+                            for p in attempted_writes
+                        ] or art_path.exists()
+                        has_verdict = re.search(r"^\s*\**VERDICT:\s*\w",
+                                                msg_text, re.MULTILINE) is not None
+                        if has_verdict and not art_path.exists():
+                            art_path.parent.mkdir(parents=True, exist_ok=True)
+                            art_path.write_text(msg_text.strip() + "\n",
+                                                encoding="utf-8")
+                            self.log(f"  [artifact-fallback] {req_art} was not "
+                                     f"written by the agent; captured the VERDICT "
+                                     f"from the agent message and wrote it "
+                                     f"({len(msg_text)} chars).")
+                except Exception as _e:
+                    self.log(f"  [artifact-fallback] skipped ({type(_e).__name__}: {_e})")
 
                 # report token usage for this phase
                 total = usage["input"] + usage["output"]
