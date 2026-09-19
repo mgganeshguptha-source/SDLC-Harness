@@ -40,6 +40,37 @@ from boundaries import is_write_allowed, deny_reason
 DEFAULT_MODEL = "gpt-4.1"
 
 
+# GitHub credential prefixes, and whether Copilot accepts that kind for MODEL
+# calls. Repo access and model access are different questions: a classic PAT is
+# a fine repo token and is rejected outright by the Copilot model endpoint, so
+# an install can have a working checkout and a dead model call. Naming the kind
+# in the log is what makes that five-second obvious instead of a 400 to decode.
+_TOKEN_KINDS = {
+    "gho_":        ("OAuth login token (gho_)", True),
+    "ghu_":        ("GitHub App user token (ghu_)", True),
+    "ghs_":        ("GitHub Actions / App installation token (ghs_)", True),
+    "github_pat_": ("fine-grained PAT (github_pat_)", True),
+    "ghp_":        ("CLASSIC PAT (ghp_) — NOT supported by Copilot", False),
+    "ghr_":        ("refresh token (ghr_) — not a usable credential", False),
+}
+
+
+def _describe_token(token: str | None) -> tuple[str, bool]:
+    """Name the KIND of credential, and say whether Copilot accepts it.
+
+    Never returns, logs or echoes the credential itself — only its prefix class.
+    An unrecognised prefix is reported as unknown and treated as supported, so a
+    token type newer than this table is not blocked by a stale assumption; the
+    real endpoint stays the authority.
+    """
+    if not token:
+        return "none (will fall back to a logged-in Copilot CLI)", True
+    for prefix, (label, supported) in _TOKEN_KINDS.items():
+        if token.startswith(prefix):
+            return label, supported
+    return "unrecognised token type", True
+
+
 def _parse_frontmatter_applyto(text: str) -> str | None:
     """Extract the applyTo value from an instruction file's YAML frontmatter.
     Returns the raw glob string (may be comma-separated), or None if absent."""
@@ -1136,20 +1167,67 @@ class SdkAgentRunner:
                      "reduced; set review_model to a different model for a true "
                      "independent review.")
 
-        # working_directory scopes the agent to the petclinic repo so writes match
-        # our globs. use_logged_in_user=True rides on your authed Copilot CLI (Pro).
-        # Auth: pass the token EXPLICITLY to the client (the reliable path).
-        # Env-var auto-detection doesn't always propagate to the spawned CLI
-        # subprocess in CI, so we read it here and hand it to CopilotClient via
-        # github_token=. When a token is present, the SDK sets use_logged_in_user
-        # to False automatically. Locally (no token), fall back to logged-in user.
-        ci_token = (os.environ.get("COPILOT_GITHUB_TOKEN")
-                    or os.environ.get("GH_TOKEN")
-                    or os.environ.get("GITHUB_TOKEN"))
+        # working_directory scopes the agent to the service repo so writes match
+        # our globs. use_logged_in_user=True rides on an authed Copilot CLI login.
+        #
+        # AUTH — TWO DIFFERENT CREDENTIALS, DELIBERATELY SEPARATED.
+        # The harness needs two things that are NOT interchangeable:
+        #   1. repo access (checkout of engine/toolkit, git push, gh pr create,
+        #      and the billing API in ai_credits.py) -> COPILOT_GITHUB_TOKEN,
+        #      which in most installs is a PAT.
+        #   2. Copilot MODEL calls (this call) -> a credential Copilot accepts.
+        # Copilot does NOT accept every token type. Per GitHub's documentation the
+        # supported kinds are an OAuth device-flow token (gho_), a GitHub App
+        # user-to-server token (ghu_), a fine-grained PAT (github_pat_) carrying
+        # the "Copilot Requests" permission, and, inside GitHub Actions, the
+        # built-in Actions token (ghs_) when the workflow grants
+        # `copilot-requests: write`. A CLASSIC PAT (ghp_) is NOT supported and the
+        # model endpoint rejects it with:
+        #   400 "checking third-party user token: bad request:
+        #        Personal Access Tokens are not supported for this endpoint"
+        # A classic PAT is a perfectly good repo token, so an install can easily
+        # end up with a working checkout and a dead model call. That is why the
+        # model credential is read from its OWN variable first and reported below.
+        #
+        # COPILOT_MODEL_TOKEN is the model credential. It is read ahead of
+        # COPILOT_GITHUB_TOKEN so a repo PAT can never silently become the model
+        # credential. The remaining names are the fallback chain for local use and
+        # for installs that have not split the two yet.
+        model_token = (os.environ.get("COPILOT_MODEL_TOKEN")
+                       or os.environ.get("COPILOT_GITHUB_TOKEN")
+                       or os.environ.get("GH_TOKEN")
+                       or os.environ.get("GITHUB_TOKEN"))
+
+        # Report WHICH KIND of credential is in play — never the credential.
+        # One line here turns "the phase failed" into "the wrong token type".
+        kind, supported = _describe_token(model_token)
+        self.log(f"  [auth] copilot credential: {kind}")
+        if model_token and not supported:
+            self.log("  [auth] WARNING: this token type is not accepted for Copilot "
+                     "model calls. Expect a 400 'Personal Access Tokens are not "
+                     "supported for this endpoint'. Supply a supported credential "
+                     "via COPILOT_MODEL_TOKEN: an OAuth login token (gho_), a "
+                     "GitHub App user token (ghu_), a fine-grained PAT with the "
+                     "Copilot Requests permission (github_pat_), or, in Actions, "
+                     "the built-in token with `copilot-requests: write`.")
 
         client_kwargs = {"working_directory": str(repo_root)}
-        if ci_token:
-            client_kwargs["github_token"] = ci_token
+        if model_token:
+            # The SDK spawns the Copilot CLI as a subprocess, and that subprocess
+            # reads COPILOT_GITHUB_TOKEN / GH_TOKEN / GITHUB_TOKEN from the
+            # environment on its own. If the environment still advertises the REPO
+            # token while we hand the client the MODEL token, the two disagree and
+            # which one wins is not something to leave to chance. Align them: the
+            # model credential is the only one this subprocess should ever see.
+            os.environ["COPILOT_GITHUB_TOKEN"] = model_token
+
+            # Default is to pass the token EXPLICITLY — env-var auto-detection has
+            # not always propagated to the spawned CLI in CI. Set
+            # COPILOT_SDK_TOKEN_MODE=env to rely on the environment instead, which
+            # is the documented shape for the Actions token and the required shape
+            # for a GitHub App installation token. No code change needed to switch.
+            if os.environ.get("COPILOT_SDK_TOKEN_MODE", "explicit").strip().lower() != "env":
+                client_kwargs["github_token"] = model_token
         else:
             client_kwargs["use_logged_in_user"] = True
 

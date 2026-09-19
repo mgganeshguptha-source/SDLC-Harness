@@ -84,7 +84,15 @@ _CREDIT_UNITS = {"ai-credits", "credits"}
 
 
 def _token() -> str | None:
-    for var in ("COPILOT_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+    # HARNESS_REPO_TOKEN first. The harness uses TWO credentials: a repo token
+    # (this one — it carries Plan: Read, which the billing API needs) and a
+    # Copilot model credential. sdk_runner points COPILOT_GITHUB_TOKEN at the
+    # MODEL credential inside the running process, because the Copilot CLI
+    # subprocess reads that variable itself. Reading COPILOT_GITHUB_TOKEN first
+    # here would therefore hand the billing API a token that has no billing
+    # permission at all, and credit reporting would report nothing for a reason
+    # that looks like a billing problem rather than a token mix-up.
+    for var in ("HARNESS_REPO_TOKEN", "COPILOT_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
         val = os.environ.get(var)
         if val:
             return val
