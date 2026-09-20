@@ -529,19 +529,52 @@ jobs:
           git fetch origin "$PR_BASE"
           git checkout -B "$BRANCH" "origin/$PR_BASE"
 
-          # 3) Lay the run's src/ and docs/ back on top of the clean base.
+          # 3) Drop the run's leftovers BEFORE anything is staged.
+          #    `git checkout -B` moves the ref and restores TRACKED files, but it
+          #    leaves UNTRACKED files where they are — so the run's .harness/
+          #    workspace, audit/ and metrics/ are all still sitting in the working
+          #    directory. `git clean -fdx` on those three paths removes untracked
+          #    and ignored files only; anything the base branch TRACKS there is
+          #    left untouched. `git checkout --` then restores any tracked file
+          #    under them that the run had modified, so those paths end up exactly
+          #    as PR_BASE has them.
+          #
+          #    This replaces an earlier `git rm -r --cached .harness audit metrics`,
+          #    which had a real bug: .harness/config.yaml is TRACKED on the base
+          #    branch (the service repo owns it), so removing it from the index
+          #    made the PR delete the repo's own harness config. Cleaning untracked
+          #    files is the correct instrument here; un-staging tracked ones is not.
+          for p in .harness audit metrics; do
+            [ -e "$p" ] && git clean -fdxq -- "$p" 2>/dev/null || true
+            git checkout -q -- "$p" 2>/dev/null || true
+          done
+
+          # 4) Lay the run's src/ and docs/ back on top of the clean base.
           #    ($WORKTREE is kept until after the PR is opened — it still holds
           #    pr-body.md, which the gh step below reads.)
           if [ -d "$WORKTREE/src" ]; then rm -rf src && cp -a "$WORKTREE/src" src; fi
           if [ -d "$WORKTREE/docs" ]; then rm -rf docs && cp -a "$WORKTREE/docs" docs; fi
 
-          # 4) Safety net: even if the base branch itself tracks these folders,
-          #    make sure no run workspace / audit / metrics content is staged.
+          # 5) Stage the result, then un-stage anything that slipped through under
+          #    those three paths. `git reset --` only removes the entry from the
+          #    index, leaving a file the base tracks at its base version — it never
+          #    turns an unchanged tracked file into a deletion.
           git add -A
           git reset -q -- .harness audit metrics 2>/dev/null || true
-          git rm -r --cached -q --ignore-unmatch .harness audit metrics 2>/dev/null || true
 
-          # 5) Nothing to commit means the run produced no code change under src/
+          # 6) Fail loudly rather than open a PR that deletes files. A harness PR
+          #    should only ever ADD or MODIFY source; a deletion here means the
+          #    clean-cut mishandled something, and that must not reach a reviewer
+          #    as a silent removal of their config.
+          DELETED=$(git diff --cached --name-only --diff-filter=D)
+          if [ -n "$DELETED" ]; then
+            echo "::error title=PR would delete files::The clean-cut staged deletions, which is never intended."
+            echo "$DELETED"
+            echo "pr_raised=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          # 7) Nothing to commit means the run produced no code change under src/
           #    or docs/ — do not raise an empty PR; keep WIP for inspection.
           if git diff --cached --quiet; then
             echo "::warning title=No code change to PR::No src/ or docs/ changes after clean-cut; PR skipped, WIP branch kept."
