@@ -101,36 +101,16 @@ on:
         default: ""
         type: string
     secrets:
-      # REPO access: checkout of the engine + toolkit, git push, gh pr create,
-      # and the billing API used for credit reporting. A classic PAT is fine for
-      # all of that — but NOT for Copilot model calls (see COPILOT_MODEL_TOKEN).
       COPILOT_GITHUB_TOKEN:
-        description: "Repo token — Contents RW, PRs RW (+ Plan: Read for credit reporting). Used for checkout/git/gh, NOT for model calls."
+        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW, Copilot Requests: Read)"
         required: true
-      # MODEL access: the credential Copilot itself accepts. OPTIONAL — when it
-      # is not supplied the job falls back to the built-in Actions token, which
-      # works if the caller grants `copilot-requests: write` and the org allows
-      # "Allow use of Copilot CLI billed to the organization".
-      # Supply this secret when that route is unavailable: an OAuth login token
-      # (gho_), a GitHub App user token (ghu_), or a fine-grained PAT carrying
-      # the "Copilot Requests" permission (github_pat_).
-      # A CLASSIC PAT (ghp_) IS NOT ACCEPTED HERE — Copilot rejects it with
-      # "Personal Access Tokens are not supported for this endpoint".
-      COPILOT_MODEL_TOKEN:
-        description: "Copilot credential for model calls (gho_ / ghu_ / fine-grained github_pat_ with Copilot Requests). Leave unset to use the Actions token."
-        required: false
 
 jobs:
   harness:
     runs-on: ubuntu-latest
-    # A job-level permissions block sets every permission it does NOT list to
-    # none, so `copilot-requests` must be named here or the Actions-token route
-    # is dead even when the CALLER grants it. A reusable workflow can never hold
-    # more than its caller, so the caller's workflow needs the same line.
     permissions:
       contents: write
       pull-requests: write
-      copilot-requests: write
     steps:
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
@@ -160,21 +140,15 @@ jobs:
           python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
 
       # --- 2. THIS engine repo -> ./engine ---
-      # The engine repo is PRIVATE in most enterprise installs, so this checkout
-      # must authenticate. The runner's default token is scoped to the CALLER repo
-      # alone and cannot read another private repo in the org: a tokenless clone
-      # falls back to a username prompt and dies with git exit 128
-      # ("could not read Username for https://github.com: terminal prompts
-      # disabled"), after which engine/harness does not exist and every later step
-      # fails for a reason that looks nothing like the cause. Passing the repo
-      # token here is harmless when the engine repo is public — it is ignored.
+      # No token: SDLC-Harness is public, and a public repo is readable by the
+      # runner's default credentials. If it is ever made private, every caller will
+      # need a token that can read it — see the note in step 2b.
       - name: Checkout SDLC-Harness
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.engine_repo }}
           ref: ${{ inputs.engine_ref }}
           path: engine
-          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
 
       # --- 2b. FAIL LOUDLY if the engine did not actually arrive ---
       # actions/checkout can report "Repository not found" without failing the step,
@@ -303,18 +277,6 @@ jobs:
       - name: Autorun (all phases)
         working-directory: engine/harness
         env:
-          # The MODEL credential. Falls back to the built-in Actions token, which
-          # needs `copilot-requests: write` (granted above and in the caller) and
-          # the org policy "Allow use of Copilot CLI billed to the organization".
-          # sdk_runner reads this AHEAD of COPILOT_GITHUB_TOKEN, so a repo PAT can
-          # never silently become the model credential.
-          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN != '' && secrets.COPILOT_MODEL_TOKEN || github.token }}
-          # The REPO credential, kept under its own name because sdk_runner points
-          # COPILOT_GITHUB_TOKEN at the model credential inside this process (the
-          # spawned Copilot CLI reads that variable itself). ai_credits reads this
-          # first so credit reporting keeps using the repo token, which is the one
-          # that carries Plan: Read.
-          HARNESS_REPO_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           GIT_AUTHOR_NAME: "harness-bot"
           GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
@@ -334,23 +296,26 @@ jobs:
         if: always()
         working-directory: engine/harness
         env:
-          # No model call here — repo token only (credit reporting reads it).
-          HARNESS_REPO_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py collect-audit --repo ../../service || true
 
       # --- 8. push the WORKING BRANCH — ALWAYS (success OR halt) ---
-      # This is what makes a halted run resumable, and it is the piece that was
-      # missing: on a halt, step 9 never ran, so the agent's source changes were
-      # discarded with the runner. Only the audit trail survived — enough to read
-      # what happened, not enough to continue.
+      # This is what makes a halted run resumable: on a halt the agent's source
+      # changes are preserved here so the run can be continued or fixed by hand.
       #
       # harness-wip/<feature> is deliberately NOT run-scoped: resume has to find it
       # by name, and a run_id suffix would make it unfindable. It is force-pushed
-      # because it is a working branch, not history — the immutable per-run record
-      # is the audit branch below.
+      # because it is a working branch, not history.
+      #
+      # WIP carries RESUME STATE ONLY, not the full artifact set. The source tree
+      # (src/, docs/) rides along because -B keeps the working tree, and
+      # run-state.json + blocked.md are force-added past .gitignore because resume
+      # needs them. The run artifacts (context files, prompt-steps, audit trail)
+      # are NOT committed here — they live on harness-metrics under
+      # artifacts/<feature>/<run_id>/ (see step 8a), so the WIP branch stays lean
+      # and there is exactly one home for artifacts.
       #
       # A human fixing code by hand works on THIS branch, pushes, and re-triggers
       # with resume=true. Their commit and the harness's output then share one
@@ -366,14 +331,18 @@ jobs:
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
           # -B with no start point keeps the working tree and just moves the ref,
-          # so nothing the agent wrote is lost.
+          # so the source the agent wrote is preserved on the resume point.
           git checkout -B "$WIP_BRANCH"
-          git add -A 2>/dev/null || true
-          # The service repo's .gitignore deliberately excludes the run workspace
-          # (.harness/run-state.json, .harness/blocked.md) so it never pollutes
-          # normal dev branches. But the WIP branch is the resume point and MUST
-          # carry that state, or `resume=true` fails with "no run-state.json".
-          # Force-add them here so they land on the WIP branch only.
+          # Keep the WIP branch to RESUME STATE + SOURCE only. Do NOT `git add -A`:
+          # that would drag the run workspace (audit/, context files, the rest of
+          # .harness/) onto the resume point. Artifacts belong on harness-metrics.
+          # Stage tracked source changes, then force-add only the two resume files.
+          git add -u 2>/dev/null || true
+          git add src docs 2>/dev/null || true
+          # The service repo's .gitignore excludes the run workspace so it never
+          # pollutes normal dev branches. The WIP branch is the resume point and
+          # MUST carry these two files, or `resume=true` fails with "no
+          # run-state.json". Force-add them here so they land on the WIP branch only.
           git add -f .harness/run-state.json .harness/blocked.md 2>/dev/null || true
           STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
           if git diff --cached --quiet; then
@@ -384,19 +353,29 @@ jobs:
           git push -f origin "$WIP_BRANCH"
           echo "::notice title=Working branch::$WIP_BRANCH — resume from here with resume=true"
 
-      # --- 8a. publish the metrics record to a long-lived branch — ALWAYS ---
-      # Metrics live on their OWN branch, not the working branch: the working
-      # branch is force-pushed on every resume, which would discard history, and
-      # metrics are the one artifact that must accumulate across runs.
+      # --- 8a. publish METRICS + ARTIFACTS to the long-lived metrics branch — ALWAYS ---
+      # harness-metrics is the SINGLE home for everything a run produces that is not
+      # the code change itself: the metrics record AND the run artifacts (context
+      # files, prompt-steps, the audit trail, run-state, blocked.md). It is a
+      # long-lived branch that accumulates across every run and every feature, so
+      # the trail persists whether the run succeeded or halted, and neither the WIP
+      # branch nor the PR branch has to carry artifact files.
       #
-      # One file per run (metrics/<yyyy>/<mm>/<feature>-<run_id>.json) means two
-      # concurrent runs never touch the same path, so this merges cleanly without
-      # locking. The rebase loop below covers the narrow window where two runs
-      # push within seconds of each other.
+      # Layout on the branch:
+      #   metrics/<yyyy>/<mm>/<feature>-<run_id>.json   one metrics record per run
+      #   artifacts/<feature>/<run_id>/...              one folder per run's artifacts
+      # Per-run, per-feature subfolders mean two runs never touch the same path, so
+      # this merges cleanly; the rebase loop covers the narrow concurrent-push window.
       #
-      # Never fails the job: a metrics push that broke a build would be worse than
-      # no metrics at all.
-      - name: Publish metrics record (always)
+      # This REPLACES the separate immutable audit branch (removed): the artifacts
+      # that used to be snapshotted onto harness-audit/* now live here under
+      # artifacts/. Note this branch is not force-push-immutable the way a per-run
+      # audit branch was — anyone with write access can rewrite it — so treat it as
+      # the durable record, not a tamper-proof one.
+      #
+      # Never fails the job: a metrics/artifact push that broke a build would be
+      # worse than no record at all.
+      - name: Publish metrics + artifacts (always)
         if: always() && hashFiles('engine/harness/run.py') != ''
         working-directory: service
         continue-on-error: true
@@ -404,92 +383,71 @@ jobs:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           set +e
-          if [ ! -d metrics ]; then
-            echo "No metrics record produced; nothing to publish."
+          FEATURE="${{ inputs.feature_id }}"
+          RUN_ID="${{ github.run_id }}"
+          # Nothing to publish only if BOTH metrics and any artifact source are
+          # absent. Artifact sources: the audit trail, the context files, and the
+          # two resume-state files.
+          if [ ! -d metrics ] && [ ! -d audit ] && [ ! -d .github/story-context-files ] \
+             && [ ! -f .harness/run-state.json ] && [ ! -f .harness/blocked.md ]; then
+            echo "No metrics or artifacts produced; nothing to publish."
             exit 0
           fi
-          # (the two early exits below run BEFORE the orphan checkout, so they
-          #  need no return; the ones after it do — see RETURN_TO)
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          # Remember where we are. This step checks out an ORPHAN branch, and an
-          # orphan shares no history with main — so every later step (audit
-          # branch, PR branch) inherited that and `gh pr create` failed with
-          # "has no history in common with main". Return before finishing.
+          # Remember where we are. This step checks out the metrics branch, which
+          # may be an ORPHAN sharing no history with main — so a later step must
+          # not inherit that HEAD. Return before finishing.
           RETURN_TO=$(git rev-parse --abbrev-ref HEAD)
-          TMP=$(mktemp -d)
-          cp -r metrics/* "$TMP"/ 2>/dev/null
+
+          # 1) Copy everything this run produced OUT of the working tree first, so
+          #    it survives the branch switch. metrics/ and the artifact set each go
+          #    to their own staging dir.
+          TMP_METRICS=$(mktemp -d)
+          TMP_ART=$(mktemp -d)
+          [ -d metrics ] && cp -r metrics/* "$TMP_METRICS"/ 2>/dev/null
+          # Artifact set: the audit trail (context.md, prompt-steps.md, review.md,
+          # validation-report.txt, pr-body.md, run-summary.json — whatever
+          # collect-audit gathered), the newest context files, and resume state.
+          [ -d audit ] && cp -r audit "$TMP_ART/audit" 2>/dev/null
+          [ -d .github/story-context-files ] && cp -r .github/story-context-files "$TMP_ART/story-context-files" 2>/dev/null
+          mkdir -p "$TMP_ART/harness-workspace"
+          [ -f .harness/run-state.json ] && cp .harness/run-state.json "$TMP_ART/harness-workspace/" 2>/dev/null
+          [ -f .harness/blocked.md ] && cp .harness/blocked.md "$TMP_ART/harness-workspace/" 2>/dev/null
+
+          # 2) Check out the long-lived metrics branch (create as orphan if absent).
           git fetch origin harness-metrics 2>/dev/null
           if git rev-parse --verify origin/harness-metrics >/dev/null 2>&1; then
             git checkout -B harness-metrics origin/harness-metrics
           else
-            # Orphan: metrics share no history with the code, and keeping them
-            # separate stops the branch carrying every source commit too.
             git checkout --orphan harness-metrics
             git rm -rf . >/dev/null 2>&1
           fi
-          mkdir -p metrics
-          cp -r "$TMP"/* metrics/ 2>/dev/null
-          git add metrics
+
+          # 3) Lay this run's metrics and artifacts into their per-run paths.
+          mkdir -p metrics "artifacts/${FEATURE}/${RUN_ID}"
+          [ -d "$TMP_METRICS" ] && cp -r "$TMP_METRICS"/* metrics/ 2>/dev/null
+          cp -r "$TMP_ART"/* "artifacts/${FEATURE}/${RUN_ID}/" 2>/dev/null
+
+          git add metrics artifacts
           if git diff --cached --quiet; then
-            echo "No new metrics to publish."
+            echo "No new metrics or artifacts to publish."
             git checkout "$RETURN_TO" 2>/dev/null || true
             exit 0
           fi
-          git commit -m "Metrics: ${{ inputs.feature_id }} run ${{ github.run_id }}"
+          git commit -m "Metrics + artifacts: ${FEATURE} run ${RUN_ID}"
           for i in 1 2 3; do
             git push origin harness-metrics && break
             echo "Push raced with another run; rebasing (attempt $i)."
             git fetch origin harness-metrics && git rebase origin/harness-metrics || break
           done
-          echo "::notice title=Metrics published::harness-metrics branch"
+          echo "::notice title=Metrics + artifacts published::harness-metrics — artifacts/${FEATURE}/${RUN_ID}/"
           git checkout "$RETURN_TO" 2>/dev/null || git checkout -B "$RETURN_TO"
-
-      # --- 8b. snapshot the run to an immutable audit branch — ALWAYS ---
-      # Per-run, never force-pushed: the record of what this particular run did.
-      # Points at the same commit as the working branch, so it captures the code,
-      # the state and the artifacts together.
-      - name: Snapshot audit branch (always)
-        if: always() && hashFiles('engine/harness/run.py') != ''
-        working-directory: service
-        env:
-          GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-        run: |
-          FEATURE="${{ inputs.feature_id }}"
-          # Sortable and readable: date first so a lexical branch listing is also
-          # chronological, then the outcome so a glance tells you which runs
-          # succeeded, then the run id so a branch still maps back to its Actions
-          # run. Grouped under <feature>/ so GitHub's branch list nests them.
-          # No colons — git branch names forbid them.
-          STATUS=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(json.load(open(f[-1]))['status'] if f else 'unknown')" 2>/dev/null || echo unknown)
-          STAMP=$(date -u +%Y%m%d-%H%M)
-          case "$STATUS" in
-            done)        OUTCOME=ok ;;
-            halted)      OUTCOME=halted ;;
-            needs_input) OUTCOME=needs-input ;;
-            *)           OUTCOME=unknown ;;
-          esac
-          AUDIT_BRANCH="harness-audit/${FEATURE}/${STAMP}-${OUTCOME}-${{ github.run_id }}"
-          git checkout -B "$AUDIT_BRANCH"
-          git push origin "$AUDIT_BRANCH"
-          # Retention is a compliance decision the SERVICE repo owns, set in
-          # .harness/config.yaml and recorded by the engine into run-summary.json.
-          # Default (or any parse failure) is RETAIN — for a healthcare client the
-          # run trail should persist unless someone with retention authority opts
-          # out. The branch is always PUSHED first, then deleted only on an explicit
-          # opt-out, so the audit snapshot exists even if the delete step is reached.
-          RETAIN=$(python3 -c "import json,glob; f=sorted(glob.glob('audit/*/*/run-summary.json')); print(str(json.load(open(f[-1])).get('retain_audit_branch', True)).lower() if f else 'true')" 2>/dev/null || echo true)
-          if [ "$RETAIN" = "false" ]; then
-            git push origin --delete "$AUDIT_BRANCH" || echo "Audit branch delete skipped."
-            echo "::notice title=Audit branch not retained::retain_audit_branch=false in .harness/config.yaml — $AUDIT_BRANCH pushed then deleted (status=$STATUS)."
-          else
-            echo "::notice title=Audit trail retained::Branch $AUDIT_BRANCH (status=$STATUS)"
-          fi
 
       # --- 9. raise the code PR — ONLY on success ---
       # The PR branch must contain the CODE CHANGE ONLY (src/ + docs/), never the
       # run workspace (.harness/), the audit trail (audit/) or metrics (metrics/).
-      # Those live on their own branches (harness-audit/*, harness-metrics) and
+      # Those all live on the harness-metrics branch (metrics/ + artifacts/) and
       # must not leak into a reviewable, mergeable PR.
       #
       # The working tree at this point is the WIP state and holds everything the
@@ -508,8 +466,8 @@ jobs:
           # PR targets the base dev branch the run was launched against (e.g.
           # PM_Sep), falling back to the triggering branch when base is blank.
           PR_BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
-          # Same scheme as the audit branch. No outcome segment — this branch only
-          # exists on success.
+          # Run-scoped branch name. No outcome segment — this branch only exists
+          # on success.
           STAMP=$(date -u +%Y%m%d-%H%M)
           BRANCH="harness/${FEATURE}/${STAMP}-${{ github.run_id }}"
           git config user.name "harness-bot"
@@ -529,52 +487,19 @@ jobs:
           git fetch origin "$PR_BASE"
           git checkout -B "$BRANCH" "origin/$PR_BASE"
 
-          # 3) Drop the run's leftovers BEFORE anything is staged.
-          #    `git checkout -B` moves the ref and restores TRACKED files, but it
-          #    leaves UNTRACKED files where they are — so the run's .harness/
-          #    workspace, audit/ and metrics/ are all still sitting in the working
-          #    directory. `git clean -fdx` on those three paths removes untracked
-          #    and ignored files only; anything the base branch TRACKS there is
-          #    left untouched. `git checkout --` then restores any tracked file
-          #    under them that the run had modified, so those paths end up exactly
-          #    as PR_BASE has them.
-          #
-          #    This replaces an earlier `git rm -r --cached .harness audit metrics`,
-          #    which had a real bug: .harness/config.yaml is TRACKED on the base
-          #    branch (the service repo owns it), so removing it from the index
-          #    made the PR delete the repo's own harness config. Cleaning untracked
-          #    files is the correct instrument here; un-staging tracked ones is not.
-          for p in .harness audit metrics; do
-            [ -e "$p" ] && git clean -fdxq -- "$p" 2>/dev/null || true
-            git checkout -q -- "$p" 2>/dev/null || true
-          done
-
-          # 4) Lay the run's src/ and docs/ back on top of the clean base.
+          # 3) Lay the run's src/ and docs/ back on top of the clean base.
           #    ($WORKTREE is kept until after the PR is opened — it still holds
           #    pr-body.md, which the gh step below reads.)
           if [ -d "$WORKTREE/src" ]; then rm -rf src && cp -a "$WORKTREE/src" src; fi
           if [ -d "$WORKTREE/docs" ]; then rm -rf docs && cp -a "$WORKTREE/docs" docs; fi
 
-          # 5) Stage the result, then un-stage anything that slipped through under
-          #    those three paths. `git reset --` only removes the entry from the
-          #    index, leaving a file the base tracks at its base version — it never
-          #    turns an unchanged tracked file into a deletion.
+          # 4) Safety net: even if the base branch itself tracks these folders,
+          #    make sure no run workspace / audit / metrics content is staged.
           git add -A
           git reset -q -- .harness audit metrics 2>/dev/null || true
+          git rm -r --cached -q --ignore-unmatch .harness audit metrics 2>/dev/null || true
 
-          # 6) Fail loudly rather than open a PR that deletes files. A harness PR
-          #    should only ever ADD or MODIFY source; a deletion here means the
-          #    clean-cut mishandled something, and that must not reach a reviewer
-          #    as a silent removal of their config.
-          DELETED=$(git diff --cached --name-only --diff-filter=D)
-          if [ -n "$DELETED" ]; then
-            echo "::error title=PR would delete files::The clean-cut staged deletions, which is never intended."
-            echo "$DELETED"
-            echo "pr_raised=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-          # 7) Nothing to commit means the run produced no code change under src/
+          # 5) Nothing to commit means the run produced no code change under src/
           #    or docs/ — do not raise an empty PR; keep WIP for inspection.
           if git diff --cached --quiet; then
             echo "::warning title=No code change to PR::No src/ or docs/ changes after clean-cut; PR skipped, WIP branch kept."
@@ -603,8 +528,8 @@ jobs:
           #    branch (no audit/, no metrics/), but the LATER "Delete working
           #    branch" step reads audit/*/run-summary.json from the working tree to
           #    confirm status=done before removing the resume point. Switch back so
-          #    that folder is visible again. The audit branch was already snapshotted
-          #    before this step, so nothing is lost.
+          #    that folder is visible again. The artifacts were already published to
+          #    harness-metrics (step 8a) before this step, so nothing is lost.
           git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
       # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
