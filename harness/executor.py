@@ -36,6 +36,54 @@ class AgentResult:
     tokens: dict = field(default_factory=dict)  # token usage for this phase
     skills_loaded: list = field(default_factory=list)   # skills the SDK loaded
     tools_invoked: list = field(default_factory=list)    # tools/skills actually called
+    # SDK-reported usage and cost for this phase attempt (see sdk_runner:
+    # _usage_metrics_from_session). A SEPARATE field from `tokens` on purpose:
+    # every value in `tokens` is summed into run.total_tokens, so a cost figure
+    # or a nested per-model breakdown must never be placed there.
+    usage_metrics: dict = field(default_factory=dict)
+
+
+def _accumulate_usage_metrics(run: RunState, um: dict) -> None:
+    """Add one phase attempt's SDK-reported cost to the run-level totals.
+
+    A total stays None until a phase actually reports it, so a run where the SDK
+    reported nothing records None — never a 0 that would read as "free".
+    """
+    if not um:
+        return
+    pc = um.get("premium_cost")
+    na = um.get("nano_aiu")
+    if pc is not None:
+        run.total_premium_cost = round((run.total_premium_cost or 0.0) + float(pc), 6)
+    if na is not None:
+        run.total_nano_aiu = (run.total_nano_aiu or 0.0) + float(na)
+    for mid, m in (um.get("models") or {}).items():
+        agg = run.model_usage.setdefault(mid, {
+            "requests": 0, "input": 0, "output": 0,
+            "premium_cost": 0.0, "nano_aiu": 0.0})
+        for k in agg:
+            v = m.get(k)
+            if isinstance(v, (int, float)):
+                agg[k] = agg[k] + v
+    src = um.get("source")
+    if src and src != "none":
+        # One source for the whole run is the normal case; "mixed" flags a run
+        # where getMetrics failed on some phases and the event sum stood in.
+        run.cost_source = src if run.cost_source in (None, src) else "mixed"
+
+
+def _cost_fields(um: dict) -> dict:
+    """The per-phase cost fields added to each phase_token_log entry."""
+    um = um or {}
+    return {
+        "premium_cost": um.get("premium_cost"),
+        "nano_aiu": um.get("nano_aiu"),
+        "cost_source": um.get("source"),
+        # The models that ACTUALLY served this phase (from the SDK), which can
+        # differ from the configured "model" — always under `auto`.
+        "models_used": sorted((um.get("models") or {}).keys()),
+        "model_breakdown": um.get("models") or {},
+    }
 
 
 class AgentRunner(Protocol):
@@ -117,6 +165,11 @@ class PhaseExecutor:
 
         run.iterations[phase.id] = used + result.iterations_used
 
+        # SDK-reported cost: accumulated for EVERY attempt, including one that
+        # errored after its session ran — a failed attempt still cost something.
+        _um = dict(getattr(result, "usage_metrics", None) or {})
+        _accumulate_usage_metrics(run, _um)
+
         # accumulate token usage for per-run credit reporting
         if result.tokens:
             for k, v in result.tokens.items():
@@ -150,11 +203,11 @@ class PhaseExecutor:
                 "partial": est.get("partial", False),
                 "skills_loaded": list(getattr(result, "skills_loaded", []) or []),
                 "tools_invoked": list(getattr(result, "tools_invoked", []) or []),
+                # SDK-reported cost for this attempt (None when not reported).
+                # est_credits/est_usd above are the token-priced ESTIMATE from
+                # config and are not the reported figure.
+                **_cost_fields(_um),
             })
-            # Tokens only — no per-phase cost. The authoritative figure is the
-            # GitHub billing-API credit delta printed once at the end of the run.
-            # A token-priced per-phase guess printed alongside it just invites the
-            # wrong number to be quoted, and the two disagree by up to 16%.
             self.log(f"  [tokens] {phase.id}: {phase_io} tokens "
                      f"(running total: {cumulative})")
         else:
@@ -162,7 +215,10 @@ class PhaseExecutor:
             # skills. Record attribution so the audit trail isn't blank.
             _sk = list(getattr(result, "skills_loaded", []) or [])
             _tl = list(getattr(result, "tools_invoked", []) or [])
-            if _sk or _tl:
+            # ...or reported a cost without token counts (e.g. an attempt that
+            # errored after its session ran) — record it so the per-phase view
+            # adds up to the run total.
+            if _sk or _tl or _um:
                 from config import HarnessConfig as _HC0
                 _cfg0 = _HC0.load(self.harness_dir)
                 run.phase_token_log.append({
@@ -177,6 +233,7 @@ class PhaseExecutor:
                     "partial": False,
                     "skills_loaded": _sk,
                     "tools_invoked": _tl,
+                    **_cost_fields(_um),
                 })
 
         if result.errored:

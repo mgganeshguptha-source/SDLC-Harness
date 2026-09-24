@@ -348,24 +348,35 @@ class StateMachine:
         # small epsilon to tolerate coarse filesystem mtime granularity.
         _phase_started = time.time() - 1.0
 
-        # Per-phase credit attribution. Read the billing counter immediately
-        # before the phase and (after a settle-wait) immediately after, so the
-        # delta is this phase attempt's estimated cost. Loopbacks re-enter here and
-        # append another entry — one per attempt. Both reads tolerate an
-        # unreadable counter (org-billed seats) by recording None; the run-level
-        # credits_actual delta remains the authoritative figure. The settle wait is
-        # the service repo's credit_settle_seconds (0 => read immediately, no wait).
+        # Per-phase cost attribution, one entry per phase ATTEMPT (loopbacks
+        # append another). Where the figure comes from is config.credit_source:
+        #   "sdk" (default): the Copilot SDK reports this session's cost itself;
+        #       the executor records it on the phase_token_log entry it appends
+        #       during this attempt, and it is copied here. No billing-counter
+        #       read, so no settle wait.
+        #   "account": read the account-level billing counter before and (after
+        #       a credit_settle_seconds wait) after the phase; the delta is an
+        #       estimate, skewed by any concurrent use of the account.
         try:
             from config import HarnessConfig as _HCc
-            _settle = int(getattr(_HCc.load(self.harness_dir), "credit_settle_seconds", 30))
+            _cfgc = _HCc.load(self.harness_dir)
+            _settle = int(getattr(_cfgc, "credit_settle_seconds", 30))
+            _credit_source = str(getattr(_cfgc, "credit_source", "sdk") or "sdk").lower()
         except Exception:
             _settle = 30
-        _credits_before = _read_phase_credits("before", phase.id, _settle, self.log)
+            _credit_source = "sdk"
+        _account_reads = (_credit_source == "account")
+        _credits_before = (_read_phase_credits("before", phase.id, _settle, self.log)
+                           if _account_reads else None)
+        # Mark where this attempt's phase_token_log entries will start, so the
+        # SDK figures below are taken from THIS attempt only.
+        _tok_log_start = len(run.phase_token_log)
 
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
 
-        _credits_after = _read_phase_credits("after", phase.id, _settle, self.log)
+        _credits_after = (_read_phase_credits("after", phase.id, _settle, self.log)
+                          if _account_reads else None)
         _phase_credits = None
         if _credits_before is not None and _credits_after is not None:
             _delta = round(_credits_after - _credits_before, 4)
@@ -373,21 +384,40 @@ class StateMachine:
             # visible) — record 0.0 only if it actually moved; otherwise None so a
             # blank counter is not mistaken for a free phase.
             _phase_credits = _delta if not (_credits_before == 0 and _credits_after == 0) else None
-        # The model for this attempt is the tail of phase_model_log (sdk_runner
-        # appended it before the SDK call). Fall back to None for a fake/no-SDK run.
+
+        # SDK-reported cost for this attempt, summed over the entries the executor
+        # appended during it. None when nothing was reported — never 0.
+        _attempt = [e for e in run.phase_token_log[_tok_log_start:]
+                    if e.get("phase") == phase.id]
+        _pc_vals = [e["premium_cost"] for e in _attempt
+                    if isinstance(e.get("premium_cost"), (int, float))]
+        _na_vals = [e["nano_aiu"] for e in _attempt
+                    if isinstance(e.get("nano_aiu"), (int, float))]
+        _models_used = sorted({m for e in _attempt for m in (e.get("models_used") or [])})
+
+        # The CONFIGURED model is the tail of phase_model_log (sdk_runner appended
+        # it before the SDK call). The model reported for the phase prefers what
+        # the SDK says actually ran, which is the only truthful answer under
+        # `auto`; it falls back to the configured one for a fake/no-SDK run.
         try:
-            _phase_model = (run.phase_model_log[-1].get("model")
-                            if run.phase_model_log else None)
+            _configured_model = (run.phase_model_log[-1].get("model")
+                                 if run.phase_model_log else None)
         except Exception:
-            _phase_model = None
+            _configured_model = None
+        _phase_model = "+".join(_models_used) if _models_used else _configured_model
         try:
             run.phase_credit_log.append({
                 "phase": phase.id,
                 "model": _phase_model,
+                "configured_model": _configured_model,
                 "credits": _phase_credits,
                 "before": _credits_before,
                 "after": _credits_after,
-                "is_estimate": True,
+                "premium_cost": round(sum(_pc_vals), 6) if _pc_vals else None,
+                "nano_aiu": sum(_na_vals) if _na_vals else None,
+                "credit_source": _credit_source,
+                # The account delta is an estimate; SDK figures are reported.
+                "is_estimate": _account_reads,
             })
         except Exception:
             pass

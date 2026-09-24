@@ -369,7 +369,21 @@ class HarnessConfig:
     # it. Deleting is never the engine's job (the engine never mutates remote refs).
     retain_audit_branch: bool = True
 
-    # --- per-phase credit settle wait (seconds) ---
+    # --- where per-run cost comes from ---
+    #   "sdk"     (default) -> the Copilot SDK reports each session's usage and
+    #             cost directly (session.usage.getMetrics). Per-phase and per-
+    #             model, belongs to THIS run only, works on org-billed seats, and
+    #             needs no waiting. The billing counter is not read at all.
+    #   "account" -> the older method: read the account's AI-credit billing
+    #             counter before and after each phase and take the difference.
+    #             Works only on personal (user-billed) seats, is skewed by any
+    #             concurrent Copilot use on the account, and waits
+    #             credit_settle_seconds per phase. Kept for reconciliation.
+    # Any other value falls back to "sdk".
+    credit_source: str = "sdk"
+
+    # --- per-phase credit settle wait (seconds) — credit_source "account" ONLY ---
+    # Ignored under the default credit_source "sdk", which never reads the counter.
     # The metrics layer reads GitHub's AI-credit counter before and after each
     # phase to estimate that phase's cost. That counter LAGS the requests that
     # produced it, so this is how long to wait after a phase finishes before
@@ -440,6 +454,9 @@ class HarnessConfig:
                            else cls().write_exclude),
             retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
             credit_settle_seconds=int(data.get("credit_settle_seconds", cls.credit_settle_seconds)),
+            credit_source=(str(data.get("credit_source", cls.credit_source)).strip().lower()
+                           if str(data.get("credit_source", cls.credit_source)).strip().lower()
+                           in ("sdk", "account") else "sdk"),
         )
 
         # --- coverage threshold units normalization ---

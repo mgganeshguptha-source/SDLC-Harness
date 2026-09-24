@@ -84,6 +84,30 @@ def report(recs: list) -> None:
                   f"   {r.get('status')}  loops="
                   f"{sum(r.get(k, 0) or 0 for k in r if k.startswith('loopback_'))}")
 
+    # --- SDK-reported usage (schema v3, credit_source "sdk"). Raw SDK units, not
+    # AI credits — GitHub documents no conversion, so none is applied here.
+    for key, title, fmt in (("nano_aiu_total", "USAGE (SDK nano-AI units per run)", ",.0f"),
+                            ("premium_cost_total", "USAGE (SDK premium-request cost per run)", ".4f")):
+        vals = _nums(recs, key)
+        if vals:
+            print(f"\n  {title}")
+            print(f"    median {format(_med(vals), fmt)}   min {format(min(vals), fmt)}"
+                  f"   max {format(max(vals), fmt)}   total {format(sum(vals), fmt)}")
+            worst = sorted((r for r in recs if isinstance(r.get(key), (int, float))),
+                           key=lambda r: -r[key])[:3]
+            for r in worst:
+                print(f"      {str(r.get('feature_id')):<12} {format(r[key], fmt):>16}"
+                      f"   {r.get('status')}  loops="
+                      f"{sum(r.get(k, 0) or 0 for k in r if k.startswith('loopback_'))}")
+    _phase_na = sorted({k for r in recs for k in r
+                        if k.startswith("nano_aiu_") and k != "nano_aiu_total"})
+    if _phase_na:
+        print("\n  SDK nano-AI units by phase (median across runs)")
+        for k in _phase_na:
+            v = _nums(recs, k)
+            if v:
+                print(f"    {k[len('nano_aiu_'):]:<16} {format(_med(v), ',.0f'):>16}")
+
     # --- duration
     durs = _nums(recs, "duration_sec")
     if durs:

@@ -95,17 +95,27 @@ def cmd_autorun(args):
     run = _load(repo)
     sm = _build_machine(repo, real=True, model=getattr(args, "model", None))
 
-    # ACTUAL credit consumption: one read before the first phase, one after the
-    # last. The delta is the only trustworthy figure available — GitHub exposes an
-    # account-level counter, not per-request costs, so per-phase attribution stays
-    # an estimate. The delta is valid only while this account is the sole consumer
-    # during the run; concurrent Copilot use elsewhere would inflate it.
-    credits_before = None
+    # Where cost comes from (config.credit_source):
+    #   "sdk" (default) — the Copilot SDK reports each session's usage directly;
+    #       nothing is read here and the report is printed by _report_sdk_cost.
+    #   "account" — the older run-level billing-counter delta below: one read
+    #       before the first phase, one after the last. Valid only while this
+    #       account is the sole consumer during the run, and unavailable on
+    #       org-billed seats.
     try:
-        from ai_credits import read_credits_used
-        credits_before = read_credits_used(log=print)
+        from config import HarnessConfig as _HCs
+        _credit_source = str(getattr(_HCs.load(_harness_dir(repo)),
+                                     "credit_source", "sdk") or "sdk").lower()
     except Exception:
-        credits_before = None
+        _credit_source = "sdk"
+
+    credits_before = None
+    if _credit_source == "account":
+        try:
+            from ai_credits import read_credits_used
+            credits_before = read_credits_used(log=print)
+        except Exception:
+            credits_before = None
 
     max_cycles = 50
     for _ in range(max_cycles):
@@ -150,7 +160,10 @@ def cmd_autorun(args):
             credits_after = None
 
     _report(run)
-    _report_actual_credits(credits_before, credits_after)
+    if _credit_source == "account":
+        _report_actual_credits(credits_before, credits_after)
+    else:
+        _report_sdk_cost(run)
 
     # Persist the actual credit delta onto the state so the metrics record can
     # carry it — it is computed here and nowhere else.
@@ -170,6 +183,62 @@ def cmd_autorun(args):
     if run.status in ("halted", "needs_input"):
         import sys as _sys
         _sys.exit(1)
+
+
+def _fmt_num(v, spec):
+    """Format a number, or '--' when it was not reported (never print a fake 0)."""
+    return format(v, spec) if isinstance(v, (int, float)) else "--"
+
+
+def _report_sdk_cost(run: RunState):
+    """Print this run's usage and cost as reported by the Copilot SDK.
+
+    One row per phase ATTEMPT, so a loopback shows as a repeated phase — that is
+    deliberate: it shows which re-entry consumed the budget. The figures belong
+    to this run's own SDK sessions, so they are unaffected by anything else on
+    the account and are available on org-billed seats.
+    """
+    rows = [e for e in (run.phase_token_log or [])
+            if e.get("cost_source") or e.get("input_tokens") or e.get("output_tokens")]
+    print()
+    if not rows and run.total_premium_cost is None and run.total_nano_aiu is None:
+        print("  AI usage: not reported by the Copilot SDK for this run "
+              "(token counts, where available, are shown above).")
+        return
+
+    print("  AI USAGE THIS RUN (reported by the Copilot SDK, per session):")
+    print(f"    {'phase':<14}{'model(s) actually used':<30}"
+          f"{'input':>11}{'output':>9}{'premium':>10}{'nano-AIU':>16}")
+    for e in rows:
+        models = ",".join(e.get("models_used") or []) or f"({e.get('model') or '?'})"
+        print(f"    {e.get('phase',''):<14}{models[:29]:<30}"
+              f"{_fmt_num(e.get('input_tokens'), ',d'):>11}"
+              f"{_fmt_num(e.get('output_tokens'), ',d'):>9}"
+              f"{_fmt_num(e.get('premium_cost'), '.4f'):>10}"
+              f"{_fmt_num(e.get('nano_aiu'), ',.0f'):>16}")
+    tk = run.total_tokens or {}
+    print(f"    {'TOTAL':<14}{'':<30}"
+          f"{_fmt_num(tk.get('input'), ',d'):>11}"
+          f"{_fmt_num(tk.get('output'), ',d'):>9}"
+          f"{_fmt_num(run.total_premium_cost, '.4f'):>10}"
+          f"{_fmt_num(run.total_nano_aiu, ',.0f'):>16}")
+
+    if run.model_usage:
+        print("\n  by model (across the whole run):")
+        for mid, m in sorted(run.model_usage.items()):
+            print(f"    {mid:<30} requests={m.get('requests', 0):<5} "
+                  f"in={_fmt_num(m.get('input'), ',d')} out={_fmt_num(m.get('output'), ',d')} "
+                  f"premium={_fmt_num(m.get('premium_cost'), '.4f')} "
+                  f"nano-AIU={_fmt_num(m.get('nano_aiu'), ',.0f')}")
+
+    print(f"\n  Source: {run.cost_source or 'none'} "
+          f"(session_metrics = SDK session.usage.getMetrics; event_sum = per-call "
+          f"fallback; mixed = both)")
+    print("  Units are the SDK's own: premium-request cost (multipliers applied) and")
+    print("  nano-AI units. GitHub bills in AI credits and documents no conversion,")
+    print("  so these are NOT credits or dollars — reconcile against the organization")
+    print("  billing report before quoting a cost. '--' means not reported, not zero.")
+    print("  Note: the SDK's usage APIs are marked experimental in the pinned version.")
 
 
 def _report_actual_credits(before, after):
@@ -283,9 +352,12 @@ def cmd_collect_audit(args):
     # so fall back to the safe default (retain).
     try:
         from config import HarnessConfig
-        retain_audit_branch = HarnessConfig.load(hd, repo_root=repo).retain_audit_branch
+        _cfg_a = HarnessConfig.load(hd, repo_root=repo)
+        retain_audit_branch = _cfg_a.retain_audit_branch
+        credit_source = str(getattr(_cfg_a, "credit_source", "sdk") or "sdk").lower()
     except Exception:
         retain_audit_branch = True
+        credit_source = "sdk"
 
     copied = []
     # newest context file (the agent may write a timestamped name)
@@ -312,20 +384,42 @@ def cmd_collect_audit(args):
         "completed_phases": run.completed_phases,
         "total_tokens": run.total_tokens,
         "phase_token_log": run.phase_token_log,
-        # Cost is NOT derived from tokens. The authoritative figure is the
-        # GitHub billing-API credit delta printed at the end of the run; token
-        # counts are retained only to show which phase consumed what.
-        "cost_source": {
-            "is_estimate": False,
-            "basis": "GitHub billing API — consumed AI credits (grossQuantity), "
-                     "read once before and once after the run. 1 credit = $0.01.",
-            "endpoint": "GET /users/{username}/settings/billing/ai_credit/usage",
-            "caveat": "The delta is account-wide: it is accurate only while this "
-                      "account makes no other Copilot requests during the run.",
-            "unavailable_when": "Copilot licence billed via an org/enterprise "
-                                "(user-level endpoint returns no usage), or the "
-                                "token lacks 'Plan' user permission (read).",
+        "actor": getattr(run, "actor", None),
+        # SDK-reported usage for the whole run (credit_source "sdk").
+        "sdk_usage": {
+            "total_premium_cost": getattr(run, "total_premium_cost", None),
+            "total_nano_aiu": getattr(run, "total_nano_aiu", None),
+            "model_usage": getattr(run, "model_usage", None) or {},
+            "reported_by": getattr(run, "cost_source", None),
         },
+        # How the cost figures in this record were obtained. Cost is never
+        # derived from token counts.
+        "cost_source": (
+            {
+                "method": "sdk",
+                "is_estimate": False,
+                "basis": "Copilot SDK session.usage.getMetrics, one session per "
+                         "phase attempt, summed for the run; per-call "
+                         "assistant.usage events as fallback.",
+                "units": "premium-request cost (multipliers applied) and nano-AI "
+                         "units, as reported by the SDK. Not converted to AI "
+                         "credits or dollars: GitHub documents no conversion.",
+                "caveat": "SDK usage APIs are experimental in the pinned SDK "
+                          "version. Reconcile with the organization billing "
+                          "report before quoting a cost.",
+            } if credit_source != "account" else {
+                "method": "account",
+                "is_estimate": False,
+                "basis": "GitHub billing API — consumed AI credits (grossQuantity), "
+                         "read once before and once after the run. 1 credit = $0.01.",
+                "endpoint": "GET /users/{username}/settings/billing/ai_credit/usage",
+                "caveat": "The delta is account-wide: it is accurate only while this "
+                          "account makes no other Copilot requests during the run.",
+                "unavailable_when": "Copilot licence billed via an org/enterprise "
+                                    "(user-level endpoint returns no usage), or the "
+                                    "token lacks 'Plan' user permission (read).",
+            }
+        ),
     }
     (audit_dir / "run-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     copied.append("run-summary.json")
@@ -356,7 +450,10 @@ def _report(run: RunState):
     if run.phase_token_log:
         print("\n  token usage by phase:")
         for e in run.phase_token_log:
-            model = f"[{e.get('model','')}]"
+            # The model the SDK reports as actually used, when known; otherwise
+            # the configured one (which, under `auto`, just says "auto").
+            _used = ",".join(e.get("models_used") or [])
+            model = f"[{_used or e.get('model','')}]"
             print(f"    {e['phase']:<14}{model:<22} "
                   f"{e['phase_tokens']:>7} tok")
 
@@ -365,7 +462,11 @@ def _report(run: RunState):
     # re-entry burned credits. Credits are the account-level counter delta around
     # each phase, valid only if nothing else ran on the account during it, hence
     # "est". A blank cell means the counter was unreadable (org-billed seats).
-    _pcl = getattr(run, "phase_credit_log", None) or []
+    # Shown only when the account counter was actually read (credit_source
+    # "account"); under the default "sdk" source every cell would be "--" and the
+    # SDK cost table printed after this report is the one that matters.
+    _pcl = [e for e in (getattr(run, "phase_credit_log", None) or [])
+            if e.get("credit_source", "account") == "account"]
     if _pcl:
         print("\n  credits by phase (estimate — account-level counter):")
         _sum = 0.0

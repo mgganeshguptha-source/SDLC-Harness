@@ -45,6 +45,15 @@ review_model: "claude-haiku-4.5"        # code_review only — set HERE, not in 
 review_loopback_phase: "coding"
 max_review_retries: 2
 
+# ---------------------------------------------------------------- cost reporting
+# sdk (default): the Copilot SDK reports each phase's usage and cost itself —
+#   per phase, per model actually used, for this run only, on org-billed seats,
+#   with no waiting. Raw SDK units (premium-request cost, nano-AI units).
+# account: the older billing-counter delta. Personal seats only, skewed by any
+#   concurrent use of the account, and waits credit_settle_seconds per phase.
+credit_source: sdk
+credit_settle_seconds: 30               # used ONLY when credit_source: account
+
 # ---------------------------------------------------------------- context gate
 # Clarifications ALWAYS block, in every mode. This controls only the feasibility half.
 blocker_gate: advisory                  # advisory for early runs; switch to blocking

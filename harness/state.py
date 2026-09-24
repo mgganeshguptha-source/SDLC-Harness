@@ -86,8 +86,26 @@ class RunState:
     #   {"phase": id, "model": name, "credits": float|None,
     #    "before": float|None, "after": float|None, "is_estimate": True}
     # `credits` is None when the counter was unreadable (org-billed seats) —
-    # stored cleanly, never guessed.
+    # stored cleanly, never guessed. Account-counter fields are only populated
+    # when config.credit_source is "account".
     phase_credit_log: list = field(default_factory=list)
+
+    # --- SDK-reported usage (config.credit_source: "sdk", the default) ---
+    # Reported by the Copilot SDK per session (one session per phase attempt),
+    # so these belong to THIS run alone — correct under concurrency and on
+    # org-billed seats. Raw units, exactly as the SDK reports them:
+    #   premium cost = premium-request cost, multipliers applied
+    #   nano-AIU     = token-priced nano-AI units
+    # GitHub bills in AI credits and documents no conversion from either unit,
+    # so nothing is converted here. None means "not reported", never "free".
+    total_premium_cost: Optional[float] = None
+    total_nano_aiu: Optional[float] = None
+    # Per ACTUAL model across the run: {model_id: {requests, input, output,
+    # premium_cost, nano_aiu}}. Differs from the configured model under `auto`.
+    model_usage: dict = field(default_factory=dict)
+    # "session_metrics" (getMetrics), "event_sum" (per-call fallback),
+    # "mixed" (both across phases), or None (nothing reported).
+    cost_source: Optional[str] = None
 
     # ---- persistence ----
     def save(self, harness_dir: Path) -> None:

@@ -71,6 +71,81 @@ def _describe_token(token: str | None) -> tuple[str, bool]:
     return "unrecognised token type", True
 
 
+# ---------------------------------------------------------------------------
+# SDK-REPORTED USAGE AND COST
+# ---------------------------------------------------------------------------
+# The Copilot SDK reports what each session consumed, directly:
+#   * session.usage.getMetrics  -> accumulated totals for the session
+#     (premium-request cost, nano-AI units, per-model tokens/requests/cost)
+#   * the assistant.usage event -> the same figures per model API call
+# Both belong to THIS session only, so they are correct under concurrency and
+# on org-billed seats — unlike the account-level billing counter, which every
+# concurrent run shares and which org-billed seats cannot read at all.
+#
+# Both are marked EXPERIMENTAL in github-copilot-sdk 1.0.4 ("may change or be
+# removed"). requirements.txt pins the version, so they cannot change under a
+# run; re-check them whenever the pin moves. getMetrics is the primary source;
+# the per-call event sum is kept as a fallback and as a cross-check.
+#
+# UNITS: the SDK reports premium-request cost and nano-AI units. GitHub bills in
+# AI credits. The SDK documents no conversion between them, so both raw figures
+# are recorded as-is and nothing here converts to credits or dollars.
+
+def _usage_metrics_from_session(res) -> dict:
+    """Flatten a session.usage.getMetrics result into a JSON-safe dict.
+
+    Pure (no I/O, no SDK import) so it can be tested with a parsed payload.
+    Every field is read defensively: a missing field becomes None rather than an
+    exception — cost reporting must never be the reason a phase fails.
+    """
+    models: dict = {}
+    for mid, mm in (getattr(res, "model_metrics", None) or {}).items():
+        req = getattr(mm, "requests", None)
+        use = getattr(mm, "usage", None)
+        models[str(mid)] = {
+            "requests": getattr(req, "count", None),
+            "premium_cost": getattr(req, "cost", None),
+            "nano_aiu": getattr(mm, "total_nano_aiu", None),
+            "input": getattr(use, "input_tokens", None),
+            "output": getattr(use, "output_tokens", None),
+            "cache_read": getattr(use, "cache_read_tokens", None),
+            "reasoning": getattr(use, "reasoning_tokens", None),
+        }
+    return {
+        "source": "session_metrics",
+        # "user-initiated" premium-request cost, multipliers applied.
+        "premium_cost": getattr(res, "total_premium_request_cost", None),
+        # Token-priced cost across the whole session. May be None on some plans.
+        "nano_aiu": getattr(res, "total_nano_aiu", None),
+        "user_requests": getattr(res, "total_user_requests", None),
+        "api_duration_ms": getattr(res, "total_api_duration_ms", None),
+        "models": models,
+    }
+
+
+def _usage_metrics_from_events(acc: dict, per_model: dict) -> dict:
+    """The fallback: totals summed from the per-call assistant.usage events."""
+    return {
+        "source": "event_sum" if per_model else "none",
+        "premium_cost": acc["premium_cost"] if acc["premium_seen"] else None,
+        "nano_aiu": acc["nano_aiu"] if acc["nano_seen"] else None,
+        "user_requests": None,
+        "api_duration_ms": None,
+        "models": per_model,
+    }
+
+
+def _format_cost_line(phase_id: str, um: dict) -> str:
+    """One log line summarising a phase's SDK-reported usage."""
+    pc = um.get("premium_cost")
+    na = um.get("nano_aiu")
+    models = ",".join(sorted((um.get("models") or {}).keys())) or "(none reported)"
+    pc_s = f"{pc:.4f}" if isinstance(pc, (int, float)) else "n/a"
+    na_s = f"{na:,.0f}" if isinstance(na, (int, float)) else "n/a"
+    return (f"  [cost] phase '{phase_id}': premium_cost={pc_s} nano_aiu={na_s} "
+            f"models={models} (source: {um.get('source', 'none')})")
+
+
 def _parse_frontmatter_applyto(text: str) -> str | None:
     """Extract the applyTo value from an instruction file's YAML frontmatter.
     Returns the raw glob string (may be comma-separated), or None if absent."""
@@ -981,7 +1056,10 @@ class SdkAgentRunner:
             tb = traceback.format_exc()
             self.log("  ! SDK exception:\n" + tb)
             msg = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
-            return AgentResult(errored=True, error_msg=msg)
+            # A phase that fails after its session reported usage still cost
+            # something — carry whatever was captured rather than dropping it.
+            return AgentResult(errored=True, error_msg=msg,
+                               usage_metrics=getattr(self, "_last_usage_metrics", {}) or {})
 
     async def _run_async(self, phase: Phase, run: RunState, repo_root: Path) -> AgentResult:
         import os
@@ -1231,6 +1309,10 @@ class SdkAgentRunner:
         else:
             client_kwargs["use_logged_in_user"] = True
 
+        # Reset before the session so a phase that dies early can never report
+        # the PREVIOUS phase's cost as its own.
+        self._last_usage_metrics = {}
+
         async with CopilotClient(**client_kwargs) as client:
             async with await client.create_session(
                 on_permission_request=on_permission_request,
@@ -1239,6 +1321,12 @@ class SdkAgentRunner:
                 done = asyncio.Event()
                 last_message = {"text": ""}
                 usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+                # Per-call cost, summed. Kept SEPARATE from `usage`: the executor
+                # adds every value in `usage` into run.total_tokens, so cost and the
+                # per-model breakdown must travel on their own field.
+                cost_acc = {"premium_cost": 0.0, "premium_seen": False,
+                            "nano_aiu": 0.0, "nano_seen": False}
+                per_model: dict = {}
                 seen_events = {}
                 errors = []
                 # capability attribution: which skills the SDK loaded (definitive)
@@ -1263,6 +1351,34 @@ class SdkAgentRunner:
                             usage["cache_read"] += getattr(d, "cache_read_tokens", 0) or 0
                             usage["cache_write"] += getattr(d, "cache_write_tokens", 0) or 0
                             usage["reasoning"] += getattr(d, "reasoning_tokens", 0) or 0
+                        except Exception:
+                            pass
+                        # Per-call cost and the model that ACTUALLY served the call
+                        # (under `auto`, config only knows "auto"). Isolated in its
+                        # own try so a change to these experimental fields can
+                        # never disturb the token counts above.
+                        try:
+                            d = event.data
+                            _c = getattr(d, "cost", None)
+                            if _c is not None:
+                                cost_acc["premium_cost"] += float(_c)
+                                cost_acc["premium_seen"] = True
+                            _cu = getattr(d, "copilot_usage", None)
+                            _n = getattr(_cu, "total_nano_aiu", None) if _cu is not None else None
+                            if _n is not None:
+                                cost_acc["nano_aiu"] += float(_n)
+                                cost_acc["nano_seen"] = True
+                            _m = str(getattr(d, "model", None) or "unknown")
+                            pm = per_model.setdefault(_m, {
+                                "requests": 0, "premium_cost": 0.0, "nano_aiu": 0.0,
+                                "input": 0, "output": 0, "cache_read": 0, "reasoning": 0})
+                            pm["requests"] += 1
+                            pm["premium_cost"] += float(_c or 0)
+                            pm["nano_aiu"] += float(_n or 0)
+                            pm["input"] += getattr(d, "input_tokens", 0) or 0
+                            pm["output"] += getattr(d, "output_tokens", 0) or 0
+                            pm["cache_read"] += getattr(d, "cache_read_tokens", 0) or 0
+                            pm["reasoning"] += getattr(d, "reasoning_tokens", 0) or 0
                         except Exception:
                             pass
                     elif "error" in t.lower():
@@ -1301,6 +1417,25 @@ class SdkAgentRunner:
                     await asyncio.wait_for(done.wait(), timeout=300)
                 except asyncio.TimeoutError:
                     self.log("  [diag] timed out waiting for a terminal event")
+
+                # ---- SDK-REPORTED COST for this session (= this phase attempt) ----
+                # Must run INSIDE the session context: the session is gone once the
+                # `async with` exits. getMetrics first; the per-call event sum if it
+                # is unavailable. Never raises.
+                try:
+                    _res = await session.rpc.usage.get_metrics(timeout=30)
+                    usage_metrics = _usage_metrics_from_session(_res)
+                except Exception as _e:
+                    usage_metrics = _usage_metrics_from_events(cost_acc, per_model)
+                    self.log(f"  [cost] session metrics unavailable "
+                             f"({type(_e).__name__}); using the per-call event sum")
+                # Keep the event sum alongside as a cross-check on getMetrics.
+                usage_metrics["event_premium_cost"] = (
+                    cost_acc["premium_cost"] if cost_acc["premium_seen"] else None)
+                usage_metrics["event_nano_aiu"] = (
+                    cost_acc["nano_aiu"] if cost_acc["nano_seen"] else None)
+                self.log(_format_cost_line(phase.id, usage_metrics))
+                self._last_usage_metrics = usage_metrics
 
                 # DIAGNOSTICS — what did the SDK actually emit?
                 self.log(f"  [diag] events seen: {seen_events}")
@@ -1373,4 +1508,5 @@ class SdkAgentRunner:
         return AgentResult(attempted_writes=attempted_writes, iterations_used=1,
                            tokens=getattr(self, "_last_usage", {}),
                            skills_loaded=getattr(self, "_last_skills", []),
-                           tools_invoked=getattr(self, "_last_tools", []))
+                           tools_invoked=getattr(self, "_last_tools", []),
+                           usage_metrics=getattr(self, "_last_usage_metrics", {}))

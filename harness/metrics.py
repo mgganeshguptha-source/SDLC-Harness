@@ -53,7 +53,10 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+# v3: SDK-reported usage — premium_cost_* / nano_aiu_* per phase, per run and
+# per actual model, credit_source, cost_reported_by; model_<phase> now names the
+# model the SDK reports as actually used (the configured one as fallback).
+SCHEMA_VERSION = 3
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -144,6 +147,14 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         "loopback_ac": getattr(run, "ac_attempts", 0),
 
         # --- cost ---
+        # credit_source says which method produced the cost fields below:
+        #   "sdk"     -> premium_cost_* / nano_aiu_* (SDK-reported, raw units)
+        #   "account" -> credits_actual / credits_<phase> (billing-counter delta)
+        "credit_source": (str(getattr(cfg, "credit_source", "sdk") or "sdk").lower()
+                          if cfg is not None else None),
+        "cost_reported_by": getattr(run, "cost_source", None),
+        "premium_cost_total": getattr(run, "total_premium_cost", None),
+        "nano_aiu_total": getattr(run, "total_nano_aiu", None),
         "credits_actual": getattr(run, "credits_actual", None),
         "tokens_total": (tokens.get("input", 0) or 0) + (tokens.get("output", 0) or 0),
         "tokens_input": tokens.get("input"),
@@ -185,6 +196,36 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
     for pid, total in _credit_sums.items():
         if _credit_seen.get(pid):
             rec[f"credits_{pid}"] = total
+
+    # SDK-reported cost per phase (schema v3), summed across every attempt of
+    # the phase so a loopback's cost is included. Like credits_<phase>, a phase
+    # with no reported figure emits NO key rather than a misleading 0.
+    _pc: dict = {}
+    _na: dict = {}
+    for entry in (getattr(run, "phase_credit_log", None) or []):
+        pid = entry.get("phase")
+        if not pid:
+            continue
+        if isinstance(entry.get("premium_cost"), (int, float)):
+            _pc[pid] = round(_pc.get(pid, 0.0) + float(entry["premium_cost"]), 6)
+        if isinstance(entry.get("nano_aiu"), (int, float)):
+            _na[pid] = _na.get(pid, 0.0) + float(entry["nano_aiu"])
+    for pid, v in _pc.items():
+        rec[f"premium_cost_{pid}"] = v
+    for pid, v in _na.items():
+        rec[f"nano_aiu_{pid}"] = v
+
+    # Per ACTUAL model across the run, flattened: usage_<model>_<metric>. The
+    # model id is made key-safe (gpt-5.4-mini -> gpt-5.4-mini; anything outside
+    # [A-Za-z0-9._-] becomes '_'). models_used lists them for easy filtering.
+    _mu = dict(getattr(run, "model_usage", None) or {})
+    rec["models_used"] = ",".join(sorted(_mu)) or None
+    for mid, m in _mu.items():
+        key = _SAFE.sub("_", str(mid))
+        for metric in ("requests", "input", "output", "premium_cost", "nano_aiu"):
+            v = m.get(metric)
+            if isinstance(v, (int, float)):
+                rec[f"usage_{key}_{metric}"] = v
 
     _add_context_metrics(rec, repo_root, cfg, log)
     _add_validation_metrics(rec, repo_root, log)
