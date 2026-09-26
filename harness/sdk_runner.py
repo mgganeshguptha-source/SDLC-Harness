@@ -1056,6 +1056,12 @@ class SdkAgentRunner:
             tb = traceback.format_exc()
             self.log("  ! SDK exception:\n" + tb)
             msg = f"{type(e).__name__}: {e}" if str(e) else f"{type(e).__name__} (no message)"
+            # Carry the cause onto the run so the state machine's SDK_ERROR halt
+            # message can name it instead of "(no message captured)".
+            try:
+                run.halt_detail = f"sdk: {msg}"[:300]
+            except Exception:
+                pass
             # A phase that fails after its session reported usage still cost
             # something — carry whatever was captured rather than dropping it.
             return AgentResult(errored=True, error_msg=msg,
@@ -1504,6 +1510,36 @@ class SdkAgentRunner:
                 self._last_usage = usage
                 self._last_skills = skills_loaded
                 self._last_tools = tools_invoked
+
+        # ---- FATAL SESSION ERROR ----
+        # A session that ended on `session.error` without the model producing a
+        # single message or write did no work at all — e.g. Copilot rejected the
+        # model credential ("Personal Access Tokens are not supported for this
+        # endpoint"). Returning a normal result here made the executor report
+        # exit 0 (OK); in the context phase the gate then found no context file
+        # and halted as needs_input / NEEDS_CLARIFICATION, pointing developers at
+        # the story. Report it as an error so it surfaces as SDK_ERROR instead.
+        # Deliberately narrow: a session.error AFTER real output (messages or
+        # writes) is left to the normal gates, which judge what was produced.
+        try:
+            _sess_err = [e for e in errors if e.startswith("session.error")]
+            if (_sess_err and not attempted_writes
+                    and not (last_message.get("text") or "").strip()
+                    and not seen_events.get("assistant.message")):
+                _msg = _sess_err[0][len("session.error: "):] or _sess_err[0]
+                self.log(f"  ! fatal session error in phase '{phase.id}' — no work "
+                         f"was done; reporting as SDK_ERROR")
+                try:
+                    run.halt_detail = f"sdk: {_msg}"[:300]
+                except Exception:
+                    pass
+                return AgentResult(errored=True, error_msg=_msg,
+                                   tokens=getattr(self, "_last_usage", {}),
+                                   usage_metrics=getattr(self, "_last_usage_metrics", {}) or {})
+        except NameError:
+            # the session never opened, so none of the event bookkeeping exists;
+            # fall through to the normal result
+            pass
 
         return AgentResult(attempted_writes=attempted_writes, iterations_used=1,
                            tokens=getattr(self, "_last_usage", {}),

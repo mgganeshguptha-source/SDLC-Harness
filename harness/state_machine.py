@@ -581,6 +581,45 @@ class StateMachine:
                 self.log(msg)
                 run.last_feedback = msg
 
+            # SDK / model-call failure. Previously this halted silently, and in
+            # the CONTEXT phase it was worse: the executor reported OK, the
+            # context gate found no context file, and the run showed up as
+            # needs_input / "NEEDS_CLARIFICATION" — sending developers to fix a
+            # story that was never the problem. sdk_runner now reports a fatal
+            # session.error as an error, and this names it plainly.
+            if run.halt_gate in (HG.SDK_ERROR, HG.CONFIG_ERROR):
+                _why = (getattr(self.executor, "last_error", None)
+                        or getattr(run, "halt_detail", None) or "")
+                _low = str(_why).lower()
+                if ("personal access tokens are not supported" in _low
+                        or "third-party user token" in _low):
+                    _action = ("The Copilot MODEL credential is a classic PAT, which "
+                               "Copilot rejects. Set COPILOT_MODEL_TOKEN (the engine "
+                               "workflow defaults it to the Actions token) and check "
+                               "`copilot-requests: write` in the caller and engine job.")
+                elif any(s in _low for s in ("401", "403", "unauthorized", "forbidden",
+                                              "bad credentials")):
+                    _action = ("The model credential was refused. Check the token "
+                               "kind, expiry, SSO authorisation and Copilot policy.")
+                elif any(s in _low for s in ("429", "rate limit", "quota")):
+                    _action = "Rate limit or quota reached. Wait, then resume."
+                else:
+                    _action = ("Read the '[diag] ERROR EVENT' / 'SDK exception' lines "
+                               "above for the cause.")
+                msg = (
+                    "\n  ============== SDK / INFRASTRUCTURE ERROR: HALTED ==============\n"
+                    f"  Phase  : {phase.id}\n"
+                    f"  Error  : {str(_why)[:400] or '(no message captured)'}\n"
+                    "  This is the harness's plumbing (auth, network, Copilot CLI), not\n"
+                    "  the story or the code. No phase will be retried.\n"
+                    f"  Action : {_action}\n"
+                    f"  Resume : feature_id={run.feature_id}, resume=true, "
+                    f"start_phase={phase.id}\n"
+                    "  ================================================================\n"
+                )
+                self.log(msg)
+                run.last_feedback = msg
+
             run.save(self.harness_dir)
             return run
 
@@ -854,22 +893,41 @@ class StateMachine:
                     # burn the retry budget and real credits for nothing).
                     # ============================================================
                     if kind == "environment":
-                        from halt_gates import CONFIG_ERROR
-                        run.status = "halted"
-                        run.halt_gate = CONFIG_ERROR
-                        run.halt_detail = f"environment: {vr.summary}"
-                        self.log("")
-                        self.log("  ================ ENVIRONMENT FAILURE: HALTED ================")
-                        self.log("  The build tooling could not run the tests — this is an")
-                        self.log("  environment problem, not a code problem. No phase can fix it.")
-                        self.log(f"  Detail : {vr.summary}")
-                        self.log("  Likely : the Maven wrapper is not executable or not found.")
-                        self.log("           On the branch, run:")
-                        self.log("             git update-index --chmod=+x mvnw")
-                        self.log("             git commit -m 'make mvnw executable' && git push")
-                        self.log("           then re-run the harness (resume or fresh).")
-                        self.log("  ============================================================")
-                        return
+                        self._halt_environment(run, phase, vr,
+                                               getattr(vr, "env_reason", None),
+                                               getattr(vr, "env_hint", ""))
+                        # MUST return the run. This branch used to end in a bare
+                        # `return`, handing None back to run_until_pause, which
+                        # then crashed on `None.status` (AttributeError at the
+                        # `while run.status == "running"` line) after the halt.
+                        return run
+
+                    # ============================================================
+                    # UNATTRIBUTABLE REPEAT: the build failed, a phase changed the
+                    # code, and it failed again with the SAME error — and that
+                    # error names no source file, no test and no compile error.
+                    # Nothing the code phases own can be the cause, so another
+                    # loopback only burns credits. This catches environment faults
+                    # the signature list in validation.py does not know yet.
+                    # One loopback is still allowed first: a single failure with
+                    # no source reference is not proof on its own.
+                    # ============================================================
+                    try:
+                        import zlib
+                        from validation import is_code_attributable
+                        _err = "\n".join(ln.strip() for ln in (vr.output_tail or "").splitlines()
+                                         if "[ERROR]" in ln or "[FATAL]" in ln)
+                        _fp = zlib.crc32((_err or vr.output_tail or "").encode("utf-8", "replace"))
+                        _prev_fp = run.iterations.get("__validation_fp__")
+                        run.iterations["__validation_fp__"] = int(_fp)
+                        if (_prev_fp is not None and int(_prev_fp) == int(_fp)
+                                and not is_code_attributable(vr.output_tail)):
+                            from validation import environment_hint as _ehint
+                            self._halt_environment(run, phase, vr, "unattributable",
+                                                   _ehint("unattributable"))
+                            return run
+                    except Exception as _e:
+                        self.log(f"  [harness] repeat-failure check skipped ({type(_e).__name__})")
 
                     # ============================================================
                     # COVERAGE MISS: tests pass but per-change coverage < target.
@@ -1100,6 +1158,30 @@ class StateMachine:
         run.halt_detail = f"unmapped exit code {int(code)}"
         run.save(self.harness_dir)
         return run
+
+    def _halt_environment(self, run: RunState, phase: Phase, vr, reason, hint: str) -> None:
+        """Halt on a build failure that no phase can fix, with a reason-specific
+        remedy. CONFIG_ERROR is an INFRA gate: it is reported as our plumbing,
+        not as the work being unacceptable."""
+        run.status = "halted"
+        run.halt_gate = HG.CONFIG_ERROR
+        run.halt_detail = f"environment ({reason or 'unknown'}): {vr.summary}"[:200]
+        msg = (
+            "\n  ================ ENVIRONMENT FAILURE: HALTED ================\n"
+            "  The build could not be completed for a reason outside the code —\n"
+            "  no phase can fix it, so the harness stopped instead of looping.\n"
+            f"  Detail : {vr.summary}\n"
+            f"  Reason : {reason or 'unknown'}\n"
+            f"  Action : {hint or 'Read the tail below and fix the build environment.'}\n"
+            f"  Resume : feature_id={run.feature_id}, resume=true, "
+            f"start_phase={phase.id}\n"
+            "  --- build output tail ---\n"
+            f"{vr.output_tail}\n"
+            "  ============================================================\n"
+        )
+        self.log(msg)
+        run.last_feedback = msg
+        run.save(self.harness_dir)
 
     def resolve_gate(self, run: RunState, approved: bool, feedback: str = "") -> RunState:
         """Apply a human decision to a phase that is awaiting approval."""

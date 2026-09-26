@@ -30,6 +30,12 @@ class ValidationResult:
     #   "coverage" -> tests pass but per-change coverage below threshold
     #                 => loop back to unit_testing
     failure_kind: str | None = None
+    # When failure_kind == "environment": which kind of environment problem, and
+    # what a human should do about it. The state machine prints these in the halt
+    # message so the operator is not told to chmod mvnw for a network problem.
+    #   env_reason: "toolchain" | "dependency" | "network_auth" | "unattributable"
+    env_reason: str | None = None
+    env_hint: str = ""
     # Coverage detail (populated when the coverage gate ran), for messaging.
     coverage_pct: float | None = None
     coverage_target: float | None = None
@@ -170,38 +176,148 @@ def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str
     return joined
 
 
-def _is_environment_failure(exit_code: int, output: str) -> bool:
-    """True when the BUILD COULD NOT RUN — an environment/tooling problem, not a
-    code or test failure. No coding or unit_testing phase can fix these, so the
-    state machine halts immediately rather than looping model phases against them.
+# ---- ENVIRONMENT SIGNATURES ----
+# Failures that no coding or unit_testing phase can fix, because the cause is not
+# in src/main or src/test. Each group has its own remedy, printed in the halt
+# message. All matching is on lower-cased output.
+#
+# DEPENDENCY and NETWORK/AUTH signatures are specific to Maven's resolver and
+# never appear in a compile error or a red test, so they are trusted on sight.
+# Observed at BCBSM (run 36233435904): an internal parent POM
+# (mem-starter-parent) that only the corporate artifact repository serves.
+# Before this list existed the failure was routed to 'coding' and
+# 'unit_testing' as a code defect, and burned the retry budget on a problem
+# neither phase could touch.
+_DEPENDENCY_SIGNATURES = (
+    "non-resolvable parent pom",
+    "non-resolvable import pom",
+    "unresolvablemodelexception",
+    "could not resolve dependencies",
+    "could not transfer artifact",
+    "failed to read artifact descriptor",
+    "or one of its dependencies could not be resolved",   # plugin resolution
+    "could not find artifact",
+    "was cached in the local repository, resolution will not be reattempted",
+)
+_NETWORK_AUTH_SIGNATURES = (
+    "unknownhostexception",
+    "unknown host",
+    "connection refused",
+    "connect timed out",
+    "connection timed out",
+    "no route to host",
+    "pkix path building failed",
+    "unable to find valid certification path",
+    "status code: 401",
+    "status code: 403",
+    "401 unauthorized",
+    "403 forbidden",
+    "not authorized",
+)
+# TOOLCHAIN signatures mean the build tool itself never started. Some of these
+# strings are generic ("no such file or directory", "permission denied") and can
+# legitimately appear in a TEST's own output, so they are only trusted when the
+# build lifecycle shows no sign of having run (see _lifecycle_started).
+_TOOLCHAIN_SIGNATURES = (
+    "mvnw: permission denied",
+    "mvnw: not found",
+    "./mvnw: 1: ",                       # sh wrapper error prefix on a broken mvnw
+    "permission denied",
+    "no such file or directory",
+    "command not found",
+    "unable to access jarfile",
+    "could not create the java virtual machine",
+    "no java virtual machine",
+    "java_home is not defined",
+    "could not find or load main class",
+    "mavenwrappermain",
+    "no compiler is provided in this environment",
+)
 
-    The distinction is 'did the build start': exit 126/127 and the signatures
-    below mean the shell never got the build tool running. Anything where Maven
-    (or the configured tool) actually started and THEN failed — a compile error,
-    a red test — returns False and follows the normal test/coverage routing.
+_HINTS = {
+    "toolchain": (
+        "The build tool could not start. Check that the Maven wrapper is complete\n"
+        "           (mvnw plus .mvn/wrapper/), executable, and uses LF line endings,\n"
+        "           and that a JDK is on the runner. The harness workflow makes\n"
+        "           mvnw executable and falls back to the runner's mvn when\n"
+        "           .mvn/wrapper/ is missing — if this still fails, the wrapper\n"
+        "           or JDK setup on the runner needs attention."),
+    "dependency": (
+        "Maven could not download a parent POM, dependency or plugin. The code\n"
+        "           was never compiled, so no phase can fix this. Usually the\n"
+        "           artifact lives in a private/internal repository the runner\n"
+        "           cannot reach. Fix one of:\n"
+        "             - give the runner a settings.xml with that repository and\n"
+        "               read credentials (secrets), if it is reachable from here;\n"
+        "             - run the harness on a self-hosted runner inside the network\n"
+        "               that normally builds this repo;\n"
+        "             - or, if a NEW dependency is the cause, add it by hand.\n"
+        "           Then resume from the phase that halted."),
+    "network_auth": (
+        "Maven could not reach, or was refused by, a repository (host lookup,\n"
+        "           connection, TLS certificate, or 401/403). Check the runner's\n"
+        "           network access, proxy/certificate setup, and repository\n"
+        "           credentials, then resume."),
+    "unattributable": (
+        "The build failed the same way again after a phase changed the code, and\n"
+        "           the failure names no source file, no test and no compile error —\n"
+        "           so the code phases cannot be what is wrong. Read the tail above,\n"
+        "           fix the build environment, then resume."),
+}
+
+
+def _lifecycle_started(low: str) -> bool:
+    """True when Maven clearly got far enough to build or test something.
+
+    Used to keep generic launcher strings ("no such file or directory") from
+    misclassifying a test that failed on a missing file as an environment fault.
+    """
+    return ("tests run:" in low
+            or "compilation error" in low
+            or "compilation failure" in low
+            or "t e s t s" in low)
+
+
+def classify_environment_failure(exit_code: int, output: str) -> str | None:
+    """Return the environment reason when the build failed for a cause no code
+    phase can fix, else None.
+
+    Order matters: dependency and network/auth signatures are specific and win;
+    generic toolchain strings only count when the lifecycle never started.
     """
     # 126 = found but not executable (e.g. ./mvnw without the +x bit).
     # 127 = command not found (missing wrapper / mvn not on PATH).
     if exit_code in (126, 127):
-        return True
+        return "toolchain"
     low = (output or "").lower()
-    # The build tool itself could not be launched. These strings appear when the
-    # shell or the JVM launcher failed BEFORE any build lifecycle ran. Kept
-    # deliberately narrow so a normal BUILD FAILURE (compile/test) never matches.
-    signatures = (
-        "mvnw: permission denied",
-        "mvnw: not found",
-        "./mvnw: 1: ",                       # sh wrapper error prefix on a broken mvnw
-        "permission denied",                 # generic; paired with 126 above, safe here
-        "no such file or directory",
-        "command not found",
-        "unable to access jarfile",
-        "could not create the java virtual machine",
-        "no java virtual machine",
-        "java_home is not defined",
-        "error: could not find or load main class",
-    )
-    return any(s in low for s in signatures)
+    if any(s in low for s in _DEPENDENCY_SIGNATURES):
+        return "dependency"
+    if any(s in low for s in _NETWORK_AUTH_SIGNATURES) and not _lifecycle_started(low):
+        return "network_auth"
+    if any(s in low for s in _TOOLCHAIN_SIGNATURES) and not _lifecycle_started(low):
+        return "toolchain"
+    return None
+
+
+def environment_hint(reason: str | None) -> str:
+    return _HINTS.get(reason or "", "")
+
+
+def is_code_attributable(output: str) -> bool:
+    """True when a failed build points at code the phases own: a source path, a
+    compile error, or a test result. A failure with none of these cannot be fixed
+    by editing src/main or src/test — used by the state machine to stop repeating
+    loopbacks against an unrecognised environment fault."""
+    low = (output or "").lower()
+    return (_lifecycle_started(low)
+            or "/src/main/" in low or "\\src\\main\\" in low
+            or "/src/test/" in low or "\\src\\test\\" in low
+            or ".java:[" in low)
+
+
+def _is_environment_failure(exit_code: int, output: str) -> bool:
+    """Backward-compatible boolean wrapper around classify_environment_failure."""
+    return classify_environment_failure(exit_code, output) is not None
 
 
 def run_validation(repo_root: Path, harness_dir: Path, log=print,
@@ -293,18 +409,24 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     # isn't executable, isn't found, or the JVM couldn't launch. No code or test
     # phase can fix this, so mark it distinctly; the state machine halts on it
     # instead of looping coding/unit_testing against an unfixable error.
-    if not passed and _is_environment_failure(proc.returncode, out):
+    _env = None if passed else classify_environment_failure(proc.returncode, out)
+    if _env:
         failure_kind = "environment"
-        summary = f"ENVIRONMENT FAILURE (exit {proc.returncode}) — build did not run"
+        _labels = {
+            "toolchain": "build tool could not start",
+            "dependency": "a parent POM, dependency or plugin could not be resolved",
+            "network_auth": "a repository could not be reached or refused access",
+        }
+        summary = (f"ENVIRONMENT FAILURE (exit {proc.returncode}) — "
+                   f"{_labels.get(_env, 'build did not run')}")
         log(f"  ! {summary}")
-        log("    The test command could not execute (e.g. ./mvnw not executable, "
-            "not found, or JVM launch failed). This is an environment problem, "
-            "not a code problem — no phase can fix it.")
+        log("    This is an environment problem, not a code problem — no phase "
+            "can fix it, so the harness will halt instead of looping.")
         report = harness_dir / "validation-report.txt"
         try:
             report.write_text(
                 f"command: {cmd}\nexit_code: {proc.returncode}\n"
-                f"summary: {summary}\n\n--- tail ---\n"
+                f"summary: {summary}\nenvironment_reason: {_env}\n\n--- tail ---\n"
                 + tail.replace("http://", "hxxp://") + "\n",
                 encoding="utf-8",
             )
@@ -312,6 +434,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             pass
         return ValidationResult(
             False, proc.returncode, summary, tail, failure_kind="environment",
+            env_reason=_env, env_hint=environment_hint(_env),
         )
 
     # Maven prints BUILD SUCCESS / BUILD FAILURE; use exit code as source of truth,
