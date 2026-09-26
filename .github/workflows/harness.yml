@@ -102,15 +102,31 @@ on:
         type: string
     secrets:
       COPILOT_GITHUB_TOKEN:
-        description: "Fine-grained PAT on a Copilot-licensed seat (Contents RW, PRs RW, Copilot Requests: Read)"
+        description: >-
+          Repo-access token: checkout of the engine + toolkit (both private in an
+          org), git push, gh pr create. A classic PAT is acceptable here. It is
+          NOT used for Copilot model calls — see COPILOT_MODEL_TOKEN below.
         required: true
+      COPILOT_MODEL_TOKEN:
+        description: >-
+          OPTIONAL Copilot model credential. Leave unset to use the built-in
+          Actions token (github.token + copilot-requests: write), billed to the
+          organization. Set only when that route is unavailable, and never to a
+          CLASSIC PAT (ghp_) — Copilot rejects it for model calls. Accepted: gho_,
+          ghu_, or a fine-grained PAT with the Copilot Requests permission.
+        required: false
 
 jobs:
   harness:
     runs-on: ubuntu-latest
+    # A job-level permissions block sets every UNLISTED permission to none.
+    # copilot-requests: write lets the built-in Actions token pay for Copilot
+    # model calls (billed to the organization). It must be granted here AND in
+    # the caller workflow — a reusable workflow can never exceed its caller.
     permissions:
       contents: write
       pull-requests: write
+      copilot-requests: write
     steps:
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
@@ -140,15 +156,18 @@ jobs:
           python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
 
       # --- 2. THIS engine repo -> ./engine ---
-      # No token: SDLC-Harness is public, and a public repo is readable by the
-      # runner's default credentials. If it is ever made private, every caller will
-      # need a token that can read it — see the note in step 2b.
+      # TOKEN REQUIRED. The engine repo is private/internal inside an org (the BCBSM
+      # case). The default Actions token is scoped to the CALLER's repo only and
+      # cannot read another private repo, so without an explicit token checkout
+      # fails with "could not read Username for 'https://github.com'". The same
+      # COPILOT_GITHUB_TOKEN that reads the toolkit reads the engine.
       - name: Checkout SDLC-Harness
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.engine_repo }}
           ref: ${{ inputs.engine_ref }}
           path: engine
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
 
       # --- 2b. FAIL LOUDLY if the engine did not actually arrive ---
       # actions/checkout can report "Repository not found" without failing the step,
@@ -163,7 +182,8 @@ jobs:
             echo "Checked for engine/harness/run.py — not found."
             echo "Likely causes:"
             echo "  * the repo/ref does not exist (check the tag '${{ inputs.engine_ref }}' is pushed)"
-            echo "  * the repo is private and this run has no credentials that can read it"
+            echo "  * COPILOT_GITHUB_TOKEN cannot read the engine repo (expired, no SSO"
+            echo "    authorisation, or no access to that repo)"
             echo ""
             echo "Contents of ./engine:"
             ls -la engine 2>/dev/null || echo "  (directory missing)"
@@ -221,6 +241,45 @@ jobs:
           fi
           echo "Loaded skills/instructions from ${{ inputs.toolkit_repo }}@${{ inputs.toolkit_ref }}"
 
+      # --- 3c. make build wrappers executable on the runner ---
+      # Repos committed from Windows store mvnw / gradlew as mode 100644 (Windows
+      # does not track the execute bit). On the Linux runner that makes
+      # `./mvnw test` exit 126 and the validation gate halts with ENVIRONMENT
+      # FAILURE. chmod here fixes it for THIS run only, with no change to the
+      # service repo. core.fileMode=false stops git from seeing the mode flip as
+      # a change, so it never lands on the WIP or PR branch.
+      #
+      # INCOMPLETE MAVEN WRAPPER. Some repos commit the mvnw script but not its
+      # .mvn/wrapper/ folder (maven-wrapper.properties / maven-wrapper.jar). The
+      # script then exits 1 with "Could not find or load main class
+      # org.apache.maven.wrapper.MavenWrapperMain" and the build never runs. Those
+      # teams build with a plain `mvn` (e.g. in Jenkins). GitHub-hosted
+      # ubuntu-latest runners have Maven preinstalled, so the runner copy of mvnw
+      # is replaced with a one-line shim that calls `mvn`. The engine still runs
+      # `./mvnw test`, unchanged. `assume-unchanged` hides the edit from git, so
+      # `git add -u` / `git add -A` never stage it onto the WIP or PR branch. The
+      # service repo itself is not modified.
+      - name: Make build wrappers executable
+        working-directory: service
+        run: |
+          git config core.fileMode false
+          for w in mvnw gradlew; do
+            if [ -f "$w" ]; then
+              chmod +x "$w"
+              echo "Made $w executable (runner copy only)."
+            fi
+          done
+          if [ -f mvnw ] && [ ! -f .mvn/wrapper/maven-wrapper.properties ]; then
+            if command -v mvn >/dev/null 2>&1; then
+              printf '#!/bin/sh\n# harness shim: repo has mvnw but no .mvn/wrapper/\nexec mvn "$@"\n' > mvnw
+              chmod +x mvnw
+              git update-index --assume-unchanged mvnw
+              echo "::warning title=Maven wrapper incomplete::.mvn/wrapper/ is missing in this repo; ./mvnw now calls the runner's mvn ($(mvn -v 2>/dev/null | head -1)). Runner copy only — repo unchanged."
+            else
+              echo "::warning title=Maven wrapper incomplete::.mvn/wrapper/ is missing and no mvn is installed on this runner; validation will fail."
+            fi
+          fi
+
       # --- 4. toolchains ---
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -247,6 +306,18 @@ jobs:
         run: npm install -g @github/copilot
 
       # --- 6. run the harness (from inside engine/harness for flat imports) ---
+      #
+      # MODEL CREDENTIAL — WHY COPILOT_MODEL_TOKEN IS SET HERE.
+      # sdk_runner.py picks the model credential in this order:
+      #   COPILOT_MODEL_TOKEN -> COPILOT_GITHUB_TOKEN -> GITHUB_TOKEN
+      # COPILOT_GITHUB_TOKEN is the repo-access classic PAT, which Copilot rejects
+      # for model calls ("Personal Access Tokens are not supported for this
+      # endpoint"). So COPILOT_MODEL_TOKEN MUST be present, or the PAT silently
+      # becomes the model credential and the first phase fails with a 400.
+      # Default = the built-in Actions token (ghs_), authorised for Copilot by
+      # `copilot-requests: write` on this job and in the caller. An explicit
+      # COPILOT_MODEL_TOKEN secret, if the caller passes one, takes precedence.
+      #
       # `init` WIPES run-state.json, so it must not run when resuming — that was
       # the whole reason a halted run could only ever start over.
       - name: Initialize run (fresh runs only)
@@ -254,6 +325,7 @@ jobs:
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py init \
@@ -278,6 +350,9 @@ jobs:
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          # Model credential — see the note at step 6. Without this line the
+          # classic PAT above is used for model calls and Copilot rejects it.
+          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
           GIT_AUTHOR_NAME: "harness-bot"
           GIT_AUTHOR_EMAIL: "harness-bot@users.noreply.github.com"
           GIT_COMMITTER_NAME: "harness-bot"
@@ -293,10 +368,11 @@ jobs:
 
       # --- 7. collect audit files into service/audit/ (local copy) ---
       - name: Collect audit
-        if: always()
+        if: always() && hashFiles('engine/harness/run.py') != ''
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py collect-audit --repo ../../service || true
