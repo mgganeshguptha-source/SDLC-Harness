@@ -409,17 +409,28 @@ jobs:
           # -B with no start point keeps the working tree and just moves the ref,
           # so the source the agent wrote is preserved on the resume point.
           git checkout -B "$WIP_BRANCH"
-          # Keep the WIP branch to RESUME STATE + SOURCE only. Do NOT `git add -A`:
-          # that would drag the run workspace (audit/, context files, the rest of
-          # .harness/) onto the resume point. Artifacts belong on harness-metrics.
-          # Stage tracked source changes, then force-add only the two resume files.
-          git add -u 2>/dev/null || true
-          git add src docs 2>/dev/null || true
-          # The service repo's .gitignore excludes the run workspace so it never
-          # pollutes normal dev branches. The WIP branch is the resume point and
-          # MUST carry these two files, or `resume=true` fails with "no
-          # run-state.json". Force-add them here so they land on the WIP branch only.
-          git add -f .harness/run-state.json .harness/blocked.md 2>/dev/null || true
+          # Keep the WIP branch to RESUME STATE + SOURCE only.
+          #
+          # MULTI-MODULE SAFE. The previous version staged `git add -u` plus
+          # `git add src docs`. In a multi-module repo (code under
+          # <module>/src/...) there is no root src/, so that pathspec failed and
+          # every NEW file the agent created (e.g. a new test class) was silently
+          # left out. Instead: stage everything, then unstage the paths that must
+          # never ride on WIP — the run workspace, audit trail, metrics, and the
+          # toolkit copies placed under .github/ for this run. Artifacts belong on
+          # harness-metrics (step 8a). Build output is excluded by the repo's own
+          # .gitignore; the mvnw shim is hidden by assume-unchanged (step 3c).
+          git add -A
+          git reset -q -- .harness audit metrics \
+            .github/skills .github/instructions .github/story-context-files 2>/dev/null || true
+          # The WIP branch is the resume point and MUST carry run-state.json, or
+          # `resume=true` fails with "no run-state.json". Each file is force-added
+          # ON ITS OWN: `git add -f a b` aborts entirely when one path is missing,
+          # and blocked.md does not exist on every halt (e.g. an environment
+          # failure) — which is how run-state.json went missing before.
+          for f in .harness/run-state.json .harness/blocked.md; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
           STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
           if git diff --cached --quiet; then
             echo "Nothing new to commit on $WIP_BRANCH."
@@ -549,36 +560,46 @@ jobs:
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
 
-          # 1) Stash the code the run produced (src/ + docs/) so it survives the
-          #    branch switch. Also stash the PR body text (used by gh below); it
-          #    lives under .harness/ which we deliberately leave behind, so copy it
-          #    out first. Everything else (.harness/, audit/, metrics/) is dropped.
+          # MULTI-MODULE SAFE. The previous version copied only a ROOT src/ and
+          # docs/ onto the PR branch. In a multi-module repo (code under
+          # <module>/src/...) that copied nothing, so the PR came out empty.
+          # Instead the PR takes exactly the files the WIP branch changed relative
+          # to the base, wherever they live, minus the harness-only paths.
+
+          # 1) The WIP commit (step 8) holds the run's code. Keep the PR body text
+          #    (used by gh below); it lives under .harness/, which is left behind.
+          WIP_SHA=$(git rev-parse HEAD)
           WORKTREE="$(mktemp -d)"
-          if [ -d src ]; then cp -a src "$WORKTREE/src"; fi
-          if [ -d docs ]; then cp -a docs "$WORKTREE/docs"; fi
           if [ -f .harness/pr-body.md ]; then cp -a .harness/pr-body.md "$WORKTREE/pr-body.md"; fi
 
-          # 2) Cut the PR branch CLEAN from the base dev branch. This gives a tree
-          #    identical to PR_BASE — no run artefacts, correct merge parent.
+          # 2) Files the run changed: diff from the merge-base (so later commits on
+          #    the base are never reverted), excluding everything harness-only.
           git fetch origin "$PR_BASE"
-          git checkout -B "$BRANCH" "origin/$PR_BASE"
+          MB=$(git merge-base "origin/$PR_BASE" "$WIP_SHA")
+          EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics'
+                ':(exclude).github/skills' ':(exclude).github/instructions'
+                ':(exclude).github/story-context-files')
+          git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/changed"
+          git diff -z --name-only --diff-filter=D     "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/deleted"
+          echo "Files carried into the PR:"
+          tr '\0' '\n' < "$WORKTREE/changed"
 
-          # 3) Lay the run's src/ and docs/ back on top of the clean base.
-          #    ($WORKTREE is kept until after the PR is opened — it still holds
-          #    pr-body.md, which the gh step below reads.)
-          if [ -d "$WORKTREE/src" ]; then rm -rf src && cp -a "$WORKTREE/src" src; fi
-          if [ -d "$WORKTREE/docs" ]; then rm -rf docs && cp -a "$WORKTREE/docs" docs; fi
+          # 3) Cut the PR branch CLEAN from the base and apply only those files.
+          git checkout -f -B "$BRANCH" "origin/$PR_BASE"
+          if [ -s "$WORKTREE/changed" ]; then
+            xargs -0 git checkout "$WIP_SHA" -- < "$WORKTREE/changed"
+          fi
+          if [ -s "$WORKTREE/deleted" ]; then
+            xargs -0 git rm -q --ignore-unmatch -- < "$WORKTREE/deleted"
+          fi
 
-          # 4) Safety net: even if the base branch itself tracks these folders,
-          #    make sure no run workspace / audit / metrics content is staged.
-          git add -A
+          # 4) Safety net: never let run workspace / audit / metrics be staged.
           git reset -q -- .harness audit metrics 2>/dev/null || true
-          git rm -r --cached -q --ignore-unmatch .harness audit metrics 2>/dev/null || true
 
-          # 5) Nothing to commit means the run produced no code change under src/
-          #    or docs/ — do not raise an empty PR; keep WIP for inspection.
+          # 5) Nothing to commit means the run produced no code change — do not
+          #    raise an empty PR; keep WIP for inspection.
           if git diff --cached --quiet; then
-            echo "::warning title=No code change to PR::No src/ or docs/ changes after clean-cut; PR skipped, WIP branch kept."
+            echo "::warning title=No code change to PR::The run changed no files outside the harness paths; PR skipped, WIP branch kept."
             echo "pr_raised=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
