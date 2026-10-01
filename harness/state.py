@@ -120,3 +120,38 @@ class RunState:
             return None
         data = json.loads(p.read_text(encoding="utf-8"))
         return cls(**data)
+
+
+# ---- per-run accounting ----
+# run-state.json survives a resume, so phase_token_log and the run-level totals
+# accumulate across every GitHub run of a feature. Each log entry is stamped
+# with the run that produced it, so reports and metrics can show THIS run alone.
+
+def current_run_id() -> str:
+    """The GitHub Actions run id, or "local" outside CI."""
+    import os
+    return os.environ.get("GITHUB_RUN_ID") or "local"
+
+
+def this_run_entries(run) -> list:
+    """phase_token_log entries produced by the current run (entries written
+    before run stamping existed have no run_id and count as earlier runs)."""
+    rid = current_run_id()
+    return [e for e in (getattr(run, "phase_token_log", None) or [])
+            if e.get("run_id") == rid]
+
+
+def sum_entries(entries: list) -> dict:
+    """Token and cost totals over phase_token_log entries. A cost stays None
+    when no entry reported it, so "not reported" never reads as 0."""
+    def _total(key):
+        vals = [e.get(key) for e in entries if e.get(key) is not None]
+        return sum(vals) if vals else None
+    return {
+        "input": sum(int(e.get("input_tokens") or 0) for e in entries),
+        "output": sum(int(e.get("output_tokens") or 0) for e in entries),
+        "cache_read": sum(int(e.get("cached_tokens") or 0) for e in entries),
+        "cache_write": sum(int(e.get("cache_write_tokens") or 0) for e in entries),
+        "premium_cost": _total("premium_cost"),
+        "nano_aiu": _total("nano_aiu"),
+    }
