@@ -110,7 +110,13 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
     Every lookup is defensive: a metrics record must never be the reason a run
     fails, so a missing field becomes null rather than an exception.
     """
-    tokens = dict(getattr(run, "total_tokens", None) or {})
+    # run-state.json survives a resume, so the run-level totals cover every run
+    # of the feature. A metrics record is ONE run: sum this run's entries only,
+    # and carry the cumulative figure separately.
+    from state import this_run_entries, sum_entries
+    this_run = this_run_entries(run)
+    t = sum_entries(this_run)
+    cumulative = dict(getattr(run, "total_tokens", None) or {})
     durations = dict(getattr(run, "phase_durations", None) or {})
 
     rec = {
@@ -153,17 +159,19 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         "credit_source": (str(getattr(cfg, "credit_source", "sdk") or "sdk").lower()
                           if cfg is not None else None),
         "cost_reported_by": getattr(run, "cost_source", None),
-        "premium_cost_total": getattr(run, "total_premium_cost", None),
-        "nano_aiu_total": getattr(run, "total_nano_aiu", None),
+        "premium_cost_total": t["premium_cost"],
+        "nano_aiu_total": t["nano_aiu"],
         "credits_actual": getattr(run, "credits_actual", None),
-        "tokens_total": (tokens.get("input", 0) or 0) + (tokens.get("output", 0) or 0),
-        "tokens_input": tokens.get("input"),
-        "tokens_output": tokens.get("output"),
-        "tokens_cache_read": tokens.get("cache_read"),
+        "tokens_total": t["input"] + t["output"],
+        "tokens_input": t["input"],
+        "tokens_output": t["output"],
+        "tokens_cache_read": t["cache_read"],
+        "tokens_total_all_runs": (cumulative.get("input", 0) or 0)
+                                 + (cumulative.get("output", 0) or 0),
     }
 
     # Per-phase tokens and durations, flattened.
-    for entry in (getattr(run, "phase_token_log", None) or []):
+    for entry in this_run:
         pid = entry.get("phase")
         if pid:
             key = f"tokens_{pid}"

@@ -188,8 +188,10 @@ class PhaseExecutor:
             est = (_cfg.estimate_cost(_model, _in, _out, cached_tokens=_cached,
                                       cache_write_tokens=_cwrite)
                    if _cfg else {"credits": None, "usd": None, "partial": False})
+            from state import current_run_id
             run.phase_token_log.append({
                 "phase": phase.id,
+                "run_id": current_run_id(),
                 "model": _model,
                 "phase_tokens": phase_io,
                 "cumulative_tokens": cumulative,
@@ -221,8 +223,10 @@ class PhaseExecutor:
             if _sk or _tl or _um:
                 from config import HarnessConfig as _HC0
                 _cfg0 = _HC0.load(self.harness_dir)
+                from state import current_run_id
                 run.phase_token_log.append({
                     "phase": phase.id,
+                    "run_id": current_run_id(),
                     "model": _cfg0.model_for_phase(phase.id) if _cfg0 else "",
                     "phase_tokens": 0,
                     "cumulative_tokens": (run.total_tokens.get("input", 0) or 0)

@@ -198,10 +198,13 @@ def _report_sdk_cost(run: RunState):
     to this run's own SDK sessions, so they are unaffected by anything else on
     the account and are available on org-billed seats.
     """
-    rows = [e for e in (run.phase_token_log or [])
+    from state import this_run_entries, sum_entries
+    # run-state.json survives a resume, so the log also holds earlier runs'
+    # attempts. This table is THIS run only; the cumulative figure follows it.
+    rows = [e for e in this_run_entries(run)
             if e.get("cost_source") or e.get("input_tokens") or e.get("output_tokens")]
     print()
-    if not rows and run.total_premium_cost is None and run.total_nano_aiu is None:
+    if not rows:
         print("  AI usage: not reported by the Copilot SDK for this run "
               "(token counts, where available, are shown above).")
         return
@@ -216,15 +219,22 @@ def _report_sdk_cost(run: RunState):
               f"{_fmt_num(e.get('output_tokens'), ',d'):>9}"
               f"{_fmt_num(e.get('premium_cost'), '.4f'):>10}"
               f"{_fmt_num(e.get('nano_aiu'), ',.0f'):>16}")
-    tk = run.total_tokens or {}
+    t = sum_entries(rows)
     print(f"    {'TOTAL':<14}{'':<30}"
-          f"{_fmt_num(tk.get('input'), ',d'):>11}"
-          f"{_fmt_num(tk.get('output'), ',d'):>9}"
-          f"{_fmt_num(run.total_premium_cost, '.4f'):>10}"
-          f"{_fmt_num(run.total_nano_aiu, ',.0f'):>16}")
+          f"{_fmt_num(t['input'], ',d'):>11}"
+          f"{_fmt_num(t['output'], ',d'):>9}"
+          f"{_fmt_num(t['premium_cost'], '.4f'):>10}"
+          f"{_fmt_num(t['nano_aiu'], ',.0f'):>16}")
+    if len(rows) < len(run.phase_token_log or []):
+        tk = run.total_tokens or {}
+        print(f"    {'ALL RUNS':<14}{'(this feature, incl. resumes)':<30}"
+              f"{_fmt_num(tk.get('input'), ',d'):>11}"
+              f"{_fmt_num(tk.get('output'), ',d'):>9}"
+              f"{_fmt_num(run.total_premium_cost, '.4f'):>10}"
+              f"{_fmt_num(run.total_nano_aiu, ',.0f'):>16}")
 
     if run.model_usage:
-        print("\n  by model (across the whole run):")
+        print("\n  by model (all runs of this feature, incl. resumes):")
         for mid, m in sorted(run.model_usage.items()):
             print(f"    {mid:<30} requests={m.get('requests', 0):<5} "
                   f"in={_fmt_num(m.get('input'), ',d')} out={_fmt_num(m.get('output'), ',d')} "
@@ -334,11 +344,15 @@ def cmd_collect_audit(args):
     pr-body.md, and a run-summary with token/cost totals. The PR step then commits
     this folder. Each run writes to its OWN run_id subfolder, so re-running the
     same feature never overwrites a prior run's trail."""
-    import shutil, json
+    import shutil, json, os
+    from state import this_run_entries, sum_entries
     repo = Path(args.repo).resolve()
     run = _load(repo)
     feature = run.feature_id
     run_id = _run_id()
+
+    def _sum_this_run(r):
+        return sum_entries(this_run_entries(r))
     audit_dir = repo / "audit" / feature / run_id
     audit_dir.mkdir(parents=True, exist_ok=True)
 
@@ -367,8 +381,11 @@ def cmd_collect_audit(args):
             dst = audit_dir / "context.md"
             shutil.copy2(ctxs[0], dst); copied.append("context.md")
     # planning + audit files from the workspace
-    for name in ("prompt-steps.md", "review.md", "validation-report.txt",
-                 "pr-body.md", "capability-manifest.json"):
+    # run-state.json and blocked.md are the resume state, kept here so ONE folder
+    # holds everything about the run.
+    for name in ("design.md", "prompt-steps.md", "review.md", "validation.md",
+                 "validation-report.txt", "pr-body.md", "capability-manifest.json",
+                 "run-state.json", "blocked.md"):
         src = hd / name
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)
@@ -382,9 +399,12 @@ def cmd_collect_audit(args):
         # workflow reads this to decide whether to keep the per-run audit branch.
         "retain_audit_branch": retain_audit_branch,
         "completed_phases": run.completed_phases,
-        "total_tokens": run.total_tokens,
+        # THIS run's tokens; total_tokens_all_runs includes earlier runs of the
+        # feature (a resume carries run-state.json forward).
+        "total_tokens": _sum_this_run(run),
+        "total_tokens_all_runs": run.total_tokens,
         "phase_token_log": run.phase_token_log,
-        "actor": getattr(run, "actor", None),
+        "actor": os.environ.get("GITHUB_ACTOR") or getattr(run, "actor", None),
         # SDK-reported usage for the whole run (credit_source "sdk").
         "sdk_usage": {
             "total_premium_cost": getattr(run, "total_premium_cost", None),
@@ -447,9 +467,12 @@ def _report(run: RunState):
     # second, token-priced guess would only invite the two figures to be confused.
     # Tokens are still shown per phase because they are what makes a phase runaway
     # visible — which loop burned the budget — and that is independent of pricing.
-    if run.phase_token_log:
-        print("\n  token usage by phase:")
-        for e in run.phase_token_log:
+    from state import this_run_entries, sum_entries
+    _this = this_run_entries(run)
+    _earlier = len(run.phase_token_log or []) - len(_this)
+    if _this:
+        print("\n  token usage by phase (this run):")
+        for e in _this:
             # The model the SDK reports as actually used, when known; otherwise
             # the configured one (which, under `auto`, just says "auto").
             _used = ",".join(e.get("models_used") or [])
@@ -487,14 +510,17 @@ def _report(run: RunState):
 
     # Aggregate token counts. Cost is NOT derived from these — the billed figure
     # comes from GitHub's billing API delta printed below.
+    if _this:
+        t = sum_entries(_this)
+        print(f"\n  totals (this run): input={t['input']} output={t['output']} "
+              f"cache_read={t['cache_read']} cache_write={t['cache_write']}")
+        print(f"          total tokens (in+out) = {t['input'] + t['output']}")
     tk = run.total_tokens or {}
     tin, tout = tk.get("input", 0), tk.get("output", 0)
-    if tin or tout:
-        print(f"\n  totals: input={tin} output={tout} "
-              f"cache_read={tk.get('cache_read', 0)} "
-              f"cache_write={tk.get('cache_write', 0)} "
-              f"reasoning={tk.get('reasoning', 0)}")
-        print(f"          total tokens (in+out) = {tin + tout}")
+    if _earlier and (tin or tout):
+        print(f"  totals (all runs of this feature, incl. {_earlier} earlier phase "
+              f"attempt(s)): input={tin} output={tout} "
+              f"total (in+out) = {tin + tout}")
 
     if run.status == "awaiting_approval":
         print(f"\n>>> Phase '{run.current_phase}' awaits your review.")
