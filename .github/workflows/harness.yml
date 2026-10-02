@@ -100,6 +100,15 @@ on:
         required: false
         default: ""
         type: string
+      runs_build:
+        description: >-
+          Harness builds the code, runs the unit tests and the coverage gate
+          after unit_testing (looping back on red or low coverage). Set false
+          when the runner cannot build the repo; the developer then builds and
+          tests locally before approving the PR.
+        required: false
+        default: true
+        type: boolean
     secrets:
       COPILOT_GITHUB_TOKEN:
         description: >-
@@ -362,6 +371,7 @@ jobs:
           HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
           HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
           HARNESS_RESUMED: ${{ inputs.resume }}
+          HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service

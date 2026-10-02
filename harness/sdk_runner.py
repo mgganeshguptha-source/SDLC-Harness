@@ -29,6 +29,7 @@ from phases import Phase
 from state import RunState
 from executor import AgentResult
 from boundaries import is_write_allowed, deny_reason
+from config import harness_runs_build
 
 # SDK imports are done lazily inside run() so the rest of the harness (and all the
 # zero-credit tests) import cleanly on machines without the SDK installed.
@@ -877,6 +878,26 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     except Exception:
         pass
 
+    # Build/test gate off (HARNESS_RUNS_BUILD=false): nothing was compiled or
+    # run, so validation judges by reading code and the PR must not claim green.
+    # On (default): the harness gate already built and tested — add nothing.
+    if harness_runs_build():
+        build_status_validation = build_status_pr = ""
+    else:
+        build_status_validation = (
+            "BUILD STATUS: the harness has NOT compiled this code or run any test "
+            "— the developer does that locally before approving the PR. Judge each "
+            "criterion by READING the production code and the test source. A test "
+            "that exists and asserts the criterion is evidence that the criterion "
+            "is covered, not proof that it passes. Do not mark a criterion "
+            "UNVERIFIABLE merely because tests were not run; use UNVERIFIABLE only "
+            "when reading the code cannot determine whether it holds.\n")
+        build_status_pr = (
+            "The harness did NOT compile the code or run the tests. Do NOT state or "
+            "imply that the build succeeded or that tests passed. Include a short "
+            "'How to verify' section telling the reviewer to build the project and "
+            "run the tests listed in the change locally before approving.\n")
+
     base = {
         "context": (
             f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
@@ -998,13 +1019,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Do NOT round UNVERIFIABLE up to MET: an unverified criterion is "
             f"unknown, not satisfied, and is the one most likely to be broken "
             f"because nothing has ever exercised it.\n"
-            f"BUILD STATUS: the harness has NOT compiled this code or run any test "
-            f"— the developer does that locally before approving the PR. Judge each "
-            f"criterion by READING the production code and the test source. A test "
-            f"that exists and asserts the criterion is evidence that the criterion "
-            f"is covered, not proof that it passes. Do not mark a criterion "
-            f"UNVERIFIABLE merely because tests were not run; use UNVERIFIABLE only "
-            f"when reading the code cannot determine whether it holds.\n"
+            f"{build_status_validation}"
             f"Write the result to this EXACT file (its parent .harness ALREADY "
             f"EXISTS, do not mkdir, shell is disallowed): {validation_file}\n"
             f"The verdict line is machine-read and its form is fixed — emit exactly "
@@ -1028,10 +1043,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Summarize the change for a pull request body and write it to "
             f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
             f"{pr_body}\n  STORY: {story}\n"
-            f"The harness did NOT compile the code or run the tests. Do NOT state or "
-            f"imply that the build succeeded or that tests passed. Include a short "
-            f"'How to verify' section telling the reviewer to build the project and "
-            f"run the tests listed in the change locally before approving.\n"
+            f"{build_status_pr}"
             f"Write ONLY {pr_body}."
         ),
     }

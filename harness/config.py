@@ -8,7 +8,22 @@ defaults for spring-petclinic on Windows are used.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
+import os
 import re
+
+
+def harness_runs_build() -> bool:
+    """True when the harness builds the code and runs the unit tests itself.
+
+    Controls the deterministic validation gate after 'unit_testing' (build +
+    tests), the coverage gate and its loopback. Read from the HARNESS_RUNS_BUILD
+    env var (set by the `runs_build` workflow input); default ON. Set it to
+    false/0/no/off when the runner cannot build the repo — the developer then
+    builds and runs the tests locally before approving the PR, and the
+    validation and raise_pr prompts say so.
+    """
+    v = os.environ.get("HARNESS_RUNS_BUILD", "").strip().lower()
+    return v not in ("false", "0", "no", "off")
 
 try:
     import yaml  # pyyaml
