@@ -30,23 +30,12 @@ from state import RunState
 import halt_gates as HG
 
 
-# ---- HARNESS BUILD/TEST GATE: OFF ----
-# Decision (BCBSM pilot, 2026-09-29 — "Option 1: developer validates locally"):
-# the harness does NOT compile the code or run the tests. The GitHub-hosted
-# runner cannot resolve BCBSM's internal parent POM / dependencies, and the
-# client prefers that no unreviewed AI-generated code is built or executed on
-# its infrastructure. The developer builds and runs the tests locally as part of
-# PR review; the PR description says so (see the raise_pr prompt and the PR
-# banner in harness.yml).
-#
-# Consequences while this is False:
-#   - the validation gate after 'unit_testing' (mvn test) is skipped;
-#   - the coverage gate is skipped (it needs the test run);
-#   - the AC conformance phase ('validation') still runs, judging by reading
-#     code and test source only.
-# The gate code below and validation.py are kept intact: set this to True to
-# restore the build/test gate when a runner that can build the repo exists.
-HARNESS_RUNS_BUILD = False
+# ---- HARNESS BUILD/TEST GATE ----
+# On by default: after 'unit_testing' the harness builds the code, runs the
+# tests and the coverage gate, and loops back on red / low coverage. Switch off
+# with HARNESS_RUNS_BUILD=false (see config.harness_runs_build) when the runner
+# cannot build the repo; the AC conformance phase then judges by reading code.
+from config import harness_runs_build
 
 
 class PhaseExecutor(Protocol):
@@ -889,12 +878,13 @@ class StateMachine:
 
             # ---- DETERMINISTIC VALIDATION GATE ----
             # The harness (not the agent) runs the tests. Red => halt before advancing.
-            # Currently OFF — see HARNESS_RUNS_BUILD at the top of this file.
-            if phase.validate_after and not HARNESS_RUNS_BUILD:
+            # Switchable — see harness_runs_build() at the top of this file.
+            _runs_build = harness_runs_build()
+            if phase.validate_after and not _runs_build:
                 self.log("  [harness] build/test gate: OFF — the harness does not "
                          "compile or run tests; the developer builds and runs them "
                          "locally before approving the PR.")
-            if phase.validate_after and HARNESS_RUNS_BUILD:
+            if phase.validate_after and _runs_build:
                 if self._validator is not None:
                     vr = self._validator(self.repo_root, self.harness_dir, self.log)
                 else:
