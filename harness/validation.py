@@ -198,6 +198,7 @@ _DEPENDENCY_SIGNATURES = (
     "or one of its dependencies could not be resolved",   # plugin resolution
     "could not find artifact",
     "was cached in the local repository, resolution will not be reattempted",
+    "in offline mode",                    # library-store (offline) build: not in the store
 )
 _NETWORK_AUTH_SIGNATURES = (
     "unknownhostexception",
@@ -251,6 +252,9 @@ _HINTS = {
         "               read credentials (secrets), if it is reachable from here;\n"
         "             - run the harness on a self-hosted runner inside the network\n"
         "               that normally builds this repo;\n"
+        "             - if the build runs from a library store (maven_libs_repo),\n"
+        "               the artifact is missing from it: capture and sync it\n"
+        "               into the store (see the store's README);\n"
         "             - or, if a NEW dependency is the cause, add it by hand.\n"
         "           Then resume from the phase that halted."),
     "network_auth": (

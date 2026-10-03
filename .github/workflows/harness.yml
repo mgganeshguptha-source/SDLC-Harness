@@ -100,6 +100,20 @@ on:
         required: false
         default: ""
         type: string
+      maven_libs_repo:
+        description: >-
+          owner/repo of a git library store (a Maven repository folder under
+          repository/, plus a Maven zip under tools/). When set, the build runs
+          OFFLINE from that store only: Maven Central is blocked on the runner
+          and nothing is downloaded. Blank = normal online build.
+        required: false
+        default: ""
+        type: string
+      maven_libs_ref:
+        description: "Branch/tag of maven_libs_repo to use."
+        required: false
+        default: "main"
+        type: string
       runs_build:
         description: >-
           Harness builds the code, runs the unit tests and the coverage gate
@@ -295,7 +309,69 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
-          cache: maven
+          # No Maven cache with a library store: the store IS the local repo.
+          cache: ${{ inputs.maven_libs_repo == '' && 'maven' || '' }}
+
+      # --- 4a. OFFLINE BUILD FROM A LIBRARY STORE (maven_libs_repo set) ---
+      # The runner cannot reach the internal artifact repository, so the build
+      # resolves ONLY from a git repo holding every library it needs. Maven runs
+      # offline against that folder, mvnw is pointed at the store's own Maven
+      # (the wrapper would otherwise download Maven from Maven Central), and
+      # Maven Central's hosts are blocked so any gap fails loudly instead of
+      # silently downloading. Runs AFTER setup-java, which writes its own
+      # ~/.m2/settings.xml that this step replaces.
+      - name: Checkout Maven library store
+        if: ${{ inputs.maven_libs_repo != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.maven_libs_repo }}
+          ref: ${{ inputs.maven_libs_ref }}
+          path: maven-libs
+          fetch-depth: 1
+          token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+
+      - name: Configure offline build from library store
+        if: ${{ inputs.maven_libs_repo != '' }}
+        run: |
+          set -euo pipefail
+          STORE="$GITHUB_WORKSPACE/maven-libs"
+          if [ ! -d "$STORE/repository" ]; then
+            echo "::error title=Library store invalid::${{ inputs.maven_libs_repo }} has no repository/ folder."
+            exit 1
+          fi
+          ZIP=$(ls "$STORE"/tools/apache-maven-*-bin.zip 2>/dev/null | head -1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "::error title=Library store invalid::${{ inputs.maven_libs_repo }} has no tools/apache-maven-*-bin.zip."
+            exit 1
+          fi
+          unzip -q "$ZIP" -d "$RUNNER_TEMP"
+          MVN_HOME=$(ls -d "$RUNNER_TEMP"/apache-maven-*/ | head -1)
+          echo "${MVN_HOME}bin" >> "$GITHUB_PATH"
+          # Mirror id MUST be 'central': the store's maven-metadata-central.xml
+          # files (needed for version ranges) are keyed by repository id.
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<EOF
+          <settings>
+            <localRepository>$STORE/repository</localRepository>
+            <offline>true</offline>
+            <mirrors>
+              <mirror>
+                <id>central</id>
+                <mirrorOf>*</mirrorOf>
+                <url>https://library-store.invalid/</url>
+              </mirror>
+            </mirrors>
+          </settings>
+          EOF
+          # mvnw would download Maven from Maven Central; use the store's Maven.
+          if [ -f service/mvnw ]; then
+            printf '#!/bin/sh\n# harness shim: offline build from the library store\nexec "%sbin/mvn" "$@"\n' "$MVN_HOME" > service/mvnw
+            chmod +x service/mvnw
+            git -C service update-index --assume-unchanged mvnw
+          fi
+          # Prove nothing comes from Maven Central: block its hosts.
+          echo "0.0.0.0 repo.maven.apache.org repo1.maven.org central.maven.org" | sudo tee -a /etc/hosts >/dev/null
+          echo "Offline build from ${{ inputs.maven_libs_repo }}@${{ inputs.maven_libs_ref }}: $(find "$STORE/repository" -type f | wc -l) files; $("${MVN_HOME}bin/mvn" -v 2>/dev/null | head -1)"
 
       - name: Set up Python
         uses: actions/setup-python@v5
