@@ -253,8 +253,9 @@ _HINTS = {
         "             - run the harness on a self-hosted runner inside the network\n"
         "               that normally builds this repo;\n"
         "             - if the build runs from a library store (maven_libs_repo),\n"
-        "               the artifact is missing from it: capture and sync it\n"
-        "               into the store (see the store's README);\n"
+        "               the artifact is missing from it: publish.sh it (internal\n"
+        "               library) or capture.sh the service (public library) in\n"
+        "               the store, then resume;\n"
         "             - or, if a NEW dependency is the cause, add it by hand.\n"
         "           Then resume from the phase that halted."),
     "network_auth": (

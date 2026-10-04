@@ -102,10 +102,11 @@ on:
         type: string
       maven_libs_repo:
         description: >-
-          owner/repo of a git library store (a Maven repository folder under
-          repository/, plus a Maven zip under tools/). When set, the build runs
-          OFFLINE from that store only: Maven Central is blocked on the runner
-          and nothing is downloaded. Blank = normal online build.
+          owner/repo of a git library store laid out like an artifact
+          repository: maven-remote/ (Maven Central copies), one folder per
+          internal release repository (e.g. petclinic-libs-PM/), and a Maven
+          zip under tools/. When set, the build resolves ONLY from that store:
+          Maven Central is blocked on the runner. Blank = normal online build.
         required: false
         default: ""
         type: string
@@ -312,13 +313,16 @@ jobs:
           # No Maven cache with a library store: the store IS the local repo.
           cache: ${{ inputs.maven_libs_repo == '' && 'maven' || '' }}
 
-      # --- 4a. OFFLINE BUILD FROM A LIBRARY STORE (maven_libs_repo set) ---
-      # The runner cannot reach the internal artifact repository, so the build
-      # resolves ONLY from a git repo holding every library it needs. Maven runs
-      # offline against that folder, mvnw is pointed at the store's own Maven
-      # (the wrapper would otherwise download Maven from Maven Central), and
-      # Maven Central's hosts are blocked so any gap fails loudly instead of
-      # silently downloading. Runs AFTER setup-java, which writes its own
+      # --- 4a. BUILD FROM A GIT LIBRARY STORE (maven_libs_repo set) ---
+      # The runner cannot reach the company artifact repository, so every
+      # library comes from a git repo laid out like it: one folder per
+      # repository (maven-remote/ = Maven Central copies, <name>-PM/ etc. =
+      # internal libraries per release, SNAPSHOTs with maven-metadata.xml).
+      # scripts/maven-store-settings.sh turns the folders into Maven
+      # repositories and routes every other repository to maven-remote/;
+      # mvnw is pointed at the store's own Maven (the wrapper would download
+      # Maven from Maven Central), and Maven Central's hosts are blocked so a
+      # gap fails loudly. Runs AFTER setup-java, which writes its own
       # ~/.m2/settings.xml that this step replaces.
       - name: Checkout Maven library store
         if: ${{ inputs.maven_libs_repo != '' }}
@@ -330,15 +334,11 @@ jobs:
           fetch-depth: 1
           token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
 
-      - name: Configure offline build from library store
+      - name: Configure build from library store
         if: ${{ inputs.maven_libs_repo != '' }}
         run: |
           set -euo pipefail
           STORE="$GITHUB_WORKSPACE/maven-libs"
-          if [ ! -d "$STORE/repository" ]; then
-            echo "::error title=Library store invalid::${{ inputs.maven_libs_repo }} has no repository/ folder."
-            exit 1
-          fi
           ZIP=$(ls "$STORE"/tools/apache-maven-*-bin.zip 2>/dev/null | head -1 || true)
           if [ -z "$ZIP" ]; then
             echo "::error title=Library store invalid::${{ inputs.maven_libs_repo }} has no tools/apache-maven-*-bin.zip."
@@ -347,31 +347,16 @@ jobs:
           unzip -q "$ZIP" -d "$RUNNER_TEMP"
           MVN_HOME=$(ls -d "$RUNNER_TEMP"/apache-maven-*/ | head -1)
           echo "${MVN_HOME}bin" >> "$GITHUB_PATH"
-          # Mirror id MUST be 'central': the store's maven-metadata-central.xml
-          # files (needed for version ranges) are keyed by repository id.
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml <<EOF
-          <settings>
-            <localRepository>$STORE/repository</localRepository>
-            <offline>true</offline>
-            <mirrors>
-              <mirror>
-                <id>central</id>
-                <mirrorOf>*</mirrorOf>
-                <url>https://library-store.invalid/</url>
-              </mirror>
-            </mirrors>
-          </settings>
-          EOF
+          bash "$GITHUB_WORKSPACE/engine/scripts/maven-store-settings.sh" "$STORE" ~/.m2/settings.xml
           # mvnw would download Maven from Maven Central; use the store's Maven.
           if [ -f service/mvnw ]; then
-            printf '#!/bin/sh\n# harness shim: offline build from the library store\nexec "%sbin/mvn" "$@"\n' "$MVN_HOME" > service/mvnw
+            printf '#!/bin/sh\n# harness shim: build from the library store\nexec "%sbin/mvn" "$@"\n' "$MVN_HOME" > service/mvnw
             chmod +x service/mvnw
             git -C service update-index --assume-unchanged mvnw
           fi
           # Prove nothing comes from Maven Central: block its hosts.
           echo "0.0.0.0 repo.maven.apache.org repo1.maven.org central.maven.org" | sudo tee -a /etc/hosts >/dev/null
-          echo "Offline build from ${{ inputs.maven_libs_repo }}@${{ inputs.maven_libs_ref }}: $(find "$STORE/repository" -type f | wc -l) files; $("${MVN_HOME}bin/mvn" -v 2>/dev/null | head -1)"
+          echo "Build from ${{ inputs.maven_libs_repo }}@${{ inputs.maven_libs_ref }} with $("${MVN_HOME}bin/mvn" -v 2>/dev/null | head -1)"
 
       - name: Set up Python
         uses: actions/setup-python@v5
