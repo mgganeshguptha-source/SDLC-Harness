@@ -42,7 +42,7 @@ cat > "$OUT" <<XML
       <id>library-store</id>
       <repositories>$repos
       </repositories>
-      <pluginRepositories>$repos
+      <pluginRepositories>${repos//repository>/pluginRepository>}
       </pluginRepositories>
     </profile>
   </profiles>
