@@ -76,12 +76,12 @@ on:
       engine_repo:
         description: "owner/repo holding the harness engine. Canonical location — NOT the caller's account."
         required: false
-        default: "YOUR-ORG/SDLC-Harness"
+        default: "mgganeshguptha-source/SDLC-Harness"
         type: string
       toolkit_repo:
         description: "owner/repo holding the shared skills + instructions."
         required: false
-        default: "YOUR-ORG/YOUR-TOOLKIT-REPO"
+        default: "mgganeshguptha-source/copilot-toolkit"
         type: string
       resume:
         description: >-
