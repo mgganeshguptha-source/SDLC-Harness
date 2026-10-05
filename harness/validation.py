@@ -271,6 +271,38 @@ _HINTS = {
 }
 
 
+# Maven's [ERROR] boilerplate: says nothing about THIS failure.
+_MAVEN_ERROR_NOISE = (
+    "re-run maven using the -x switch",
+    "to see the full stack trace",
+    "for more information about the errors",
+    "[help ",
+    "-> [help",
+)
+
+
+def maven_error_summary(output: str, max_lines: int = 40) -> str:
+    """Maven's own [ERROR] lines, minus boilerplate - the reason a build failed.
+
+    The tail alone is not enough: with -e (as company pipelines run Maven) the
+    last lines are a stack trace and the real message ("Failed to execute goal
+    ... Formatting violations found in the following files: ...") sits above
+    it, cut off. Observed in a BCBSM-style run: the fixing phase got only the
+    stack trace and had to guess the cause.
+    """
+    keep = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("[ERROR]"):
+            continue
+        body = stripped[len("[ERROR]"):].strip()
+        if not body or any(n in body.lower() for n in _MAVEN_ERROR_NOISE):
+            continue
+        if line not in keep:
+            keep.append(line)
+    return "\n".join(keep[:max_lines])
+
+
 def _lifecycle_started(low: str) -> bool:
     """True when Maven clearly got far enough to build or test something.
 
@@ -393,6 +425,11 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
 
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")
     tail = "\n".join(out.splitlines()[-25:])  # last lines hold the BUILD result
+    # Put Maven's actual error lines first: the tail can be all stack trace.
+    if proc.returncode != 0:
+        errors = maven_error_summary(out)
+        if errors and errors not in tail:
+            tail = "--- MAVEN ERRORS ---\n" + errors + "\n\n--- OUTPUT TAIL ---\n" + tail
 
     # Maven's tail on a TEST failure says only "See .../surefire-reports for the
     # individual test results" — the actual failing test, assertion and stack trace
