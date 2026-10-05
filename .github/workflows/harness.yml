@@ -348,6 +348,9 @@ jobs:
           MVN_HOME=$(ls -d "$RUNNER_TEMP"/apache-maven-*/ | head -1)
           echo "${MVN_HOME}bin" >> "$GITHUB_PATH"
           bash "$GITHUB_WORKSPACE/engine/scripts/maven-store-settings.sh" "$STORE" ~/.m2/settings.xml
+          # Same variable company pipelines pass with -s, so a service's own
+          # build command (e.g. "mvn -s $MAVEN_SETTINGS test") works unchanged.
+          echo "MAVEN_SETTINGS=$HOME/.m2/settings.xml" >> "$GITHUB_ENV"
           # mvnw would download Maven from Maven Central; use the store's Maven.
           if [ -f service/mvnw ]; then
             printf '#!/bin/sh\n# harness shim: build from the library store\nexec "%sbin/mvn" "$@"\n' "$MVN_HOME" > service/mvnw
