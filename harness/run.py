@@ -47,16 +47,23 @@ def cmd_init(args):
     hd.mkdir(parents=True, exist_ok=True)
     from phases import PHASES
 
-    # Story precedence: explicit --story flag, else read from the configured file
-    # (which in production an MCP/Jira step would populate).
+    # Story precedence: explicit --story flag, else the story's own file
+    # (stories/<feature_id>-story.md or stories/<feature_id>.md), else the
+    # configured shared file (stories/current-story.md).
     story = getattr(args, "story", None)
     if not story:
         from config import HarnessConfig
-        from story_source import FileStorySource
+        from story_source import FileStorySource, resolve_story_file
         cfg = HarnessConfig.load(hd)
-        src = FileStorySource(repo / cfg.story_file)
-        story = src.get_story()
-        print(f"Read story from {cfg.story_file}")
+        path, per_story = resolve_story_file(repo, args.feature, cfg.story_file)
+        story = FileStorySource(path).get_story()
+        rel = path.relative_to(repo) if path.is_relative_to(repo) else path
+        if per_story:
+            print(f"Read story from {rel}")
+        else:
+            print(f"Read story from {rel} (no {args.feature}-story.md found next to it)")
+            print(f"::warning title=Shared story file::No story file named for "
+                  f"{args.feature} - using {rel}. Make sure it holds this story.")
 
     run = RunState(feature_id=args.feature, story=story, current_phase=PHASES[0].id)
     # Stamped once, at init, so duration measures the whole run rather than the

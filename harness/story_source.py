@@ -36,6 +36,29 @@ class FileStorySource:
         return text
 
 
+def resolve_story_file(repo: Path, feature_id: str, configured: str) -> tuple[Path, bool]:
+    """Pick the story file for a run.
+
+    One file per story lets several stories sit side by side instead of each
+    run overwriting a shared file. Looks in the folder of the configured
+    story_file (default stories/) for, in order:
+      <feature_id>-story.md, <feature_id>.md   (case-insensitive)
+    and falls back to the configured file itself (stories/current-story.md).
+
+    Returns (path, per_story) - per_story is False when the fallback was used,
+    so the caller can warn that the story may belong to a different feature.
+    """
+    configured_path = Path(repo) / configured
+    folder = configured_path.parent
+    wanted = [f"{feature_id}-story.md".lower(), f"{feature_id}.md".lower()]
+    if feature_id and folder.is_dir():
+        by_name = {f.name.lower(): f for f in folder.iterdir() if f.is_file()}
+        for name in wanted:
+            if name in by_name:
+                return by_name[name], True
+    return configured_path, False
+
+
 # Future:
 # class JiraMcpStorySource:
 #     def __init__(self, issue_key, mcp_client): ...

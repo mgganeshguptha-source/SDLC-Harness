@@ -275,8 +275,10 @@ class HarnessConfig:
     coverage_csv: str = "target/site/jacoco/jacoco.csv"
     # Which metric to gate on: LINE, BRANCH, INSTRUCTION, METHOD.
     coverage_metric: str = "LINE"
-    # Where the harness reads the user story from (repo-relative). In production an
-    # MCP/Jira step writes this file; for the demo it's committed to the repo.
+    # Where the harness reads the user story from (repo-relative). A file named
+    # for the story in the same folder wins: stories/<feature_id>-story.md or
+    # stories/<feature_id>.md (see story_source.resolve_story_file). This file
+    # is the fallback when no such file exists.
     story_file: str = "stories/current-story.md"
     # Directory the clarification gate scans for the newest context file.
     context_output_dir: str = ".github/story-context-files"
