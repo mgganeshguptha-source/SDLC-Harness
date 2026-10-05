@@ -187,7 +187,7 @@ Flat package under `harness/`.
 | `resume.py` | Re-enters a halted run at a chosen phase without redoing passed phases |
 | `execution_record.py` | Appends the actual-vs-approved execution record; backs the scope gate |
 | `config.py` | Loads `.harness/config.yaml`; supplies defaults when absent |
-| `story_source.py` | The swappable seam for where the story comes from |
+| `story_source.py` | Where the story comes from: `stories/<feature_id>-story.md` (or `<feature_id>.md`), else `story_file` |
 | `metrics.py` | Writes one metrics record per run (one file per run, not a shared append log) |
 | `ai_credits.py` | Reads actual AI-credit consumption from GitHub's billing API |
 | `harness_report.py` | Aggregates the per-run metrics records |
