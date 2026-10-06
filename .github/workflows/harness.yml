@@ -444,6 +444,13 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
 
+      # Proof of where libraries came from: Maven records the source repository
+      # of every downloaded library; summarise Maven Central vs the library
+      # store's internal folders. Runs even when the run halted.
+      - name: Report library sources
+        if: ${{ always() && inputs.maven_libs_repo != '' }}
+        run: bash "$GITHUB_WORKSPACE/engine/scripts/maven-library-sources.sh"
+
       # --- 7. collect audit files into service/audit/ (local copy) ---
       - name: Collect audit
         if: always() && hashFiles('engine/harness/run.py') != ''
