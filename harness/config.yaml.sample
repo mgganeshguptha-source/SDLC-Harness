@@ -70,11 +70,11 @@ test_failure_loopback_phase: "unit_testing"    # test-compile failures go here, 
 
 # ---------------------------------------------------------------- learning from answers
 # Answered clarifications are recorded by the documentation phase as decision
-# files (docs/decisions/<feature_id>.md), approved in the harness PR, and loaded
-# into later stories so the same question is not asked again. Tag an answer in
-# the story [story-only] to skip it, or [toolkit-skill] / [toolkit-instruction]
-# to propose a toolkit change instead (raised as a toolkit PR when the caller
-# passes the TOOLKIT_PR_TOKEN secret).
+# files (docs/decisions/<feature_id>.md), carried into the harness PR, approved
+# with the code, and loaded into later stories so the same question is not asked
+# again. No tagging needed; a tag in the story ([story-only], [service],
+# [toolkit-skill], [toolkit-instruction]) only overrides the phase's own call.
+# Toolkit proposals are switched on in the CALLER workflow (toolkit_proposals: true).
 load_copilot_instructions: true         # inline .github/copilot-instructions.md in every phase
 knowledge_paths: ["docs/decisions/*.md"]
 knowledge_phases: ["context", "design", "prompt_steps", "validation"]

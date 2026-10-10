@@ -125,6 +125,15 @@ on:
         required: false
         default: true
         type: boolean
+      toolkit_proposals:
+        description: >-
+          Raise toolkit changes the documentation phase proposes as pull
+          requests on toolkit_repo, for the toolkit owner to review. Uses
+          TOOLKIT_PR_TOKEN if set, else COPILOT_GITHUB_TOKEN — either must be
+          able to push branches to and open PRs on toolkit_repo.
+        required: false
+        default: false
+        type: boolean
     secrets:
       COPILOT_GITHUB_TOKEN:
         description: >-
@@ -142,11 +151,9 @@ on:
         required: false
       TOOLKIT_PR_TOKEN:
         description: >-
-          OPTIONAL. A token that may push branches to and open pull requests on
-          toolkit_repo. When set, a toolkit change the documentation phase
-          proposed (from an answer tagged [toolkit-skill] or
-          [toolkit-instruction]) is raised as a PR on the toolkit for its owner
-          to review. Unset = no toolkit PRs; the run is unaffected.
+          OPTIONAL. Used instead of COPILOT_GITHUB_TOKEN for toolkit proposal
+          PRs (toolkit_proposals: true) when that token cannot write to
+          toolkit_repo, or to keep toolkit write access on a separate token.
         required: false
 
 jobs:
@@ -461,6 +468,7 @@ jobs:
           HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
           HARNESS_RESUMED: ${{ inputs.resume }}
           HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
+          HARNESS_TOOLKIT_PROPOSALS: ${{ inputs.toolkit_proposals }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
@@ -687,13 +695,21 @@ jobs:
           git fetch origin "$PR_BASE"
           MB=$(git merge-base "origin/$PR_BASE" "$WIP_SHA")
           # docs/ (documentation phase output) is archived in the run's audit
-          # folder instead, so the PR carries the code change only. artifacts/
+          # folder instead, so the PR carries the code change only — except the
+          # decision records, added below. artifacts/
           # is the old metrics-branch layout and must never reach a PR.
           EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics'
                 ':(exclude)docs' ':(exclude)artifacts'
                 ':(exclude).github/skills' ':(exclude).github/instructions'
                 ':(exclude).github/story-context-files')
           git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/changed"
+          # EXCEPT the decision records (config decisions_dir, default
+          # docs/decisions): they must merge with the code, because the next
+          # story loads them from the base branch. The reviewer approves them
+          # in this PR — that approval is what makes an answer reusable.
+          DEC_DIR=$(PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 -c "from pathlib import Path; from config import HarnessConfig; print(HarnessConfig.load(Path('.harness')).decisions_dir)" 2>/dev/null || echo docs/decisions)
+          DEC_DIR="${DEC_DIR:-docs/decisions}"
+          git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- "$DEC_DIR" >> "$WORKTREE/changed"
           git diff -z --name-only --diff-filter=D     "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/deleted"
           echo "Files carried into the PR:"
           tr '\0' '\n' < "$WORKTREE/changed"
@@ -709,6 +725,7 @@ jobs:
 
           # 4) Safety net: never let run workspace / audit / metrics be staged.
           git reset -q -- .harness audit metrics docs artifacts 2>/dev/null || true
+          if [ -d "$DEC_DIR" ]; then git add -- "$DEC_DIR"; fi
 
           # 5) Nothing to commit means the run produced no code change — do not
           #    raise an empty PR; keep WIP for inspection.
@@ -744,27 +761,23 @@ jobs:
           git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
       # --- 9b. raise the proposed toolkit change as a PR on the toolkit repo ---
-      # Only when TOOLKIT_PR_TOKEN is set and the documentation phase wrote a
-      # proposal. The harness never merges it: the toolkit owner reviews it,
+      # Only when the caller sets toolkit_proposals: true and the documentation
+      # phase wrote a proposal. The harness never merges it: the toolkit owner reviews it,
       # because a toolkit change reaches every service. Only EXISTING files under
       # skills/ or instructions/ may change; a proposed file under half the size
       # of the original is treated as truncated and dropped. If an open proposal
       # PR already touches the same files, the proposal is added to it as a
       # comment instead of opening another PR.
       - name: Propose toolkit change (optional)
-        if: success()
+        if: success() && inputs.toolkit_proposals
         continue-on-error: true
         env:
-          TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN }}
-          GH_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN }}
+          TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
         run: |
           PROP="$RUNNER_TEMP/toolkit-proposal"
           if [ ! -f "$PROP/PROPOSAL.md" ] || [ ! -d "$PROP/files" ]; then
             echo "No toolkit proposal from this run."; exit 0
-          fi
-          if [ -z "$TOOLKIT_PR_TOKEN" ]; then
-            echo "::notice title=Toolkit proposal not raised::Set the TOOLKIT_PR_TOKEN secret to raise it as a PR. It is in the run artifacts."
-            exit 0
           fi
           FEATURE="${{ inputs.feature_id }}"
           REPO="${{ inputs.toolkit_repo }}"

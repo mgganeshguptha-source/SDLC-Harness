@@ -972,15 +972,43 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     _story_ref = (f"{run.story_path or 'story'} @ {(run.story_sha256 or '')[:12]}"
                   .strip(" @"))
     _proposal_dir = f"{rr}/.harness/toolkit-proposal"
+    # Developers are not expected to tag answers: the phase sorts each answer
+    # itself, and a tag only overrides that. Wrong calls are cheap to undo —
+    # the decision file is reviewed in the service PR, a toolkit proposal by
+    # the toolkit owner. Toolkit proposals are asked for only when the caller
+    # turned them on (toolkit_proposals), so they cost nothing otherwise.
+    import os
+    _proposals_on = os.environ.get("HARNESS_TOOLKIT_PROPOSALS", "").strip().lower() == "true"
+    _toolkit_kinds = (
+        f"  TOOLKIT-SKILL   — the question should never have been asked: the "
+        f"answer was already in the story, its ACs or the code, or it was about "
+        f"HOW to implement rather than what the service must do.\n"
+        f"  TOOLKIT-INSTRUCTION — the answer states a rule for EVERY service "
+        f"(a company, security or regulatory policy), not just this one.\n"
+        if _proposals_on else "")
+    _toolkit_block = (
+        f"TOOLKIT PROPOSALS (TOOLKIT-SKILL / TOOLKIT-INSTRUCTION answers only): "
+        f"the toolkit files are at {rr}/.github/skills/ and "
+        f"{rr}/.github/instructions/. For each file that must change, write the "
+        f"COMPLETE updated file to {_proposal_dir}/files/<skills|instructions>/"
+        f"<same relative path> — copy the original exactly and change only the "
+        f"lines needed. Then write {_proposal_dir}/PROPOSAL.md: the question that "
+        f"was asked, the answer, why the toolkit should change, the exact "
+        f"change, and 'Story: {_fid}'. Never create a new skill and never write "
+        f"anywhere under {rr}/.github/. When unsure, choose SERVICE instead.\n"
+        if _proposals_on else "")
     _learning_block = (
         f"\nTHEN RECORD WHAT THIS STORY TAUGHT. Look in the story for answers to "
-        f"clarification questions (a 'Clarification(s)' section, or answers a "
-        f"person added as acceptance criteria). Each answer may carry a tag:\n"
-        f"  [story-only]          -> record nothing\n"
-        f"  [service] or no tag   -> a service decision (below)\n"
-        f"  [toolkit-skill]       -> a proposed change to a toolkit skill (below)\n"
-        f"  [toolkit-instruction] -> a proposed change to a toolkit instruction (below)\n"
-        f"If the story has no such answers, skip this entirely.\n"
+        f"clarification questions (a 'Clarification(s)' section, answers quoting "
+        f"a CL-<n> id, or answers a person added as acceptance criteria). If there "
+        f"are none, skip this entirely. Sort each answer into ONE kind:\n"
+        f"  SERVICE (the default) — a rule about how THIS service behaves that a "
+        f"later story could need.\n"
+        f"  STORY-ONLY — a one-off detail of this story (a specific date, value "
+        f"or wording that no later story would reuse). Record nothing.\n"
+        f"{_toolkit_kinds}"
+        f"If the person tagged an answer [service], [story-only], "
+        f"[toolkit-skill] or [toolkit-instruction], the tag decides.\n"
         f"SERVICE DECISIONS: write {rr}/{_decisions_dir}/{_fid}.md (create the "
         f"folder by writing the file). Title '# Decisions — {_fid}', then a line "
         f"'Source: {_story_ref}', then one section per answer headed "
@@ -988,15 +1016,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"testable rule, in the person's words where possible), Applies to "
         f"(classes, endpoints or fields), Scope: service. Record only what the "
         f"story states — never infer a rule the person did not give.\n"
-        f"TOOLKIT PROPOSALS (only for answers tagged [toolkit-skill] or "
-        f"[toolkit-instruction]): the toolkit files are at {rr}/.github/skills/ and "
-        f"{rr}/.github/instructions/. For each file that must change, write the "
-        f"COMPLETE updated file to {_proposal_dir}/files/<skills|instructions>/"
-        f"<same relative path> — copy the original exactly and change only the "
-        f"lines the answer requires. Then write {_proposal_dir}/PROPOSAL.md: what "
-        f"was asked that should not have been (or what rule is missing), the "
-        f"answer, the exact change, and 'Story: {_fid}'. Never create a new skill "
-        f"and never write anywhere under {rr}/.github/.\n"
+        f"{_toolkit_block}"
     )
 
     base = {

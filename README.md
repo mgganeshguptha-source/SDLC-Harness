@@ -68,16 +68,20 @@ pattern. This is the one branch point in the spine.
 - **A missing context file is not a question.** If the context phase writes no
   file, the run halts as `artifact_missing`. Only a file written in that attempt is
   scanned, so an old context file left in the folder cannot pass the gate.
-- **Answers become decisions.** The documentation phase writes the story's answers
-  to `docs/decisions/<feature_id>.md`. The file ships in the harness PR, so the
-  reviewer's approval promotes it; once merged, the `context`, `design`,
-  `prompt_steps` and `validation` phases of every later story in that service load
-  it, whoever runs them. Tag an answer `[story-only]` to skip it.
-- **Toolkit fixes become toolkit PRs.** An answer tagged `[toolkit-skill]` or
-  `[toolkit-instruction]` makes the documentation phase propose an edit to an
-  existing toolkit file. When the caller passes the `TOOLKIT_PR_TOKEN` secret, the
-  workflow raises it as a PR on the toolkit repo for its owner to review; it never
-  merges it.
+- **Answers become decisions.** The documentation phase sorts each answer in the
+  story: a rule for this service, a one-off detail of this story, or (when
+  toolkit proposals are on) a toolkit fix. Developers need not tag anything; a tag
+  (`[service]`, `[story-only]`, `[toolkit-skill]`, `[toolkit-instruction]`) only
+  overrides that call. Service rules are written to `docs/decisions/<feature_id>.md`
+  on the WIP branch and carried into the **harness PR** — the only `docs/` path the
+  PR includes — so the reviewer approves them with the code. Once merged into the
+  base branch, the `context`, `design`, `prompt_steps` and `validation` phases of
+  every later story in that service load them, whoever runs them.
+- **Toolkit fixes become toolkit PRs.** With the caller input
+  `toolkit_proposals: true`, a proposed edit to an existing toolkit skill or
+  instruction is raised as a PR on the toolkit repo for its owner to review; it is
+  never merged automatically. It uses `TOOLKIT_PR_TOKEN` if passed, otherwise
+  `COPILOT_GITHUB_TOKEN`, which must then be able to push to the toolkit repo.
 - **The service's own `.github/copilot-instructions.md`** is inlined in every phase
   and listed in the capability manifest.
 - `python harness_report.py metrics/` reports clarification rounds per feature,

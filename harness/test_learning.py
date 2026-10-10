@@ -213,10 +213,18 @@ def test_documentation_prompt_asks_for_decisions_and_proposals():
         repo = _service(d)
         run = RunState(feature_id="OP018-6418", story="s", current_phase="documentation")
         run.story_path, run.story_sha256 = "stories/OP018-6418-story.md", "ab" * 32
+        os.environ.pop("HARNESS_TOOLKIT_PROPOSALS", None)
         prompt = _phase_instruction(phase_by_id("documentation"), run, repo)
         assert "docs/decisions/OP018-6418.md" in prompt
-        assert "toolkit-proposal/PROPOSAL.md" in prompt
         assert "stories/OP018-6418-story.md @ abababababab" in prompt
+        assert "toolkit-proposal" not in prompt          # off by default
+        os.environ["HARNESS_TOOLKIT_PROPOSALS"] = "true"
+        try:
+            prompt = _phase_instruction(phase_by_id("documentation"), run, repo)
+        finally:
+            os.environ.pop("HARNESS_TOOLKIT_PROPOSALS", None)
+        assert "toolkit-proposal/PROPOSAL.md" in prompt
+        assert "TOOLKIT-SKILL" in prompt
 
 
 # ---- the report: is it learning? --------------------------------------------
