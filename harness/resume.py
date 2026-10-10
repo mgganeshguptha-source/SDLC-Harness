@@ -109,6 +109,58 @@ def rewind(run: RunState, start_phase: str, log=print) -> RunState:
     return run
 
 
+def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
+                  log=print) -> RunState:
+    """Bring the story up to date on resume, when that is safe.
+
+    Clarifications are answered by editing the story on the BASE branch. The
+    working branch a resume runs on still holds the story as it was when the
+    run started, and run-state.json holds the text that was read then — so
+    without this a resume at `context` re-reads the OLD story and asks the same
+    questions again.
+
+      - Re-entering at the first phase (context): nothing downstream was built
+        from the old text, so the story is replaced by the base branch's copy.
+        An unchanged story is reported loudly — the same questions will return.
+      - Re-entering later: the plan and code were built from the original text,
+        so it is kept; a changed story is reported, since only a fresh run (or
+        resuming at context) will use it.
+    A story that cannot be read from the base branch never fails the resume;
+    the run continues with the text it has.
+    """
+    from story_source import read_story_from_ref, story_hash
+    old_hash = run.story_sha256 or story_hash(run.story)
+    try:
+        text, path = read_story_from_ref(repo, base_ref, run.feature_id, story_file)
+    except Exception as e:
+        log(f"  [resume] could not read the story from {base_ref} ({e}) — "
+            f"keeping the story this run started with")
+        return run
+    new_hash = story_hash(text)
+
+    if run.current_phase == _PHASE_IDS[0]:
+        if new_hash == old_hash:
+            log(f"  [resume] story {path} on {base_ref} is UNCHANGED since the last "
+                f"attempt — the context phase will likely ask the same questions. "
+                f"Answer them in the story (as acceptance criteria) first.")
+            print(f"::warning title=Story unchanged::{path} on {base_ref} has not "
+                  f"changed since the last attempt.")
+        else:
+            log(f"  [resume] story reloaded from {path} on {base_ref} "
+                f"({old_hash[:12]} -> {new_hash[:12]})")
+        run.story = text
+        run.story_path = path
+        run.story_sha256 = new_hash
+    elif new_hash != old_hash:
+        log(f"  [resume] story {path} changed on {base_ref} since this run started. "
+            f"Resuming at '{run.current_phase}' keeps the ORIGINAL story, because "
+            f"the plan and code were built from it. To use the new text, resume "
+            f"with start_phase=context or start a fresh run.")
+        print(f"::warning title=Story changed::{path} changed on {base_ref}; "
+              f"this resume keeps the original story.")
+    return run
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Rewind a halted harness run so it resumes at a chosen phase.")
@@ -118,6 +170,10 @@ def main(argv=None) -> int:
                     help="Phase id to re-enter at. Defaults to where the run "
                          "halted, which is the common case after a human fixes "
                          "code and wants the same gate re-evaluated.")
+    ap.add_argument("--base-ref", default=None,
+                    help="Git ref holding the current story, e.g. origin/PM_Sep. "
+                         "When given, the story is refreshed from it (see "
+                         "refresh_story).")
     args = ap.parse_args(argv)
 
     repo = Path(args.repo).resolve()
@@ -136,6 +192,10 @@ def main(argv=None) -> int:
 
     target = args.phase or run.current_phase
     rewind(run, target)
+    if args.base_ref:
+        from config import HarnessConfig
+        story_file = HarnessConfig.load(harness_dir).story_file
+        refresh_story(run, repo, args.base_ref, story_file)
     run.save(harness_dir)
     print(f"  [resume] state saved — autorun will start at '{run.current_phase}'")
     return 0

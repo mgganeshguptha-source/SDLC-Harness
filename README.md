@@ -57,6 +57,33 @@ per-acceptance-criterion conformance check.
 `design` is skipped when the `context` phase judges the story follows an existing
 pattern. This is the one branch point in the spine.
 
+### Answering clarifications, and learning from the answers
+
+- **Answer in the story, then resume.** When the context gate halts on
+  `[NEEDS CLARIFICATION]`, answer each question in `stories/<feature_id>-story.md`
+  on the **base** branch (preferably as a new acceptance criterion) and re-run with
+  `resume=true`. A resume at `context` re-reads the story from the base branch and
+  warns if it has not changed. A resume at a later phase keeps the original story,
+  because the plan and code were built from it.
+- **A missing context file is not a question.** If the context phase writes no
+  file, the run halts as `artifact_missing`. Only a file written in that attempt is
+  scanned, so an old context file left in the folder cannot pass the gate.
+- **Answers become decisions.** The documentation phase writes the story's answers
+  to `docs/decisions/<feature_id>.md`. The file ships in the harness PR, so the
+  reviewer's approval promotes it; once merged, the `context`, `design`,
+  `prompt_steps` and `validation` phases of every later story in that service load
+  it, whoever runs them. Tag an answer `[story-only]` to skip it.
+- **Toolkit fixes become toolkit PRs.** An answer tagged `[toolkit-skill]` or
+  `[toolkit-instruction]` makes the documentation phase propose an edit to an
+  existing toolkit file. When the caller passes the `TOOLKIT_PR_TOKEN` secret, the
+  workflow raises it as a PR on the toolkit repo for its owner to review; it never
+  merges it.
+- **The service's own `.github/copilot-instructions.md`** is inlined in every phase
+  and listed in the capability manifest.
+- `python harness_report.py metrics/` reports clarification rounds per feature,
+  re-runs on an unchanged story, and questions asked again in the same story or in
+  another story of the same repo.
+
 ---
 
 ## The gates
@@ -194,6 +221,7 @@ Flat package under `harness/`.
 | `audit_summary.py` | Prints a human-readable audit summary for the most recent run |
 | `list_models.py` | Lists the models available to the Copilot login (spends no credits) |
 | `test_boundaries.py` | Proves the write-boundary interlock before any SDK or credit spend (14 tests) |
+| `test_learning.py` | Clarification fixes: context-file guard, story refresh on resume, knowledge loading, repeat-question report |
 
 ---
 

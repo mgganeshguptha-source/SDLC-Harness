@@ -656,7 +656,33 @@ class StateMachine:
                 _bmode = (getattr(_cfg, "blocker_gate", "blocking") or "blocking").strip().lower()
 
                 cr = _scan(self.repo_root, _cfg.context_output_dir,
-                           check_feasibility=(_bmode != "off"))
+                           check_feasibility=(_bmode != "off"),
+                           written_after=_phase_started)
+
+                # --- no context file: a failed phase, not a story question ---
+                # Reporting this as NEEDS_CLARIFICATION sent developers to edit
+                # a story that was never the problem. Halt it as a missing
+                # artifact so the metrics count it as a harness failure too.
+                if cr.missing:
+                    run.completed_phases = [p for p in run.completed_phases
+                                            if p != phase.id]
+                    msg = (
+                        "\n  ============ CONTEXT FILE MISSING: HALTED ============\n"
+                        f"  The '{phase.id}' phase finished without writing a context "
+                        f"file in {_cfg.context_output_dir}.\n"
+                        "  This is a failed phase (model output, turn budget or SDK),\n"
+                        "  NOT a question about the story. Do not edit the story.\n"
+                        "  Action : read the phase log above, then re-run with "
+                        "resume=true.\n"
+                        "  =====================================================\n"
+                    )
+                    self.log(msg)
+                    run.last_feedback = msg
+                    run.status = "halted"
+                    run.halt_gate = HG.ARTIFACT_MISSING
+                    run.halt_detail = "context: no context file written"
+                    run.save(self.harness_dir)
+                    return run
 
                 # Report the feasibility posture BEFORE any halt, so the operator
                 # can always tell whether the check ran. A gate that is quietly
@@ -682,6 +708,12 @@ class StateMachine:
                              f"unresolved in {cr.scanned_file}")
                     for it in cr.items:
                         self.log("      • " + it)
+                    _sp = getattr(run, "story_path", None) or "the story file"
+                    self.log(
+                        f"    Answer each question in {_sp} on the BASE branch — "
+                        f"preferably as a new acceptance criterion — then re-run "
+                        f"with resume=true. The resume re-reads the story from the "
+                        f"base branch.")
                     run.status = "needs_input"
                     run.halt_gate = HG.CLARIFICATION
                     run.save(self.harness_dir)

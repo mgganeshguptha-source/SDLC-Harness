@@ -385,6 +385,38 @@ def _resolve_skill_assets(skill_md: Path, gh: Path) -> list:
     return found
 
 
+def _load_knowledge(repo_root: Path, cfg, manifest: dict) -> list:
+    """Read the service's approved decision files (config.knowledge_paths),
+    newest first, up to config.knowledge_max_chars in total. Each file is
+    recorded in the manifest; files dropped by the cap are logged there too."""
+    files = {}
+    for pattern in (getattr(cfg, "knowledge_paths", None) or []):
+        try:
+            for f in repo_root.glob(str(pattern).lstrip("/")):
+                if f.is_file() and f.suffix.lower() == ".md":
+                    files[f.resolve()] = f
+        except Exception:
+            continue
+    ordered = sorted(files.values(), key=lambda f: f.stat().st_mtime, reverse=True)
+    budget = int(getattr(cfg, "knowledge_max_chars", 40_000) or 0)
+    out, used = [], 0
+    for f in ordered:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if used + len(text) > budget:
+            manifest["knowledge"].append({"name": f.name, "skipped": "knowledge_max_chars"})
+            continue
+        used += len(text)
+        rel = str(f.relative_to(repo_root)).replace("\\", "/")
+        out.append(f"\n--- decision file: {rel} ---\n{text}")
+        raw = text.encode("utf-8")
+        manifest["knowledge"].append({"name": f.name, "path": rel, "bytes": len(raw),
+                                      "sha256": hashlib.sha256(raw).hexdigest()})
+    return out
+
+
 def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     """Load the capability layer for THIS phase.
 
@@ -407,7 +439,7 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     # phase — name, repo-relative path, size, sha256. This is the harness-side PROOF
     # of deterministic skill delivery (the SDK's own 'loaded' telemetry only reports
     # its internal agent skill and can never show repo skills).
-    manifest = {"instructions": [], "skills": [], "assets": []}
+    manifest = {"instructions": [], "skills": [], "assets": [], "knowledge": []}
 
     def _entry(p: Path, text: str, **extra):
         try:
@@ -449,6 +481,32 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
                     continue  # skip — not relevant to this phase
             chunks.append(f"\n--- instructions/{md.name} ---\n{text}")
             manifest["instructions"].append(_entry(md, text))
+
+    # ---- repository-wide instructions (the service repo's own) ----
+    # GitHub treats .github/copilot-instructions.md as always-on guidance for the
+    # repo. Inlined explicitly so delivery is proven by the manifest rather than
+    # assumed of the CLI.
+    repo_instr = gh / "copilot-instructions.md"
+    if getattr(cfg, "load_copilot_instructions", True) and repo_instr.is_file():
+        try:
+            text = repo_instr.read_text(encoding="utf-8")
+            chunks.append(f"\n--- repository instructions: copilot-instructions.md ---\n{text}")
+            manifest["instructions"].append(_entry(repo_instr, text, repo_wide=True))
+        except Exception:
+            pass
+
+    # ---- service knowledge: approved decisions from earlier stories ----
+    if phase.id in (getattr(cfg, "knowledge_phases", None) or []):
+        kchunks = _load_knowledge(repo_root, cfg, manifest)
+        if kchunks:
+            chunks.append(
+                "\n--- SERVICE KNOWLEDGE: approved decisions from earlier stories ---\n"
+                "Each decision below was answered by a person for an earlier story "
+                "in THIS service and approved in a merged pull request. Treat them "
+                "as established facts: do NOT raise a clarification that one of "
+                "them answers — cite its id (e.g. 'per D-OP018-6418-1') instead. "
+                "If the story contradicts a decision, raise ONE clarification "
+                "quoting both.\n" + "\n".join(kchunks))
 
     # ---- skills ----
     skills_dir = gh / "skills"
@@ -898,6 +956,49 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             "'How to verify' section telling the reviewer to build the project and "
             "run the tests listed in the change locally before approving.\n")
 
+    # LEARNING FROM ANSWERS (documentation phase). By the time documentation
+    # runs, the story passed every gate, so its answered clarifications are
+    # proven usable. They are written down here so the NEXT story does not ask
+    # them again: service rules as a decision file that ships in the PR (the
+    # reviewer's approval is the promotion; config.knowledge_paths loads it
+    # into later stories), and skill/instruction defects as a proposal the
+    # workflow raises as a pull request on the toolkit repo.
+    try:
+        from config import HarnessConfig as _HCdoc
+        _decisions_dir = _HCdoc.load(repo_root / ".harness").decisions_dir
+    except Exception:
+        _decisions_dir = "docs/decisions"
+    _fid = run.feature_id
+    _story_ref = (f"{run.story_path or 'story'} @ {(run.story_sha256 or '')[:12]}"
+                  .strip(" @"))
+    _proposal_dir = f"{rr}/.harness/toolkit-proposal"
+    _learning_block = (
+        f"\nTHEN RECORD WHAT THIS STORY TAUGHT. Look in the story for answers to "
+        f"clarification questions (a 'Clarification(s)' section, or answers a "
+        f"person added as acceptance criteria). Each answer may carry a tag:\n"
+        f"  [story-only]          -> record nothing\n"
+        f"  [service] or no tag   -> a service decision (below)\n"
+        f"  [toolkit-skill]       -> a proposed change to a toolkit skill (below)\n"
+        f"  [toolkit-instruction] -> a proposed change to a toolkit instruction (below)\n"
+        f"If the story has no such answers, skip this entirely.\n"
+        f"SERVICE DECISIONS: write {rr}/{_decisions_dir}/{_fid}.md (create the "
+        f"folder by writing the file). Title '# Decisions — {_fid}', then a line "
+        f"'Source: {_story_ref}', then one section per answer headed "
+        f"'## D-{_fid}-<n>: <short rule>' with bullets: Question, Answer (as a "
+        f"testable rule, in the person's words where possible), Applies to "
+        f"(classes, endpoints or fields), Scope: service. Record only what the "
+        f"story states — never infer a rule the person did not give.\n"
+        f"TOOLKIT PROPOSALS (only for answers tagged [toolkit-skill] or "
+        f"[toolkit-instruction]): the toolkit files are at {rr}/.github/skills/ and "
+        f"{rr}/.github/instructions/. For each file that must change, write the "
+        f"COMPLETE updated file to {_proposal_dir}/files/<skills|instructions>/"
+        f"<same relative path> — copy the original exactly and change only the "
+        f"lines the answer requires. Then write {_proposal_dir}/PROPOSAL.md: what "
+        f"was asked that should not have been (or what rule is missing), the "
+        f"answer, the exact change, and 'Story: {_fid}'. Never create a new skill "
+        f"and never write anywhere under {rr}/.github/.\n"
+    )
+
     base = {
         "context": (
             f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
@@ -1037,7 +1138,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         "documentation": (
             f"Document the change as a markdown file under {docs_dir}/ (the directory "
             f"ALREADY EXISTS, do not mkdir, shell is disallowed) for:\n  STORY: {story}\n"
-            f"Write ONLY under {docs_dir}/."
+            f"{_learning_block}"
+            f"Write ONLY under {docs_dir}/ and {rr}/.harness/."
         ),
         "raise_pr": (
             f"Summarize the change for a pull request body and write it to "
@@ -1236,7 +1338,8 @@ class SdkAgentRunner:
         self.log(f"  [capability] phase '{phase.id}': "
                  f"skills={_fmt(cap_manifest['skills'])} "
                  f"templates={_fmt(cap_manifest['assets'])} "
-                 f"instructions={len(cap_manifest['instructions'])} file(s)")
+                 f"instructions={len(cap_manifest['instructions'])} file(s) "
+                 f"knowledge={len([k for k in cap_manifest.get('knowledge', []) if 'path' in k])} file(s)")
         try:
             mf_path = repo_root / ".harness" / "capability-manifest.json"
             existing = {}

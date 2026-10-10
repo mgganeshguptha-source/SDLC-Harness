@@ -415,6 +415,23 @@ class HarnessConfig:
     # set 0, on repos where fast runs matter more than per-phase credit precision.
     credit_settle_seconds: int = 30
 
+    # ---- service knowledge: how answers from earlier stories are reused ----
+    # The service repo's own .github/copilot-instructions.md, inlined in every
+    # phase and listed in the capability manifest. (The toolkit copy only
+    # supplies .github/skills and .github/instructions.)
+    load_copilot_instructions: bool = True
+    # Approved decisions from earlier stories (written by the documentation
+    # phase, approved in the harness PR, merged with the code). Repo-relative
+    # globs; loaded into the phases below so a question answered once is not
+    # asked again — by the same developer or anyone else.
+    knowledge_paths: list = field(default_factory=lambda: ["docs/decisions/*.md"])
+    knowledge_phases: list = field(default_factory=lambda: [
+        "context", "design", "prompt_steps", "validation"])
+    # Cap on the inlined knowledge, in characters. Newest files win when over.
+    knowledge_max_chars: int = 40_000
+    # Where the documentation phase records this story's answered questions.
+    decisions_dir: str = "docs/decisions"
+
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
         p = harness_dir / "config.yaml"
@@ -471,6 +488,17 @@ class HarnessConfig:
                            else cls().write_exclude),
             retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
             credit_settle_seconds=int(data.get("credit_settle_seconds", cls.credit_settle_seconds)),
+            load_copilot_instructions=bool(data.get("load_copilot_instructions",
+                                                    cls.load_copilot_instructions)),
+            knowledge_paths=(data.get("knowledge_paths")
+                             if data.get("knowledge_paths") is not None
+                             else cls().knowledge_paths),
+            knowledge_phases=(data.get("knowledge_phases")
+                              if data.get("knowledge_phases") is not None
+                              else cls().knowledge_phases),
+            knowledge_max_chars=int(data.get("knowledge_max_chars", cls.knowledge_max_chars)),
+            decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
+                          or cls.decisions_dir,
             credit_source=(str(data.get("credit_source", cls.credit_source)).strip().lower()
                            if str(data.get("credit_source", cls.credit_source)).strip().lower()
                            in ("sdk", "account") else "sdk"),

@@ -140,6 +140,14 @@ on:
           CLASSIC PAT (ghp_) — Copilot rejects it for model calls. Accepted: gho_,
           ghu_, or a fine-grained PAT with the Copilot Requests permission.
         required: false
+      TOOLKIT_PR_TOKEN:
+        description: >-
+          OPTIONAL. A token that may push branches to and open pull requests on
+          toolkit_repo. When set, a toolkit change the documentation phase
+          proposed (from an answer tagged [toolkit-skill] or
+          [toolkit-instruction]) is raised as a PR on the toolkit for its owner
+          to review. Unset = no toolkit PRs; the run is unaffected.
+        required: false
 
 jobs:
   harness:
@@ -412,16 +420,29 @@ jobs:
       # Rewind the loaded state to the phase we are re-entering, and reset the
       # retry budgets that stopped the last run — otherwise the gate that halted
       # it fires again before the agent ever sees the human's fix.
+      # The story is refreshed from the BASE branch, where developers answer
+      # clarifications: on a resume at context the edited story replaces the one
+      # captured when the run started (otherwise the same questions come back).
       - name: Rewind state (resume only)
         if: inputs.resume
         working-directory: engine/harness
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
-          if [ -n "${{ inputs.start_phase }}" ]; then
-            python resume.py --repo ../../service --phase "${{ inputs.start_phase }}"
+          BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
+          BASE_REF=""
+          if git -C ../../service fetch -q origin "$BASE"; then
+            BASE_REF="origin/$BASE"
           else
-            python resume.py --repo ../../service
+            echo "::warning title=Base not fetched::Could not fetch $BASE; the story is not refreshed."
           fi
+          ARGS=(--repo ../../service)
+          if [ -n "${{ inputs.start_phase }}" ]; then
+            ARGS+=(--phase "${{ inputs.start_phase }}")
+          fi
+          if [ -n "$BASE_REF" ]; then
+            ARGS+=(--base-ref "$BASE_REF")
+          fi
+          python resume.py "${ARGS[@]}"
 
       - name: Autorun (all phases)
         working-directory: engine/harness
@@ -443,6 +464,16 @@ jobs:
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
+
+      # Keep the documentation phase's toolkit proposal (if any) out of the
+      # service tree before the WIP and PR steps rewrite it.
+      - name: Save toolkit proposal
+        if: always()
+        run: |
+          if [ -f service/.harness/toolkit-proposal/PROPOSAL.md ]; then
+            cp -r service/.harness/toolkit-proposal "$RUNNER_TEMP/toolkit-proposal"
+            echo "Toolkit proposal saved."
+          fi
 
       # Proof of where libraries came from: Maven records the source repository
       # of every downloaded library; summarise Maven Central vs the library
@@ -712,6 +743,82 @@ jobs:
           #    harness-metrics (step 8a) before this step, so nothing is lost.
           git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
+      # --- 9b. raise the proposed toolkit change as a PR on the toolkit repo ---
+      # Only when TOOLKIT_PR_TOKEN is set and the documentation phase wrote a
+      # proposal. The harness never merges it: the toolkit owner reviews it,
+      # because a toolkit change reaches every service. Only EXISTING files under
+      # skills/ or instructions/ may change; a proposed file under half the size
+      # of the original is treated as truncated and dropped. If an open proposal
+      # PR already touches the same files, the proposal is added to it as a
+      # comment instead of opening another PR.
+      - name: Propose toolkit change (optional)
+        if: success()
+        continue-on-error: true
+        env:
+          TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN }}
+        run: |
+          PROP="$RUNNER_TEMP/toolkit-proposal"
+          if [ ! -f "$PROP/PROPOSAL.md" ] || [ ! -d "$PROP/files" ]; then
+            echo "No toolkit proposal from this run."; exit 0
+          fi
+          if [ -z "$TOOLKIT_PR_TOKEN" ]; then
+            echo "::notice title=Toolkit proposal not raised::Set the TOOLKIT_PR_TOKEN secret to raise it as a PR. It is in the run artifacts."
+            exit 0
+          fi
+          FEATURE="${{ inputs.feature_id }}"
+          REPO="${{ inputs.toolkit_repo }}"
+          cd "$GITHUB_WORKSPACE/toolkit"
+          BRANCH="harness-proposal/${FEATURE}-${{ github.run_id }}"
+          git checkout -q -B "$BRANCH"
+          CHANGED=()
+          while IFS= read -r -d '' f; do
+            rel="${f#"$PROP/files/"}"
+            case "$rel" in
+              *..*) echo "::warning::skipped $rel (bad path)"; continue ;;
+              skills/*|instructions/*) ;;
+              *) echo "::warning::skipped $rel (only skills/ and instructions/ may change)"; continue ;;
+            esac
+            if [ ! -f "$rel" ]; then
+              echo "::warning::skipped $rel (not an existing toolkit file)"; continue
+            fi
+            old=$(wc -c < "$rel"); new=$(wc -c < "$f")
+            if [ "$new" -lt $((old / 2)) ]; then
+              echo "::warning::skipped $rel (proposed file is under half the original size - likely truncated)"; continue
+            fi
+            cp "$f" "$rel"
+            CHANGED+=("$rel")
+          done < <(find "$PROP/files" -type f -print0)
+          if git diff --quiet; then
+            echo "Proposal changes nothing in the toolkit."; exit 0
+          fi
+          BODY="$RUNNER_TEMP/toolkit-pr-body.md"
+          {
+            cat "$PROP/PROPOSAL.md"
+            echo
+            echo "---"
+            echo "Proposed by the SDLC harness from story $FEATURE in ${{ github.repository }}:"
+            echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "$BODY"
+          # An open proposal already touching these files: comment there instead.
+          EXISTING=$(gh pr list --repo "$REPO" --state open --limit 50 \
+            --json number,headRefName,files \
+            --jq '.[] | select(.headRefName | startswith("harness-proposal/")) | [.number, (.files[].path)] | @tsv' 2>/dev/null || true)
+          for rel in "${CHANGED[@]}"; do
+            N=$(printf '%s\n' "$EXISTING" | awk -F'\t' -v p="$rel" '{for(i=2;i<=NF;i++) if($i==p){print $1; exit}}')
+            if [ -n "$N" ]; then
+              gh pr comment "$N" --repo "$REPO" --body-file "$BODY"
+              echo "::notice title=Toolkit proposal added to PR #$N::An open proposal already changes $rel."
+              exit 0
+            fi
+          done
+          git -c user.name=harness-bot -c user.email=harness-bot@users.noreply.github.com \
+            commit -q -am "Harness proposal from $FEATURE"
+          git -c http.https://github.com/.extraheader= push -q \
+            "https://x-access-token:${TOOLKIT_PR_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/$BRANCH"
+          gh pr create --repo "$REPO" --base "${{ inputs.toolkit_ref }}" --head "$BRANCH" \
+            --title "Harness proposal: $FEATURE" --body-file "$BODY"
+
       # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
       # The WIP branch (harness-wip/<feature>) is the resume point. It is safe to
       # remove exactly when the run FINISHED (status=done) AND the change was
@@ -744,4 +851,4 @@ jobs:
       - name: Explain how to resume (halt only)
         if: failure() && hashFiles('engine/harness/run.py') != ''
         run: |
-          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run."
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on the base branch instead; the resume re-reads it from there."

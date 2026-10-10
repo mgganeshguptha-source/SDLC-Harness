@@ -184,6 +184,10 @@ class ClarificationResult:
     blockers: list = field(default_factory=list)   # classified => blocking
     advisory: list = field(default_factory=list)   # unclassified blockers / notes
     downgraded: bool = False                       # NO_GO with no valid class
+    # True when no context file was written at all. That is a failed phase, not
+    # an ambiguous story: the state machine halts it as ARTIFACT_MISSING so a
+    # developer is never sent to "clarify" a story that was never the problem.
+    missing: bool = False
     # --- design trigger ---
     # Whether the story needs a technical design. Decided by the context phase,
     # which is the only phase that has read both the story and the codebase.
@@ -195,30 +199,41 @@ class ClarificationResult:
         return self.verdict in ("GO", "NO_GO")
 
 
-def _newest_context_file(repo_root: Path, search_dir: str) -> Path | None:
+def _newest_context_file(repo_root: Path, search_dir: str,
+                         written_after: float | None = None) -> Path | None:
     d = repo_root / search_dir
     if not d.is_dir():
         return None
     candidates = sorted(d.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if written_after is not None:
+        # Only a file THIS attempt wrote counts. Without this, a context file
+        # left in the folder by an earlier story (committed on the base branch,
+        # or written by a developer running the skill locally) is scanned in
+        # place of the one the phase failed to write — and can pass the gate
+        # for the wrong story.
+        candidates = [p for p in candidates if p.stat().st_mtime >= written_after]
     return candidates[0] if candidates else None
 
 
 def scan_context(repo_root: Path,
                  search_dir: str = ".github/story-context-files",
-                 check_feasibility: bool = True) -> ClarificationResult:
+                 check_feasibility: bool = True,
+                 written_after: float | None = None) -> ClarificationResult:
     """Scan the newest context file for BOTH gate markers.
 
     Returns clear=True only when there are no open clarifications AND no
     classified blockers. `check_feasibility=False` skips the feasibility half
     entirely (config: blocker_gate: off) while leaving clarifications enforced.
+    `written_after` (epoch seconds) ignores files older than the phase attempt.
     """
-    f = _newest_context_file(repo_root, search_dir)
+    f = _newest_context_file(repo_root, search_dir, written_after)
     if f is None:
-        # No context file at all => cannot verify => not clear.
+        # No context file at all => cannot verify => not clear. Flagged as
+        # missing so the gate reports a failed phase, not a story question.
         return ClarificationResult(
             clear=False,
             scanned_file=f"(none in {search_dir})",
-            items=["No context file was produced to scan."],
+            missing=True,
         )
 
     text = f.read_text(encoding="utf-8", errors="replace")
