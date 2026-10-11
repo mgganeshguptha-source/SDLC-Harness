@@ -76,6 +76,7 @@ test_failure_loopback_phase: "unit_testing"    # test-compile failures go here, 
 # [toolkit-skill], [toolkit-instruction]) only overrides the phase's own call.
 # Toolkit proposals are switched on in the CALLER workflow (toolkit_proposals: true).
 load_copilot_instructions: true         # inline .github/copilot-instructions.md in every phase
+manage_copilot_instructions: true       # create it when missing; add service rules at the end
 knowledge_paths: ["docs/decisions/*.md"]
 knowledge_phases: ["context", "design", "prompt_steps", "validation"]
 knowledge_max_chars: 40000              # newest decision files win when over

@@ -278,3 +278,80 @@ def test_earlier_questions_reach_context_and_documentation_prompts():
             assert "Response to clarification" in prompt
         fresh = RunState(feature_id="X", story="s", current_phase="context")
         assert "EARLIER ROUNDS" not in _phase_instruction(phase_by_id("context"), fresh, repo)
+
+
+# ---- copilot-instructions.md: create when missing, only add at the end -----
+
+class _Recording(ScriptedExecutor):
+    """Writes copilot-instructions.md in repo_instructions; runs a callback in
+    documentation."""
+    def __init__(self, on_docs=None, **kw):
+        super().__init__(**kw)
+        self.on_docs = on_docs
+
+    def run_phase(self, phase, run):
+        code = super().run_phase(phase, run)
+        f = self.repo_root / ".github" / "copilot-instructions.md"
+        if phase.id == "repo_instructions":
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("# Instructions\n", encoding="utf-8")
+        if phase.id == "documentation" and self.on_docs:
+            self.on_docs(f)
+        return code
+
+
+def test_repo_instructions_runs_only_when_file_missing():
+    with tempfile.TemporaryDirectory() as d:
+        hd = _hd(d)
+        ex = _Recording(context_clarifications=True)
+        sm = _sm(ex, hd)
+        sm.run_until_pause(_new_run())
+        assert ex.calls[:2] == ["repo_instructions", "context"]
+        assert (hd.parent / ".github" / "copilot-instructions.md").is_file()
+
+        ex2 = _Recording(context_clarifications=True)
+        sm2 = _sm(ex2, hd)
+        run = sm2.run_until_pause(_new_run())
+        assert ex2.calls[0] == "context"           # file exists -> skipped
+        assert "repo_instructions" in run.completed_phases
+
+
+def _drive_to_docs(hd, on_docs):
+    """Run exactly the documentation phase."""
+    ex = _Recording(on_docs=on_docs)
+    sm = _sm(ex, hd)
+    run = _new_run()
+    run.current_phase = "documentation"
+    sm.step(run)
+    assert ex.calls == ["documentation"]
+
+
+def test_documentation_may_add_to_instructions():
+    with tempfile.TemporaryDirectory() as d:
+        hd = _hd(d)
+        f = hd.parent / ".github" / "copilot-instructions.md"
+        f.parent.mkdir(parents=True)
+        f.write_text("# Instructions\n" + "keep this line\n" * 20, encoding="utf-8")
+        _drive_to_docs(hd, lambda p: p.write_text(
+            p.read_text() + "## Service rules\n- rule (D-PC-1-1)\n"))
+        assert "D-PC-1-1" in f.read_text()
+
+
+def test_documentation_cannot_gut_instructions():
+    with tempfile.TemporaryDirectory() as d:
+        hd = _hd(d)
+        f = hd.parent / ".github" / "copilot-instructions.md"
+        f.parent.mkdir(parents=True)
+        original = "# Instructions\n" + "keep this line\n" * 20
+        f.write_text(original, encoding="utf-8")
+        _drive_to_docs(hd, lambda p: p.write_text("- just one rule\n"))
+        assert f.read_text() == original
+
+
+def test_old_phase_skills_override_still_gets_the_instructions_skill():
+    from config import HarnessConfig
+    cfg = HarnessConfig(phase_skills={"context": ["build-context"]},
+                        repo_stacks=["backend"])
+    assert cfg.skills_for_phase("repo_instructions") == [
+        "build-copilot-instructions-backend"]
+    assert cfg.skills_for_phase("coding") == []    # other phases: override wins

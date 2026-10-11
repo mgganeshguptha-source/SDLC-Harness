@@ -119,7 +119,7 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
     without this a resume at `context` re-reads the OLD story and asks the same
     questions again.
 
-      - Re-entering at the first phase (context): nothing downstream was built
+      - Re-entering at or before context: nothing downstream was built
         from the old text, so the story is replaced by the base branch's copy.
         An unchanged story is reported loudly — the same questions will return.
       - Re-entering later: the plan and code were built from the original text,
@@ -138,7 +138,7 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
         return run
     new_hash = story_hash(text)
 
-    if run.current_phase == _PHASE_IDS[0]:
+    if _phase_index(run.current_phase) <= _phase_index("context"):
         if new_hash == old_hash:
             log(f"  [resume] story {path} on {base_ref} is UNCHANGED since the last "
                 f"attempt — the context phase will likely ask the same questions. "

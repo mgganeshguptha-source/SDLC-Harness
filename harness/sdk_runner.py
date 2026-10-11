@@ -1046,10 +1046,36 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"own requirements. Record only what the story states — never infer a "
         f"rule the person did not give. If no answer is a SERVICE rule, write no "
         f"file.\n"
+        f"COPILOT INSTRUCTIONS: when you wrote SERVICE decisions, also add each "
+        f"rule as ONE line to {rr}/.github/copilot-instructions.md, so developers "
+        f"who work stories outside this harness get it too. Put the lines under "
+        f"a section '## Service rules (from answered clarifications)' at the end "
+        f"of the file (create the section if missing), each as '- <rule> "
+        f"(D-{_fid}-<n>)'. Skip a rule the file already states. ONLY ADD — never "
+        f"remove, reorder or reword existing content; a rewrite that loses "
+        f"content is rejected. If the file does not exist, do not create it.\n"
         f"{_toolkit_block}"
     )
 
+    _repo_instr = f"{rr}/.github/copilot-instructions.md"
     base = {
+        "repo_instructions": (
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. This repository has no repo-wide Copilot "
+            f"instructions file. Create it using the build-copilot-instructions "
+            f"skill provided above, following its template exactly.\n"
+            f"Read READ-ONLY what the skill tells you to discover (build file, "
+            f"package structure, a representative controller/service/repository "
+            f"and test). Where the skill would ask the developer, do NOT ask: write "
+            f"the skill's [TODO — MUST COMPLETE] marker instead, so the reviewer "
+            f"fills it in the pull request. Never guess.\n"
+            f"BUDGET YOUR TURNS: read no more than about ten files, then write the "
+            f"file in ONE pass, complete.\n"
+            f"Write ONLY this EXACT file (its parent ALREADY EXISTS, do not mkdir, "
+            f"shell is disallowed): {_repo_instr}\n"
+            f"Do NOT create path-specific instruction files, and do NOT touch any "
+            f"source, test or build file."
+        ),
         "context": (
             f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
             f"and do NOT wait for input. Use the build-context skill in CI mode.\n"

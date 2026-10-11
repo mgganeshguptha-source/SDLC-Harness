@@ -304,6 +304,31 @@ class StateMachine:
         # context files written before this phase existed, rather than silently
         # adding a phase (and its cost) to every in-flight story. It is logged,
         # so the absence is visible rather than assumed.
+        # ---- REPO INSTRUCTIONS: by exception ----
+        # Creates .github/copilot-instructions.md only when the repo has none
+        # (or manage_copilot_instructions is off). An existing file is never
+        # regenerated here; the documentation phase adds to it at the end.
+        if phase.id == "repo_instructions":
+            _ri = self.repo_root / ".github" / "copilot-instructions.md"
+            try:
+                from config import HarnessConfig as _HCri
+                _manage = bool(_HCri.load(self.harness_dir).manage_copilot_instructions)
+            except Exception:
+                _manage = True
+            if _ri.is_file() or not _manage:
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                self.log("  [repo_instructions] " + (
+                    ".github/copilot-instructions.md exists — skipping."
+                    if _ri.is_file() else
+                    "manage_copilot_instructions is off — skipping."))
+                if phase.id not in run.completed_phases:
+                    run.completed_phases.append(phase.id)
+                nxt = next_phase(phase.id)
+                run.current_phase = nxt.id if nxt else run.current_phase
+                run.status = "running" if nxt else "done"
+                run.save(self.harness_dir)
+                return run
+
         if phase.id == "design":
             try:
                 from clarification import scan_context as _scan_d
@@ -380,8 +405,34 @@ class StateMachine:
         # SDK figures below are taken from THIS attempt only.
         _tok_log_start = len(run.phase_token_log)
 
+        # The documentation phase may ADD service rules to an existing
+        # copilot-instructions.md; it must never gut it. Snapshot it so a
+        # rewrite that loses much of the file can be undone below.
+        _ri_path = self.repo_root / ".github" / "copilot-instructions.md"
+        _ri_before = None
+        if phase.id == "documentation" and _ri_path.is_file():
+            try:
+                _ri_before = _ri_path.read_text(encoding="utf-8")
+            except Exception:
+                _ri_before = None
+
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        if _ri_before is not None:
+            try:
+                _after = (_ri_path.read_text(encoding="utf-8")
+                          if _ri_path.is_file() else "")
+                if len(_after) < 0.9 * len(_ri_before):
+                    _ri_path.write_text(_ri_before, encoding="utf-8")
+                    self.log("  ! copilot-instructions.md lost more than 10% of its "
+                             "content in the documentation phase — restored the "
+                             "original. Only additions are accepted.")
+                elif _after != _ri_before:
+                    self.log("  [documentation] copilot-instructions.md updated with "
+                             "this story's service rules (review it in the PR).")
+            except Exception:
+                pass
 
         _credits_after = (_read_phase_credits("after", phase.id, _settle, self.log)
                           if _account_reads else None)
