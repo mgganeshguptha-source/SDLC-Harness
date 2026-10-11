@@ -51,6 +51,7 @@ def cmd_init(args):
     # (stories/<feature_id>-story.md or stories/<feature_id>.md), else the
     # configured shared file (stories/current-story.md).
     story = getattr(args, "story", None)
+    story_rel = None
     if not story:
         from config import HarnessConfig
         from story_source import FileStorySource, resolve_story_file
@@ -58,6 +59,7 @@ def cmd_init(args):
         path, per_story = resolve_story_file(repo, args.feature, cfg.story_file)
         story = FileStorySource(path).get_story()
         rel = path.relative_to(repo) if path.is_relative_to(repo) else path
+        story_rel = str(rel).replace("\\", "/")
         if per_story:
             print(f"Read story from {rel}")
         else:
@@ -66,6 +68,9 @@ def cmd_init(args):
                   f"{args.feature} - using {rel}. Make sure it holds this story.")
 
     run = RunState(feature_id=args.feature, story=story, current_phase=PHASES[0].id)
+    from story_source import story_hash
+    run.story_path = story_rel
+    run.story_sha256 = story_hash(story)
     # Stamped once, at init, so duration measures the whole run rather than the
     # last resumed segment. GitHub LOGIN only — never the email address.
     import os

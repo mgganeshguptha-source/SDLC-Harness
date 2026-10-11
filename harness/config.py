@@ -135,6 +135,10 @@ def detect_generated_modules(repo_root: Path, application_module: str | None) ->
         return []
 
 
+# Phases added after repos began overriding phase_skills; see skills_for_phase.
+_PHASES_ADDED_LATER = frozenset({"repo_instructions"})
+
+
 @dataclass
 class HarnessConfig:
     # Command to run tests. {test_filter} is substituted (or removed) at runtime.
@@ -307,6 +311,10 @@ class HarnessConfig:
     # Which named skills (folder names under .github/skills) load in which phase.
     # Skills have no path scope, so this mapping is explicit.
     phase_skills: dict = field(default_factory=lambda: {
+        # One per stack; skill_stacks below keeps only this repo's.
+        "repo_instructions": ["build-copilot-instructions-backend",
+                              "build-copilot-instructions-angular-frontend",
+                              "build-copilot-instructions-mobile-frontend"],
         "context":      ["build-context", "analyze-service"],
         "prompt_steps": ["build-prompt-steps"],
         # analyze-service is deliberately NOT loaded here. It recursively traces
@@ -335,6 +343,9 @@ class HarnessConfig:
     # reviewer then did.
     skill_stacks: dict = field(default_factory=lambda: {
         "review-angular-code": ["angular-frontend", "ionic", "frontend"],
+        "build-copilot-instructions-backend": ["backend"],
+        "build-copilot-instructions-angular-frontend": ["angular-frontend", "frontend"],
+        "build-copilot-instructions-mobile-frontend": ["mobile-frontend", "ionic"],
     })
     # --- code review gate ---
     # Reviewer model. Should DIFFER from the coding model (independent reviewer).
@@ -415,6 +426,27 @@ class HarnessConfig:
     # set 0, on repos where fast runs matter more than per-phase credit precision.
     credit_settle_seconds: int = 30
 
+    # ---- service knowledge: how answers from earlier stories are reused ----
+    # The service repo's own .github/copilot-instructions.md, inlined in every
+    # phase and listed in the capability manifest. (The toolkit copy only
+    # supplies .github/skills and .github/instructions.)
+    load_copilot_instructions: bool = True
+    # Approved decisions from earlier stories (written by the documentation
+    # phase, approved in the harness PR, merged with the code). Repo-relative
+    # globs; loaded into the phases below so a question answered once is not
+    # asked again — by the same developer or anyone else.
+    knowledge_paths: list = field(default_factory=lambda: ["docs/decisions/*.md"])
+    knowledge_phases: list = field(default_factory=lambda: [
+        "context", "design", "prompt_steps", "validation"])
+    # Cap on the inlined knowledge, in characters. Newest files win when over.
+    knowledge_max_chars: int = 40_000
+    # Create .github/copilot-instructions.md when the repo has none (the
+    # repo_instructions phase), and let the documentation phase add the
+    # service rules this story established to it.
+    manage_copilot_instructions: bool = True
+    # Where the documentation phase records this story's answered questions.
+    decisions_dir: str = "docs/decisions"
+
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
         p = harness_dir / "config.yaml"
@@ -471,6 +503,19 @@ class HarnessConfig:
                            else cls().write_exclude),
             retain_audit_branch=bool(data.get("retain_audit_branch", cls.retain_audit_branch)),
             credit_settle_seconds=int(data.get("credit_settle_seconds", cls.credit_settle_seconds)),
+            load_copilot_instructions=bool(data.get("load_copilot_instructions",
+                                                    cls.load_copilot_instructions)),
+            knowledge_paths=(data.get("knowledge_paths")
+                             if data.get("knowledge_paths") is not None
+                             else cls().knowledge_paths),
+            knowledge_phases=(data.get("knowledge_phases")
+                              if data.get("knowledge_phases") is not None
+                              else cls().knowledge_phases),
+            knowledge_max_chars=int(data.get("knowledge_max_chars", cls.knowledge_max_chars)),
+            manage_copilot_instructions=bool(data.get("manage_copilot_instructions",
+                                                      cls.manage_copilot_instructions)),
+            decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
+                          or cls.decisions_dir,
             credit_source=(str(data.get("credit_source", cls.credit_source)).strip().lower()
                            if str(data.get("credit_source", cls.credit_source)).strip().lower()
                            in ("sdk", "account") else "sdk"),
@@ -648,7 +693,13 @@ class HarnessConfig:
         empty repo_stacks, or ["*"], disables filtering (include everything) —
         matching how instruction subfolders already behave.
         """
-        wanted = list((self.phase_skills or {}).get(phase_id, []))
+        skills = self.phase_skills or {}
+        if phase_id not in skills and phase_id in _PHASES_ADDED_LATER:
+            # A repo's phase_skills override REPLACES the engine default, and
+            # overrides written before this phase existed cannot name it. Fall
+            # back to the engine default for it rather than load nothing.
+            skills = type(self)().phase_skills
+        wanted = list(skills.get(phase_id, []))
         stacks = list(self.repo_stacks or [])
         if not stacks or "*" in stacks:
             return wanted

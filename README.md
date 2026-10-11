@@ -1,6 +1,6 @@
 # SDLC-Harness
 
-A deterministic pipeline that drives the GitHub Copilot SDK through nine fixed
+A deterministic pipeline that drives the GitHub Copilot SDK through ten fixed
 phases with automated gates between them. A user story goes in; a reviewed pull
 request comes out. Nothing reaches a PR unless it stayed in scope, compiled,
 passed its tests, met the coverage bar, cleared an independent review, and
@@ -35,10 +35,11 @@ structured reason for a human to adjudicate.
 
 ---
 
-## The nine phases
+## The ten phases
 
 | # | Phase | What runs | May write | Required artifact |
 |---|-------|-----------|-----------|-------------------|
+| 0 | `repo_instructions` | Creates `.github/copilot-instructions.md` — **only when the repo has none** — with the toolkit's `build-copilot-instructions-<stack>` skill; unknowns are marked `[TODO — MUST COMPLETE]` for the PR reviewer | `.github/copilot-instructions.md`, `.harness/**` | `.github/copilot-instructions.md` |
 | 1 | `context` | Turns the story into a context file; emits clarification + feasibility markers | `.github/story-context-files/**`, `.harness/**` | (clarification scan) |
 | 2 | `design` | Technical design — **by exception only**, when context judges the story needs it | `.harness/**` | `.harness/design.md` |
 | 3 | `prompt_steps` | The implementation plan (the approved scope) | `.harness/**` | `.harness/prompt-steps.md` |
@@ -46,7 +47,7 @@ structured reason for a human to adjudicate.
 | 5 | `code_review` | An independent reviewer LLM inspects the change and writes a structured verdict | `.harness/**` | `.harness/review.md` |
 | 6 | `unit_testing` | Test source only — **main code is frozen** so tests can't be gamed by editing code. The harness runs the configured test command immediately after this phase. | `src/test/**`, `.harness/**` | — |
 | 7 | `validation` | AC conformance — an agent judges each acceptance criterion; the harness then parses the per-AC verdicts | `.harness/**` | `.harness/validation.md` |
-| 8 | `documentation` | Documentation for the change | `docs/**`, `.harness/**` | — |
+| 8 | `documentation` | Documentation for the change; records service rules from answered clarifications in `docs/decisions/` and adds them to `.github/copilot-instructions.md` (additions only) | `docs/**`, `.github/copilot-instructions.md`, `.harness/**` | — |
 | 9 | `raise_pr` | Opens the pull request | `.harness/**` | — |
 
 The configured test command (`mvn test` by default) is run by the **harness**, not
@@ -56,6 +57,48 @@ per-acceptance-criterion conformance check.
 
 `design` is skipped when the `context` phase judges the story follows an existing
 pattern. This is the one branch point in the spine.
+
+### Answering clarifications, and learning from the answers
+
+- **Answer in the story, then resume.** When the context gate halts on
+  `[NEEDS CLARIFICATION]`, answer each question in `stories/<feature_id>-story.md`
+  on the **base** branch (preferably as a new acceptance criterion) and re-run with
+  `resume=true`. A resume at `context` re-reads the story from the base branch and
+  warns if it has not changed. A resume at a later phase keeps the original story,
+  because the plan and code were built from it.
+- **Answers in any form.** Developers may answer under any heading (e.g.
+  "Response to clarification"), with or without repeating the question. Each
+  halt's questions are kept in `run-state.json`, and on resume the `context` and
+  `documentation` phases receive them so answer-only responses can be matched to
+  their questions. (A fresh run, `resume=false`, starts without them.)
+- **A missing context file is not a question.** If the context phase writes no
+  file, the run halts as `artifact_missing`. Only a file written in that attempt is
+  scanned, so an old context file left in the folder cannot pass the gate.
+- **Answers become decisions.** The documentation phase sorts each answer in the
+  story: a rule for this service, a one-off detail of this story, or (when
+  toolkit proposals are on) a toolkit fix. Developers need not tag anything; a tag
+  (`[service]`, `[story-only]`, `[toolkit-skill]`, `[toolkit-instruction]`) only
+  overrides that call. Service rules are written to `docs/decisions/<feature_id>.md`
+  on the WIP branch and carried into the **harness PR** — the only `docs/` path the
+  PR includes — so the reviewer approves them with the code. Once merged into the
+  base branch, the `context`, `design`, `prompt_steps` and `validation` phases of
+  every later story in that service load them, whoever runs them.
+- **Toolkit fixes become toolkit PRs.** With the caller input
+  `toolkit_proposals: true`, a proposed edit to an existing toolkit skill or
+  instruction is raised as a PR on the toolkit repo for its owner to review; it is
+  never merged automatically. It uses `TOOLKIT_PR_TOKEN` if passed, otherwise
+  `COPILOT_GITHUB_TOKEN`, which must then be able to push to the toolkit repo.
+- **The service's own `.github/copilot-instructions.md`** is inlined in every phase
+  and listed in the capability manifest. Because about half of stories are worked
+  outside the harness, the harness keeps this file current for IDE users too: the
+  `repo_instructions` phase creates it when the repo has none, and the
+  documentation phase appends each new service rule under "Service rules (from
+  answered clarifications)". A documentation-phase edit that removes more than 10%
+  of the file is reverted. Both changes ship in the harness PR for review. Set
+  `manage_copilot_instructions: false` to turn this off.
+- `python harness_report.py metrics/` reports clarification rounds per feature,
+  re-runs on an unchanged story, and questions asked again in the same story or in
+  another story of the same repo.
 
 ---
 
@@ -170,7 +213,7 @@ Flat package under `harness/`.
 |------|----------------|
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
-| `phases.py` | The nine-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap |
+| `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap |
 | `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs |
 | `contracts.py` | The pinned exit-code contract the orchestrator speaks |
 | `executor.py` | The PhaseExecutor: builds the prompt, runs the agent, enforces the write boundary, iteration cap, artifact and scope checks |
@@ -194,6 +237,7 @@ Flat package under `harness/`.
 | `audit_summary.py` | Prints a human-readable audit summary for the most recent run |
 | `list_models.py` | Lists the models available to the Copilot login (spends no credits) |
 | `test_boundaries.py` | Proves the write-boundary interlock before any SDK or credit spend (14 tests) |
+| `test_learning.py` | Clarification fixes: context-file guard, story refresh on resume, knowledge loading, repeat-question report |
 
 ---
 

@@ -334,7 +334,10 @@ def test_phase_ids_are_unique_and_context_runs_first():
     assert len(PHASE_IDS) == len(set(PHASE_IDS)), "duplicate phase id"
     for pid in PHASE_IDS:
         assert phase_by_id(pid) is not None, pid
-    assert PHASE_IDS[0] == "context", "context must run first"
+    # Only the by-exception repo_instructions phase may precede context, and it
+    # never reads the story.
+    assert PHASE_IDS.index("context") <= 1, "context must be the first story phase"
+    assert PHASE_IDS[:PHASE_IDS.index("context")] in ([], ["repo_instructions"])
 
 
 if __name__ == "__main__":

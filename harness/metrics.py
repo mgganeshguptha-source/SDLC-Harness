@@ -56,7 +56,9 @@ from pathlib import Path
 # v3: SDK-reported usage — premium_cost_* / nano_aiu_* per phase, per run and
 # per actual model, credit_source, cost_reported_by; model_<phase> now names the
 # model the SDK reports as actually used (the configured one as fallback).
-SCHEMA_VERSION = 3
+# v4: story_path / story_sha256, clarification_items (question texts),
+# decisions_available (approved decision files the run could reuse).
+SCHEMA_VERSION = 4
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -142,6 +144,10 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         "halt_phase": (getattr(run, "current_phase", None)
                        if getattr(run, "status", None) != "done" else None),
         "resumed": bool(_env("HARNESS_RESUMED") == "true"),
+        # Which revision of the story this run used — a clarification halt on
+        # the same hash as the previous run means nobody answered the questions.
+        "story_path": getattr(run, "story_path", None),
+        "story_sha256": getattr(run, "story_sha256", None),
 
         # --- flow ---
         "phases_run": len(getattr(run, "completed_phases", None) or []),
@@ -244,7 +250,17 @@ def _add_context_metrics(rec: dict, repo_root: Path, cfg, log) -> None:
     """Quality score, feasibility, design trigger, AC and clarification counts."""
     rec.update({"quality_score": None, "feasibility": None, "design_required": None,
                 "ac_total": None, "ac_assumed": None, "clarifications": None,
-                "blockers": None})
+                "clarification_items": None, "blockers": None,
+                "decisions_available": None})
+    # How many approved decision files the service had for this run to reuse.
+    try:
+        n = set()
+        for pattern in (getattr(cfg, "knowledge_paths", None) or []):
+            n.update(f.resolve() for f in repo_root.glob(str(pattern).lstrip("/"))
+                     if f.is_file())
+        rec["decisions_available"] = len(n)
+    except Exception:
+        pass
     try:
         from clarification import scan_context
         out_dir = getattr(cfg, "context_output_dir", ".github/story-context-files")
@@ -252,6 +268,9 @@ def _add_context_metrics(rec: dict, repo_root: Path, cfg, log) -> None:
         rec["feasibility"] = cr.verdict
         rec["design_required"] = cr.design_required
         rec["clarifications"] = len(cr.items)
+        # The question texts, so the report can spot a question asked again —
+        # in the same story or in another one. Capped to keep records small.
+        rec["clarification_items"] = [i[:300] for i in cr.items[:20]] or None
         rec["blockers"] = len(cr.blockers)
 
         d = repo_root / out_dir

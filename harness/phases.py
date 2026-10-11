@@ -1,5 +1,5 @@
 """
-phases.py — the 10-phase spine of the harness.
+phases.py — the phase spine of the harness.
 
 Each Phase declares, DECLARATIVELY:
   - name
@@ -78,6 +78,22 @@ class Phase:
 # src/main/** and src/test/** are the petclinic app under change.
 
 PHASES = (
+    # Runs BY EXCEPTION, like design: only when the service repo has no
+    # .github/copilot-instructions.md (the state machine skips it otherwise).
+    # About half of stories never go through the harness; developers working
+    # them by hand in the IDE get the same repo conventions only if this file
+    # exists, so the harness creates it the first time it meets a repo. The
+    # file ships in the harness PR and is reviewed there.
+    Phase(
+        id="repo_instructions",
+        title="Repository Copilot instructions (when missing)",
+        kind=PhaseKind.MODEL,
+        allowed_writes=(".github/copilot-instructions.md", ".harness/**"),
+        required_artifact=".github/copilot-instructions.md",
+        human_gate=False,                           # reviewed in the PR instead
+        max_iterations=8,
+        pre_create_dirs=(".github",),
+    ),
     Phase(
         id="context",
         title="Story -> Context building",
@@ -172,7 +188,10 @@ PHASES = (
         id="documentation",
         title="Create documentation",
         kind=PhaseKind.MODEL,
-        allowed_writes=("docs/**", ".harness/**"),
+        # copilot-instructions.md: the service rules this story's answers
+        # established are added to it, so IDE users outside the harness get
+        # them too (see sdk_runner's learning block).
+        allowed_writes=("docs/**", ".github/copilot-instructions.md", ".harness/**"),
         required_artifact=None,
         human_gate=True,                            # -> review docs
         max_iterations=6,

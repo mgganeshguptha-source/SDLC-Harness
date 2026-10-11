@@ -1,0 +1,100 @@
+name: SDLC-Harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_id:
+        description: "Story / feature id (e.g. OP018-1234)"
+        required: true
+        type: string
+      base:
+        description: "Dev branch to run against and PR into (e.g. PM_Sep, VoC_Oct). Blank = repo default."
+        required: false
+        default: ""
+        type: string
+      resume:
+        description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the base branch."
+        required: false
+        default: false
+        type: boolean
+#      start_phase:
+#        description: "Resume only — phase to re-enter at. Blank = where it halted."
+#        required: false
+#        default: ""
+#        type: choice
+#        options:
+#          - ""
+#          - repo_instructions
+#          - context
+#          - design
+#          - prompt_steps
+#          - coding
+#          - code_review
+#          - unit_testing
+#          - validation
+#          - documentation
+#          - raise_pr
+
+# The reusable engine workflow pushes branches and opens a PR, and makes Copilot
+# model calls. A reusable workflow can NEVER hold more permission than its
+# caller, so every permission the engine needs must be granted here:
+#   contents / pull-requests  -> branches and the PR
+#   copilot-requests          -> lets the built-in Actions token pay for Copilot
+#                                model calls, billed to the organization. Without
+#                                this line the engine job has it set to none and
+#                                the Actions-token route cannot work, whatever the
+#                                engine declares. It is unnecessary only if you
+#                                supply COPILOT_MODEL_TOKEN instead.
+permissions:
+  contents: write
+  pull-requests: write
+  copilot-requests: write
+
+jobs:
+  harness:
+    # Engine pinned to tag v1. v1 must point at an engine commit that has the
+    # clarification-learning changes (toolkit_proposals input) — retag v1 on
+    # main after merging them, or the run fails on the unknown input.
+    uses: mgganeshguptha-source/SDLC-Harness/.github/workflows/harness.yml@v1
+    with:
+      feature_id: ${{ inputs.feature_id }}
+      base: ${{ inputs.base }}
+      java-version: "17"
+      python-version: "3.13"
+      node-version: "20"
+      resume: ${{ inputs.resume }}
+#      start_phase: ${{ inputs.start_phase }}
+      # Engine + toolkit locations. engine_ref MUST match the @ref in `uses:`
+      # above — it is the engine code the job checks out and runs.
+      engine_repo: mgganeshguptha-source/SDLC-Harness
+      engine_ref: v1
+      toolkit_repo: mgganeshguptha-source/copilot-toolkit
+      # Toolkit's default branch. BCBSM toolkit repos use 'master'.
+      toolkit_ref: main
+      # Harness builds the code, runs unit tests + the coverage gate after
+      # unit_testing (loops back on red / low coverage). false = skip; the
+      # developer builds and tests locally before approving the PR.
+      runs_build: true
+      # Offline build: resolve every library from this git store only (Maven
+      # Central is blocked on the runner). Blank = normal online build.
+      maven_libs_repo: mgganeshguptha-source/maven-libs
+      # Toolkit proposals: when a story's answers show a toolkit skill or
+      # instruction should change, raise it as a PR on toolkit_repo for the
+      # toolkit owner to review (never merged automatically). Uses
+      # COPILOT_GITHUB_TOKEN, which must be able to push to toolkit_repo.
+      # false = no toolkit PRs (service rules are still recorded either way).
+      toolkit_proposals: false
+    secrets:
+      # Repo access: checkout of the engine + toolkit, git push, gh pr create,
+      # and credit reporting. A classic PAT is acceptable here.
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      # Copilot model access. LEAVE THIS LINE COMMENTED OUT to use the built-in
+      # Actions token (the `copilot-requests: write` route above). Uncomment and
+      # add the secret only when that route is unavailable — and note that a
+      # CLASSIC PAT (ghp_) is NOT accepted by Copilot for model calls; use an
+      # OAuth login token (gho_), a GitHub App user token (ghu_), or a
+      # fine-grained PAT with the "Copilot Requests" permission (github_pat_).
+      # COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN }}
+      # OPTIONAL. Only if toolkit PRs must use a different token from
+      # COPILOT_GITHUB_TOKEN (e.g. one limited to the toolkit repo).
+      # TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN }}

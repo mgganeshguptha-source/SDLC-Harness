@@ -67,3 +67,17 @@ halt_on_inconclusive: false             # early UNVERIFIABLE = test-fixture gaps
 # ---------------------------------------------------------------- termination
 max_phase_runs: 3                              # global cap across all loop types
 test_failure_loopback_phase: "unit_testing"    # test-compile failures go here, not coding
+
+# ---------------------------------------------------------------- learning from answers
+# Answered clarifications are recorded by the documentation phase as decision
+# files (docs/decisions/<feature_id>.md), carried into the harness PR, approved
+# with the code, and loaded into later stories so the same question is not asked
+# again. No tagging needed; a tag in the story ([story-only], [service],
+# [toolkit-skill], [toolkit-instruction]) only overrides the phase's own call.
+# Toolkit proposals are switched on in the CALLER workflow (toolkit_proposals: true).
+load_copilot_instructions: true         # inline .github/copilot-instructions.md in every phase
+manage_copilot_instructions: true       # create it when missing; add service rules at the end
+knowledge_paths: ["docs/decisions/*.md"]
+knowledge_phases: ["context", "design", "prompt_steps", "validation"]
+knowledge_max_chars: 40000              # newest decision files win when over
+decisions_dir: "docs/decisions"         # must stay under docs/ (the phase's write boundary)

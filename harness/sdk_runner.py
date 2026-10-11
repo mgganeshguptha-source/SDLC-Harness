@@ -385,6 +385,38 @@ def _resolve_skill_assets(skill_md: Path, gh: Path) -> list:
     return found
 
 
+def _load_knowledge(repo_root: Path, cfg, manifest: dict) -> list:
+    """Read the service's approved decision files (config.knowledge_paths),
+    newest first, up to config.knowledge_max_chars in total. Each file is
+    recorded in the manifest; files dropped by the cap are logged there too."""
+    files = {}
+    for pattern in (getattr(cfg, "knowledge_paths", None) or []):
+        try:
+            for f in repo_root.glob(str(pattern).lstrip("/")):
+                if f.is_file() and f.suffix.lower() == ".md":
+                    files[f.resolve()] = f
+        except Exception:
+            continue
+    ordered = sorted(files.values(), key=lambda f: f.stat().st_mtime, reverse=True)
+    budget = int(getattr(cfg, "knowledge_max_chars", 40_000) or 0)
+    out, used = [], 0
+    for f in ordered:
+        try:
+            text = f.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if used + len(text) > budget:
+            manifest["knowledge"].append({"name": f.name, "skipped": "knowledge_max_chars"})
+            continue
+        used += len(text)
+        rel = str(f.relative_to(repo_root)).replace("\\", "/")
+        out.append(f"\n--- decision file: {rel} ---\n{text}")
+        raw = text.encode("utf-8")
+        manifest["knowledge"].append({"name": f.name, "path": rel, "bytes": len(raw),
+                                      "sha256": hashlib.sha256(raw).hexdigest()})
+    return out
+
+
 def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     """Load the capability layer for THIS phase.
 
@@ -407,7 +439,7 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     # phase — name, repo-relative path, size, sha256. This is the harness-side PROOF
     # of deterministic skill delivery (the SDK's own 'loaded' telemetry only reports
     # its internal agent skill and can never show repo skills).
-    manifest = {"instructions": [], "skills": [], "assets": []}
+    manifest = {"instructions": [], "skills": [], "assets": [], "knowledge": []}
 
     def _entry(p: Path, text: str, **extra):
         try:
@@ -449,6 +481,32 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
                     continue  # skip — not relevant to this phase
             chunks.append(f"\n--- instructions/{md.name} ---\n{text}")
             manifest["instructions"].append(_entry(md, text))
+
+    # ---- repository-wide instructions (the service repo's own) ----
+    # GitHub treats .github/copilot-instructions.md as always-on guidance for the
+    # repo. Inlined explicitly so delivery is proven by the manifest rather than
+    # assumed of the CLI.
+    repo_instr = gh / "copilot-instructions.md"
+    if getattr(cfg, "load_copilot_instructions", True) and repo_instr.is_file():
+        try:
+            text = repo_instr.read_text(encoding="utf-8")
+            chunks.append(f"\n--- repository instructions: copilot-instructions.md ---\n{text}")
+            manifest["instructions"].append(_entry(repo_instr, text, repo_wide=True))
+        except Exception:
+            pass
+
+    # ---- service knowledge: approved decisions from earlier stories ----
+    if phase.id in (getattr(cfg, "knowledge_phases", None) or []):
+        kchunks = _load_knowledge(repo_root, cfg, manifest)
+        if kchunks:
+            chunks.append(
+                "\n--- SERVICE KNOWLEDGE: approved decisions from earlier stories ---\n"
+                "Each decision below was answered by a person for an earlier story "
+                "in THIS service and approved in a merged pull request. Treat them "
+                "as established facts: do NOT raise a clarification that one of "
+                "them answers — cite its id (e.g. 'per D-OP018-6418-1') instead. "
+                "If the story contradicts a decision, raise ONE clarification "
+                "quoting both.\n" + "\n".join(kchunks))
 
     # ---- skills ----
     skills_dir = gh / "skills"
@@ -898,7 +956,126 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             "'How to verify' section telling the reviewer to build the project and "
             "run the tests listed in the change locally before approving.\n")
 
+    # LEARNING FROM ANSWERS (documentation phase). By the time documentation
+    # runs, the story passed every gate, so its answered clarifications are
+    # proven usable. They are written down here so the NEXT story does not ask
+    # them again: service rules as a decision file that ships in the PR (the
+    # reviewer's approval is the promotion; config.knowledge_paths loads it
+    # into later stories), and skill/instruction defects as a proposal the
+    # workflow raises as a pull request on the toolkit repo.
+    try:
+        from config import HarnessConfig as _HCdoc
+        _decisions_dir = _HCdoc.load(repo_root / ".harness").decisions_dir
+    except Exception:
+        _decisions_dir = "docs/decisions"
+    _fid = run.feature_id
+    # Questions asked in earlier rounds of THIS story. Developers answer under
+    # a heading of their own choosing ("Response to clarification", ...),
+    # sometimes with the question repeated, sometimes only the answer — these
+    # let the model tell which answer belongs to which question.
+    _asked = []
+    for _i, _round in enumerate(getattr(run, "clarification_log", None) or [], 1):
+        for _q in _round.get("questions") or []:
+            _asked.append(f"  round {_i}: {_q}")
+    _asked_block = (
+        "QUESTIONS ASKED IN EARLIER ROUNDS OF THIS STORY (oldest first):\n"
+        + "\n".join(_asked) + "\n"
+        "Developers answer these in the story under a heading of their own "
+        "choosing (e.g. 'Response to clarification', 'Clarifications', "
+        "'Answers'), usually at the end. An answer may repeat the question or "
+        "give only the response — match answer-only responses to the questions "
+        "above by number, CL-id or order.\n"
+    ) if _asked else ""
+    _context_followup = (
+        "\n" + _asked_block + "Treat those answers as binding: encode each as a "
+        "traced AC. Do NOT ask again a question an answer settles; ask again only "
+        "if the answer leaves it open, quoting what is still missing.\n"
+    ) if _asked_block else ""
+    _story_ref = (f"{run.story_path or 'story'} @ {(run.story_sha256 or '')[:12]}"
+                  .strip(" @"))
+    _proposal_dir = f"{rr}/.harness/toolkit-proposal"
+    # Developers are not expected to tag answers: the phase sorts each answer
+    # itself, and a tag only overrides that. Wrong calls are cheap to undo —
+    # the decision file is reviewed in the service PR, a toolkit proposal by
+    # the toolkit owner. Toolkit proposals are asked for only when the caller
+    # turned them on (toolkit_proposals), so they cost nothing otherwise.
+    import os
+    _proposals_on = os.environ.get("HARNESS_TOOLKIT_PROPOSALS", "").strip().lower() == "true"
+    _toolkit_kinds = (
+        f"  TOOLKIT-SKILL   — the question should never have been asked: the "
+        f"answer was already in the story, its ACs or the code, or it was about "
+        f"HOW to implement rather than what the service must do.\n"
+        f"  TOOLKIT-INSTRUCTION — the answer states a rule for EVERY service "
+        f"(a company, security or regulatory policy), not just this one.\n"
+        if _proposals_on else "")
+    _toolkit_block = (
+        f"TOOLKIT PROPOSALS (TOOLKIT-SKILL / TOOLKIT-INSTRUCTION answers only): "
+        f"the toolkit files are at {rr}/.github/skills/ and "
+        f"{rr}/.github/instructions/. For each file that must change, write the "
+        f"COMPLETE updated file to {_proposal_dir}/files/<skills|instructions>/"
+        f"<same relative path> — copy the original exactly and change only the "
+        f"lines needed. Then write {_proposal_dir}/PROPOSAL.md: the question that "
+        f"was asked, the answer, why the toolkit should change, the exact "
+        f"change, and 'Story: {_fid}'. Never create a new skill and never write "
+        f"anywhere under {rr}/.github/. When unsure, choose SERVICE instead.\n"
+        if _proposals_on else "")
+    _learning_block = (
+        f"\nTHEN RECORD WHAT THIS STORY TAUGHT. Look in the story for answers to "
+        f"clarification questions: any section whose heading mentions "
+        f"clarification, response or answer (there is no standard name — e.g. "
+        f"'Response to clarification'), answers quoting a CL-<n> id, or answers "
+        f"a person added as acceptance criteria. If there are none, skip this "
+        f"entirely.\n{_asked_block}"
+        f"Pair every answer with its question; an answer you cannot pair with a "
+        f"question confidently is NOT recorded. Sort each answer into ONE kind:\n"
+        f"  SERVICE (the default) — a rule about how THIS service behaves that a "
+        f"later story could need.\n"
+        f"  STORY-ONLY — a one-off detail of this story (a specific date, value "
+        f"or wording that no later story would reuse), or anything that is not a "
+        f"rule (a thank-you, a status note, 'will check with BA'). Record nothing.\n"
+        f"{_toolkit_kinds}"
+        f"If the person tagged an answer [service], [story-only], "
+        f"[toolkit-skill] or [toolkit-instruction], the tag decides.\n"
+        f"SERVICE DECISIONS: write {rr}/{_decisions_dir}/{_fid}.md (create the "
+        f"folder by writing the file). Title '# Decisions — {_fid}', then a line "
+        f"'Source: {_story_ref}', then one section per answer headed "
+        f"'## D-{_fid}-<n>: <short rule>' with bullets: Question, Answer (as a "
+        f"testable rule, in the person's words where possible), Applies to "
+        f"(classes, endpoints or fields), Scope: service. The file holds SERVICE "
+        f"rules ONLY — never story-only answers, open questions or this story's "
+        f"own requirements. Record only what the story states — never infer a "
+        f"rule the person did not give. If no answer is a SERVICE rule, write no "
+        f"file.\n"
+        f"COPILOT INSTRUCTIONS: when you wrote SERVICE decisions, also add each "
+        f"rule as ONE line to {rr}/.github/copilot-instructions.md, so developers "
+        f"who work stories outside this harness get it too. Put the lines under "
+        f"a section '## Service rules (from answered clarifications)' at the end "
+        f"of the file (create the section if missing), each as '- <rule> "
+        f"(D-{_fid}-<n>)'. Skip a rule the file already states. ONLY ADD — never "
+        f"remove, reorder or reword existing content; a rewrite that loses "
+        f"content is rejected. If the file does not exist, do not create it.\n"
+        f"{_toolkit_block}"
+    )
+
+    _repo_instr = f"{rr}/.github/copilot-instructions.md"
     base = {
+        "repo_instructions": (
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. This repository has no repo-wide Copilot "
+            f"instructions file. Create it using the build-copilot-instructions "
+            f"skill provided above, following its template exactly.\n"
+            f"Read READ-ONLY what the skill tells you to discover (build file, "
+            f"package structure, a representative controller/service/repository "
+            f"and test). Where the skill would ask the developer, do NOT ask: write "
+            f"the skill's [TODO — MUST COMPLETE] marker instead, so the reviewer "
+            f"fills it in the pull request. Never guess.\n"
+            f"BUDGET YOUR TURNS: read no more than about ten files, then write the "
+            f"file in ONE pass, complete.\n"
+            f"Write ONLY this EXACT file (its parent ALREADY EXISTS, do not mkdir, "
+            f"shell is disallowed): {_repo_instr}\n"
+            f"Do NOT create path-specific instruction files, and do NOT touch any "
+            f"source, test or build file."
+        ),
         "context": (
             f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
             f"and do NOT wait for input. Use the build-context skill in CI mode.\n"
@@ -909,6 +1086,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Fill every section you can from the story. For any genuine ambiguity, write a "
             f"precise '[NEEDS CLARIFICATION]: <missing dimension>' line in Section 8 — do NOT "
             f"guess and do NOT use vague language. Do NOT modify any source files. "
+            f"{_context_followup}"
             f"Write ONLY the single context .md file in {ctx_dir}."
         ),
         "prompt_steps": (
@@ -1037,7 +1215,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         "documentation": (
             f"Document the change as a markdown file under {docs_dir}/ (the directory "
             f"ALREADY EXISTS, do not mkdir, shell is disallowed) for:\n  STORY: {story}\n"
-            f"Write ONLY under {docs_dir}/."
+            f"{_learning_block}"
+            f"Write ONLY under {docs_dir}/ and {rr}/.harness/."
         ),
         "raise_pr": (
             f"Summarize the change for a pull request body and write it to "
@@ -1236,7 +1415,8 @@ class SdkAgentRunner:
         self.log(f"  [capability] phase '{phase.id}': "
                  f"skills={_fmt(cap_manifest['skills'])} "
                  f"templates={_fmt(cap_manifest['assets'])} "
-                 f"instructions={len(cap_manifest['instructions'])} file(s)")
+                 f"instructions={len(cap_manifest['instructions'])} file(s) "
+                 f"knowledge={len([k for k in cap_manifest.get('knowledge', []) if 'path' in k])} file(s)")
         try:
             mf_path = repo_root / ".harness" / "capability-manifest.json"
             existing = {}

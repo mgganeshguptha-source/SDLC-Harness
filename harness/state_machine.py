@@ -304,6 +304,31 @@ class StateMachine:
         # context files written before this phase existed, rather than silently
         # adding a phase (and its cost) to every in-flight story. It is logged,
         # so the absence is visible rather than assumed.
+        # ---- REPO INSTRUCTIONS: by exception ----
+        # Creates .github/copilot-instructions.md only when the repo has none
+        # (or manage_copilot_instructions is off). An existing file is never
+        # regenerated here; the documentation phase adds to it at the end.
+        if phase.id == "repo_instructions":
+            _ri = self.repo_root / ".github" / "copilot-instructions.md"
+            try:
+                from config import HarnessConfig as _HCri
+                _manage = bool(_HCri.load(self.harness_dir).manage_copilot_instructions)
+            except Exception:
+                _manage = True
+            if _ri.is_file() or not _manage:
+                self.log(f"\n=== Phase '{phase.id}' : {phase.title} ===")
+                self.log("  [repo_instructions] " + (
+                    ".github/copilot-instructions.md exists — skipping."
+                    if _ri.is_file() else
+                    "manage_copilot_instructions is off — skipping."))
+                if phase.id not in run.completed_phases:
+                    run.completed_phases.append(phase.id)
+                nxt = next_phase(phase.id)
+                run.current_phase = nxt.id if nxt else run.current_phase
+                run.status = "running" if nxt else "done"
+                run.save(self.harness_dir)
+                return run
+
         if phase.id == "design":
             try:
                 from clarification import scan_context as _scan_d
@@ -380,8 +405,34 @@ class StateMachine:
         # SDK figures below are taken from THIS attempt only.
         _tok_log_start = len(run.phase_token_log)
 
+        # The documentation phase may ADD service rules to an existing
+        # copilot-instructions.md; it must never gut it. Snapshot it so a
+        # rewrite that loses much of the file can be undone below.
+        _ri_path = self.repo_root / ".github" / "copilot-instructions.md"
+        _ri_before = None
+        if phase.id == "documentation" and _ri_path.is_file():
+            try:
+                _ri_before = _ri_path.read_text(encoding="utf-8")
+            except Exception:
+                _ri_before = None
+
         code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        if _ri_before is not None:
+            try:
+                _after = (_ri_path.read_text(encoding="utf-8")
+                          if _ri_path.is_file() else "")
+                if len(_after) < 0.9 * len(_ri_before):
+                    _ri_path.write_text(_ri_before, encoding="utf-8")
+                    self.log("  ! copilot-instructions.md lost more than 10% of its "
+                             "content in the documentation phase — restored the "
+                             "original. Only additions are accepted.")
+                elif _after != _ri_before:
+                    self.log("  [documentation] copilot-instructions.md updated with "
+                             "this story's service rules (review it in the PR).")
+            except Exception:
+                pass
 
         _credits_after = (_read_phase_credits("after", phase.id, _settle, self.log)
                           if _account_reads else None)
@@ -656,7 +707,33 @@ class StateMachine:
                 _bmode = (getattr(_cfg, "blocker_gate", "blocking") or "blocking").strip().lower()
 
                 cr = _scan(self.repo_root, _cfg.context_output_dir,
-                           check_feasibility=(_bmode != "off"))
+                           check_feasibility=(_bmode != "off"),
+                           written_after=_phase_started)
+
+                # --- no context file: a failed phase, not a story question ---
+                # Reporting this as NEEDS_CLARIFICATION sent developers to edit
+                # a story that was never the problem. Halt it as a missing
+                # artifact so the metrics count it as a harness failure too.
+                if cr.missing:
+                    run.completed_phases = [p for p in run.completed_phases
+                                            if p != phase.id]
+                    msg = (
+                        "\n  ============ CONTEXT FILE MISSING: HALTED ============\n"
+                        f"  The '{phase.id}' phase finished without writing a context "
+                        f"file in {_cfg.context_output_dir}.\n"
+                        "  This is a failed phase (model output, turn budget or SDK),\n"
+                        "  NOT a question about the story. Do not edit the story.\n"
+                        "  Action : read the phase log above, then re-run with "
+                        "resume=true.\n"
+                        "  =====================================================\n"
+                    )
+                    self.log(msg)
+                    run.last_feedback = msg
+                    run.status = "halted"
+                    run.halt_gate = HG.ARTIFACT_MISSING
+                    run.halt_detail = "context: no context file written"
+                    run.save(self.harness_dir)
+                    return run
 
                 # Report the feasibility posture BEFORE any halt, so the operator
                 # can always tell whether the check ran. A gate that is quietly
@@ -682,6 +759,21 @@ class StateMachine:
                              f"unresolved in {cr.scanned_file}")
                     for it in cr.items:
                         self.log("      • " + it)
+                    _sp = getattr(run, "story_path", None) or "the story file"
+                    self.log(
+                        f"    Answer each question in {_sp} on the BASE branch — "
+                        f"preferably as a new acceptance criterion — then re-run "
+                        f"with resume=true. The resume re-reads the story from the "
+                        f"base branch.")
+                    try:
+                        from state import current_run_id
+                        run.clarification_log.append({
+                            "run_id": current_run_id(),
+                            "story_sha256": getattr(run, "story_sha256", None),
+                            "questions": list(cr.items),
+                        })
+                    except Exception:
+                        pass
                     run.status = "needs_input"
                     run.halt_gate = HG.CLARIFICATION
                     run.save(self.harness_dir)

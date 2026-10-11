@@ -125,6 +125,15 @@ on:
         required: false
         default: true
         type: boolean
+      toolkit_proposals:
+        description: >-
+          Raise toolkit changes the documentation phase proposes as pull
+          requests on toolkit_repo, for the toolkit owner to review. Uses
+          TOOLKIT_PR_TOKEN if set, else COPILOT_GITHUB_TOKEN — either must be
+          able to push branches to and open PRs on toolkit_repo.
+        required: false
+        default: false
+        type: boolean
     secrets:
       COPILOT_GITHUB_TOKEN:
         description: >-
@@ -139,6 +148,12 @@ on:
           organization. Set only when that route is unavailable, and never to a
           CLASSIC PAT (ghp_) — Copilot rejects it for model calls. Accepted: gho_,
           ghu_, or a fine-grained PAT with the Copilot Requests permission.
+        required: false
+      TOOLKIT_PR_TOKEN:
+        description: >-
+          OPTIONAL. Used instead of COPILOT_GITHUB_TOKEN for toolkit proposal
+          PRs (toolkit_proposals: true) when that token cannot write to
+          toolkit_repo, or to keep toolkit write access on a separate token.
         required: false
 
 jobs:
@@ -412,16 +427,29 @@ jobs:
       # Rewind the loaded state to the phase we are re-entering, and reset the
       # retry budgets that stopped the last run — otherwise the gate that halted
       # it fires again before the agent ever sees the human's fix.
+      # The story is refreshed from the BASE branch, where developers answer
+      # clarifications: on a resume at context the edited story replaces the one
+      # captured when the run started (otherwise the same questions come back).
       - name: Rewind state (resume only)
         if: inputs.resume
         working-directory: engine/harness
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
-          if [ -n "${{ inputs.start_phase }}" ]; then
-            python resume.py --repo ../../service --phase "${{ inputs.start_phase }}"
+          BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
+          BASE_REF=""
+          if git -C ../../service fetch -q origin "$BASE"; then
+            BASE_REF="origin/$BASE"
           else
-            python resume.py --repo ../../service
+            echo "::warning title=Base not fetched::Could not fetch $BASE; the story is not refreshed."
           fi
+          ARGS=(--repo ../../service)
+          if [ -n "${{ inputs.start_phase }}" ]; then
+            ARGS+=(--phase "${{ inputs.start_phase }}")
+          fi
+          if [ -n "$BASE_REF" ]; then
+            ARGS+=(--base-ref "$BASE_REF")
+          fi
+          python resume.py "${ARGS[@]}"
 
       - name: Autorun (all phases)
         working-directory: engine/harness
@@ -440,9 +468,20 @@ jobs:
           HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
           HARNESS_RESUMED: ${{ inputs.resume }}
           HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
+          HARNESS_TOOLKIT_PROPOSALS: ${{ inputs.toolkit_proposals }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
+
+      # Keep the documentation phase's toolkit proposal (if any) out of the
+      # service tree before the WIP and PR steps rewrite it.
+      - name: Save toolkit proposal
+        if: always()
+        run: |
+          if [ -f service/.harness/toolkit-proposal/PROPOSAL.md ]; then
+            cp -r service/.harness/toolkit-proposal "$RUNNER_TEMP/toolkit-proposal"
+            echo "Toolkit proposal saved."
+          fi
 
       # Proof of where libraries came from: Maven records the source repository
       # of every downloaded library; summarise Maven Central vs the library
@@ -656,13 +695,21 @@ jobs:
           git fetch origin "$PR_BASE"
           MB=$(git merge-base "origin/$PR_BASE" "$WIP_SHA")
           # docs/ (documentation phase output) is archived in the run's audit
-          # folder instead, so the PR carries the code change only. artifacts/
+          # folder instead, so the PR carries the code change only — except the
+          # decision records, added below. artifacts/
           # is the old metrics-branch layout and must never reach a PR.
           EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics'
                 ':(exclude)docs' ':(exclude)artifacts'
                 ':(exclude).github/skills' ':(exclude).github/instructions'
                 ':(exclude).github/story-context-files')
           git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/changed"
+          # EXCEPT the decision records (config decisions_dir, default
+          # docs/decisions): they must merge with the code, because the next
+          # story loads them from the base branch. The reviewer approves them
+          # in this PR — that approval is what makes an answer reusable.
+          DEC_DIR=$(PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 -c "from pathlib import Path; from config import HarnessConfig; print(HarnessConfig.load(Path('.harness')).decisions_dir)" 2>/dev/null || echo docs/decisions)
+          DEC_DIR="${DEC_DIR:-docs/decisions}"
+          git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- "$DEC_DIR" >> "$WORKTREE/changed"
           git diff -z --name-only --diff-filter=D     "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/deleted"
           echo "Files carried into the PR:"
           tr '\0' '\n' < "$WORKTREE/changed"
@@ -678,6 +725,7 @@ jobs:
 
           # 4) Safety net: never let run workspace / audit / metrics be staged.
           git reset -q -- .harness audit metrics docs artifacts 2>/dev/null || true
+          if [ -d "$DEC_DIR" ]; then git add -- "$DEC_DIR"; fi
 
           # 5) Nothing to commit means the run produced no code change — do not
           #    raise an empty PR; keep WIP for inspection.
@@ -712,6 +760,78 @@ jobs:
           #    harness-metrics (step 8a) before this step, so nothing is lost.
           git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
 
+      # --- 9b. raise the proposed toolkit change as a PR on the toolkit repo ---
+      # Only when the caller sets toolkit_proposals: true and the documentation
+      # phase wrote a proposal. The harness never merges it: the toolkit owner reviews it,
+      # because a toolkit change reaches every service. Only EXISTING files under
+      # skills/ or instructions/ may change; a proposed file under half the size
+      # of the original is treated as truncated and dropped. If an open proposal
+      # PR already touches the same files, the proposal is added to it as a
+      # comment instead of opening another PR.
+      - name: Propose toolkit change (optional)
+        if: success() && inputs.toolkit_proposals
+        continue-on-error: true
+        env:
+          TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          PROP="$RUNNER_TEMP/toolkit-proposal"
+          if [ ! -f "$PROP/PROPOSAL.md" ] || [ ! -d "$PROP/files" ]; then
+            echo "No toolkit proposal from this run."; exit 0
+          fi
+          FEATURE="${{ inputs.feature_id }}"
+          REPO="${{ inputs.toolkit_repo }}"
+          cd "$GITHUB_WORKSPACE/toolkit"
+          BRANCH="harness-proposal/${FEATURE}-${{ github.run_id }}"
+          git checkout -q -B "$BRANCH"
+          CHANGED=()
+          while IFS= read -r -d '' f; do
+            rel="${f#"$PROP/files/"}"
+            case "$rel" in
+              *..*) echo "::warning::skipped $rel (bad path)"; continue ;;
+              skills/*|instructions/*) ;;
+              *) echo "::warning::skipped $rel (only skills/ and instructions/ may change)"; continue ;;
+            esac
+            if [ ! -f "$rel" ]; then
+              echo "::warning::skipped $rel (not an existing toolkit file)"; continue
+            fi
+            old=$(wc -c < "$rel"); new=$(wc -c < "$f")
+            if [ "$new" -lt $((old / 2)) ]; then
+              echo "::warning::skipped $rel (proposed file is under half the original size - likely truncated)"; continue
+            fi
+            cp "$f" "$rel"
+            CHANGED+=("$rel")
+          done < <(find "$PROP/files" -type f -print0)
+          if git diff --quiet; then
+            echo "Proposal changes nothing in the toolkit."; exit 0
+          fi
+          BODY="$RUNNER_TEMP/toolkit-pr-body.md"
+          {
+            cat "$PROP/PROPOSAL.md"
+            echo
+            echo "---"
+            echo "Proposed by the SDLC harness from story $FEATURE in ${{ github.repository }}:"
+            echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > "$BODY"
+          # An open proposal already touching these files: comment there instead.
+          EXISTING=$(gh pr list --repo "$REPO" --state open --limit 50 \
+            --json number,headRefName,files \
+            --jq '.[] | select(.headRefName | startswith("harness-proposal/")) | [.number, (.files[].path)] | @tsv' 2>/dev/null || true)
+          for rel in "${CHANGED[@]}"; do
+            N=$(printf '%s\n' "$EXISTING" | awk -F'\t' -v p="$rel" '{for(i=2;i<=NF;i++) if($i==p){print $1; exit}}')
+            if [ -n "$N" ]; then
+              gh pr comment "$N" --repo "$REPO" --body-file "$BODY"
+              echo "::notice title=Toolkit proposal added to PR #$N::An open proposal already changes $rel."
+              exit 0
+            fi
+          done
+          git -c user.name=harness-bot -c user.email=harness-bot@users.noreply.github.com \
+            commit -q -am "Harness proposal from $FEATURE"
+          git -c http.https://github.com/.extraheader= push -q \
+            "https://x-access-token:${TOOLKIT_PR_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/$BRANCH"
+          gh pr create --repo "$REPO" --base "${{ inputs.toolkit_ref }}" --head "$BRANCH" \
+            --title "Harness proposal: $FEATURE" --body-file "$BODY"
+
       # --- 9a. delete the working branch — ONLY on a clean, PR-raised success ---
       # The WIP branch (harness-wip/<feature>) is the resume point. It is safe to
       # remove exactly when the run FINISHED (status=done) AND the change was
@@ -744,4 +864,4 @@ jobs:
       - name: Explain how to resume (halt only)
         if: failure() && hashFiles('engine/harness/run.py') != ''
         run: |
-          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run."
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on the base branch instead; the resume re-reads it from there."

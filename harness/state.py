@@ -18,6 +18,15 @@ class RunState:
     story: str                            # the user story text
     current_phase: str                    # phase id we are on / paused at
     status: str = "running"               # running | awaiting_approval | halted | done
+    # Where the story text came from and a hash of it, so a resume can tell
+    # whether the developer has edited the story since the run started.
+    story_path: Optional[str] = None
+    story_sha256: Optional[str] = None
+    # Every set of questions the context gate halted on, oldest first:
+    # {"run_id", "story_sha256", "questions": [...]}. Developers often answer
+    # under their own heading without repeating the question, so later phases
+    # need the questions to know what each answer answers.
+    clarification_log: list = field(default_factory=list)
     completed_phases: list = field(default_factory=list)
     # approvals[phase_id] = "approved" | "rejected"
     approvals: dict = field(default_factory=dict)
