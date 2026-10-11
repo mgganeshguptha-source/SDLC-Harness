@@ -251,3 +251,30 @@ def test_report_counts_repeats_in_same_and_other_stories():
     assert st["repeat_other"] == 1          # B-2 repeats A-1; C-3 is another repo
     assert st["features"]["A-1"]["unanswered"] == 1
     assert st["features"]["A-1"]["done"] is True
+
+
+# ---- free-form answers: the questions travel with the run ------------------
+
+def test_clarification_halt_keeps_the_questions():
+    with tempfile.TemporaryDirectory() as d:
+        hd = _hd(d)
+        sm = _sm(ScriptedExecutor(context_clarifications=True), hd)
+        run = sm.run_until_pause(_new_run())
+        assert run.clarification_log[-1]["questions"] == [
+            "[NEEDS CLARIFICATION]: example gap"]
+        assert RunState.load(hd).clarification_log == run.clarification_log
+
+
+def test_earlier_questions_reach_context_and_documentation_prompts():
+    from sdk_runner import _phase_instruction
+    with tempfile.TemporaryDirectory() as d:
+        repo = _service(d)
+        run = RunState(feature_id="OP018-6418", story="s\n## Response to clarification\n1. UNKNOWN",
+                       current_phase="context")
+        run.clarification_log = [{"questions": ["[NEEDS CLARIFICATION]: CL-1 — Unknown status?"]}]
+        for pid in ("context", "documentation"):
+            prompt = _phase_instruction(phase_by_id(pid), run, repo)
+            assert "round 1: [NEEDS CLARIFICATION]: CL-1 — Unknown status?" in prompt
+            assert "Response to clarification" in prompt
+        fresh = RunState(feature_id="X", story="s", current_phase="context")
+        assert "EARLIER ROUNDS" not in _phase_instruction(phase_by_id("context"), fresh, repo)

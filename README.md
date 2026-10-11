@@ -65,6 +65,11 @@ pattern. This is the one branch point in the spine.
   `resume=true`. A resume at `context` re-reads the story from the base branch and
   warns if it has not changed. A resume at a later phase keeps the original story,
   because the plan and code were built from it.
+- **Answers in any form.** Developers may answer under any heading (e.g.
+  "Response to clarification"), with or without repeating the question. Each
+  halt's questions are kept in `run-state.json`, and on resume the `context` and
+  `documentation` phases receive them so answer-only responses can be matched to
+  their questions. (A fresh run, `resume=false`, starts without them.)
 - **A missing context file is not a question.** If the context phase writes no
   file, the run halts as `artifact_missing`. Only a file written in that attempt is
   scanned, so an old context file left in the folder cannot pass the gate.

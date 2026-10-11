@@ -714,6 +714,15 @@ class StateMachine:
                         f"preferably as a new acceptance criterion — then re-run "
                         f"with resume=true. The resume re-reads the story from the "
                         f"base branch.")
+                    try:
+                        from state import current_run_id
+                        run.clarification_log.append({
+                            "run_id": current_run_id(),
+                            "story_sha256": getattr(run, "story_sha256", None),
+                            "questions": list(cr.items),
+                        })
+                    except Exception:
+                        pass
                     run.status = "needs_input"
                     run.halt_gate = HG.CLARIFICATION
                     run.save(self.harness_dir)

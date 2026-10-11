@@ -969,6 +969,28 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     except Exception:
         _decisions_dir = "docs/decisions"
     _fid = run.feature_id
+    # Questions asked in earlier rounds of THIS story. Developers answer under
+    # a heading of their own choosing ("Response to clarification", ...),
+    # sometimes with the question repeated, sometimes only the answer — these
+    # let the model tell which answer belongs to which question.
+    _asked = []
+    for _i, _round in enumerate(getattr(run, "clarification_log", None) or [], 1):
+        for _q in _round.get("questions") or []:
+            _asked.append(f"  round {_i}: {_q}")
+    _asked_block = (
+        "QUESTIONS ASKED IN EARLIER ROUNDS OF THIS STORY (oldest first):\n"
+        + "\n".join(_asked) + "\n"
+        "Developers answer these in the story under a heading of their own "
+        "choosing (e.g. 'Response to clarification', 'Clarifications', "
+        "'Answers'), usually at the end. An answer may repeat the question or "
+        "give only the response — match answer-only responses to the questions "
+        "above by number, CL-id or order.\n"
+    ) if _asked else ""
+    _context_followup = (
+        "\n" + _asked_block + "Treat those answers as binding: encode each as a "
+        "traced AC. Do NOT ask again a question an answer settles; ask again only "
+        "if the answer leaves it open, quoting what is still missing.\n"
+    ) if _asked_block else ""
     _story_ref = (f"{run.story_path or 'story'} @ {(run.story_sha256 or '')[:12]}"
                   .strip(" @"))
     _proposal_dir = f"{rr}/.harness/toolkit-proposal"
@@ -999,13 +1021,18 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         if _proposals_on else "")
     _learning_block = (
         f"\nTHEN RECORD WHAT THIS STORY TAUGHT. Look in the story for answers to "
-        f"clarification questions (a 'Clarification(s)' section, answers quoting "
-        f"a CL-<n> id, or answers a person added as acceptance criteria). If there "
-        f"are none, skip this entirely. Sort each answer into ONE kind:\n"
+        f"clarification questions: any section whose heading mentions "
+        f"clarification, response or answer (there is no standard name — e.g. "
+        f"'Response to clarification'), answers quoting a CL-<n> id, or answers "
+        f"a person added as acceptance criteria. If there are none, skip this "
+        f"entirely.\n{_asked_block}"
+        f"Pair every answer with its question; an answer you cannot pair with a "
+        f"question confidently is NOT recorded. Sort each answer into ONE kind:\n"
         f"  SERVICE (the default) — a rule about how THIS service behaves that a "
         f"later story could need.\n"
         f"  STORY-ONLY — a one-off detail of this story (a specific date, value "
-        f"or wording that no later story would reuse). Record nothing.\n"
+        f"or wording that no later story would reuse), or anything that is not a "
+        f"rule (a thank-you, a status note, 'will check with BA'). Record nothing.\n"
         f"{_toolkit_kinds}"
         f"If the person tagged an answer [service], [story-only], "
         f"[toolkit-skill] or [toolkit-instruction], the tag decides.\n"
@@ -1014,8 +1041,11 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"'Source: {_story_ref}', then one section per answer headed "
         f"'## D-{_fid}-<n>: <short rule>' with bullets: Question, Answer (as a "
         f"testable rule, in the person's words where possible), Applies to "
-        f"(classes, endpoints or fields), Scope: service. Record only what the "
-        f"story states — never infer a rule the person did not give.\n"
+        f"(classes, endpoints or fields), Scope: service. The file holds SERVICE "
+        f"rules ONLY — never story-only answers, open questions or this story's "
+        f"own requirements. Record only what the story states — never infer a "
+        f"rule the person did not give. If no answer is a SERVICE rule, write no "
+        f"file.\n"
         f"{_toolkit_block}"
     )
 
@@ -1030,6 +1060,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Fill every section you can from the story. For any genuine ambiguity, write a "
             f"precise '[NEEDS CLARIFICATION]: <missing dimension>' line in Section 8 — do NOT "
             f"guess and do NOT use vague language. Do NOT modify any source files. "
+            f"{_context_followup}"
             f"Write ONLY the single context .md file in {ctx_dir}."
         ),
         "prompt_steps": (
