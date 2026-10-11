@@ -1,0 +1,277 @@
+# =============================================================================
+# SDLC-Harness — per-repo configuration (.harness/config.yaml)
+# =============================================================================
+# This file lives in the SERVICE repository, at .harness/config.yaml. It is the
+# only per-repo configuration the harness reads. Anything not set here falls back
+# to the engine default (see the engine's config.py). Every value below is
+# annotated with: what it controls, the effect of the value, and the other
+# values it accepts.
+#
+# This example is tuned for a JAVA / SPRING BOOT backend service. Fields that a
+# different stack (Kotlin, Angular) must change are marked "STACK-SPECIFIC".
+# =============================================================================
+
+
+# ----------------------------------------------------------------- build module
+# The hand-written application module (repo-relative directory). BCBSM services
+# are aggregator repos: root pom + <svc>-application (code) + <svc>-openapi-code
+# (generated). Blank => auto-detect the -application module from the poms, and
+# auto-mark every other module as generated (never hand-edited).
+# Set an explicit value only for an unusual layout auto-detection gets wrong.
+target_module: ""
+
+
+# ----------------------------------------------------------------- build / tests
+# The command the harness runs to execute unit tests. The HARNESS runs this, not
+# the agent. A non-zero exit fails the validation gate and halts/loops the run.
+# STACK-SPECIFIC: Maven "./mvnw test", Gradle "./gradlew test", npm "npm test".
+test_command: "mvn -U -T 1C -s $MAVEN_SETTINGS -e test"
+
+# Narrow the test run to a subset. Blank => run the whole suite.
+# Maven example: "-Dtest=OwnerServiceTest". Leave blank unless runs are slow.
+test_filter: ""
+
+# A deterministic, known formatting/normalisation goal the harness runs BEFORE
+# validation (e.g. spring-javaformat:apply). Blank => skip. Not arbitrary
+# execution — set this only to a fixed, reviewed goal. The sample pom has no
+# formatter plugin, so it is blank here; set it once the plugin is added.
+pre_validation_command: ""
+
+
+# ----------------------------------------------------------------- coverage gate
+# Minimum line coverage on the CHANGED classes, as a fraction (0.90 = 90%).
+# 0 (or 0.0) => coverage gate disabled entirely.
+min_coverage: 0.90
+
+# What the coverage figure is measured over:
+#   "changed" => only the classes the coding phase wrote this run
+#                ("did MY change get tested"). Recommended.
+#   "global"  => the whole module (legacy behaviour).
+coverage_scope: "changed"
+
+# Which JaCoCo metric the gate reads. One of: LINE, BRANCH, INSTRUCTION, METHOD.
+coverage_metric: "LINE"
+
+# Where JaCoCo writes its CSV (repo-relative). Resolved module-aware at run time.
+# STACK-SPECIFIC: this path is Maven/JaCoCo. A Gradle or JS toolchain differs.
+coverage_csv: "target/site/jacoco/jacoco.csv"
+
+# The goal that produces the JaCoCo CSV. jacoco:report binds to prepare-package,
+# so the harness invokes it explicitly after tests.
+coverage_command: "mvn -s $MAVEN_SETTINGS jacoco:report"
+
+# On a coverage MISS (tests pass but coverage below the bar), which phase to loop
+# back to. Coverage is a test problem, so this is unit_testing.
+coverage_loopback_phase: "unit_testing"
+
+# How many coverage-driven loopbacks before halting for a human. Independent of
+# the review and AC retry budgets, but all are bounded by max_phase_runs below.
+max_coverage_retries: 2
+
+
+# ----------------------------------------------------------------- write boundary
+# Always-deny write globs. DENY WINS over any phase's allowed_writes, so these
+# files can never be written regardless of phase. The generated module(s) are
+# added automatically; list here only EXTRA patterns to protect.
+write_exclude:
+  - "**/generated/**"        # generated sources
+  - "**/*MapperImpl.java"    # MapStruct-generated mapper implementations
+
+
+# ----------------------------------------------------------------- audit retention
+# Whether to KEEP the per-run audit branch (harness-audit/<feature>/<stamp>-
+# <outcome>-<run_id>) after the workflow pushes it. The branch is a complete,
+# immutable trail of one run — written on success AND on halt. Retention is a
+# COMPLIANCE decision owned by this repo, which is why it lives here.
+#   true  => keep the audit branch (default). The safe choice for a regulated /
+#            healthcare repo: the full run trail persists unless someone with
+#            retention authority opts out.
+#   false => the workflow pushes the branch, then deletes it — for repos whose
+#            run trail is captured elsewhere and where per-run branches are noise.
+# The engine only records this value into run-summary.json; the workflow acts on
+# it (the engine never deletes remote branches).
+retain_audit_branch: false
+
+
+# ----------------------------------------------------------------- credit metrics
+# The metrics layer reads GitHub's AI-credit counter before and after each phase
+# to estimate that phase's cost (which model cost what). GitHub's counter LAGS the
+# requests that produced it, so this sets how long to wait after a phase finishes
+# before taking the "after" reading.
+#   > 0 => wait this many seconds, then read. More accurate — the counter has time
+#          to settle. This wait is paid on EVERY phase attempt (loopbacks too), so
+#          30 across nine phases adds ~4.5 min of waiting to a run.
+#   0   => read IMMEDIATELY, no wait. Faster runs, but the per-phase credit figure
+#          is rough (the counter may not have caught up yet).
+# Either way the per-phase MODEL is always recorded; only credit accuracy changes.
+# Org-billed Copilot seats cannot read the counter at all — those phases record
+# the model but no credit figure, regardless of this value.
+credit_settle_seconds: 30
+
+
+# ----------------------------------------------------------------- repo stack
+# STACK-SPECIFIC. Declares the technology stack(s) this repository contains.
+# Drives two filters: which instruction SUBFOLDERS load (backend/, angular-
+# frontend/, mobile-frontend/) and which stack-tagged skills load. Instruction
+# files directly under instructions/ (not in a stack subfolder) always load —
+# those are the cross-cutting guardrails (HIPAA, logging, prompt-injection).
+#   ["backend"]                    a Java/Kotlin backend service
+#   ["angular-frontend"]           an Angular web app
+#   ["mobile-frontend"] / ["ionic"] an Ionic mobile app
+#   ["backend","angular-frontend"] a full-stack repo (loads both)
+#   [] or ["*"]                    include every stack (no filtering)
+# CAVEAT: validated against BACKEND repositories only to date. Frontend and
+# mobile stacks are wired but NOT yet tested end to end.
+repo_stacks: ["backend"]
+
+
+# ----------------------------------------------------------------- model routing
+# The default model for every phase unless overridden below.
+model: "gpt-5.4"
+
+# Per-phase model overrides. Any phase omitted uses `model` above. Keys are phase
+# ids: repo_instructions, context, design, prompt_steps, coding, unit_testing,
+# validation, documentation. (code_review is set via review_model, NOT here.)
+phase_models:
+  design: "gpt-5.4"        # architecture decisions and trade-offs
+  validation: "claude-haiku-4.5"    # judging each acceptance criterion
+  # unit_testing: "gpt-5.1-mini"   # re-enable once the model string is verified
+
+# The code_review model. SET HERE, not in phase_models. Should DIFFER from the
+# coding model so the reviewer is genuinely independent; a same-as-coding value
+# is allowed but the harness warns. Blank => falls back to phase_models/default.
+review_model: "claude-haiku-4.5"
+
+# On a review MISS (reviewer reports issues), which phase to loop back to.
+review_loopback_phase: "coding"
+
+# How many review-driven loopbacks before halting for a human.
+max_review_retries: 2
+
+
+# ----------------------------------------------------------------- context gate
+# Feasibility half of the context gate — how to treat [BLOCKER] findings the
+# context phase writes:
+#   blocking  => a classified blocker halts the run
+#   advisory  => blockers reported, run continues
+#   off       => feasibility is not assessed at all
+# NOTE: [NEEDS CLARIFICATION] ALWAYS blocks, in every mode — an ambiguous story
+# is never guessed into code. This setting governs only the feasibility half.
+# Start advisory for early runs; move to blocking once verdicts prove sound.
+blocker_gate: advisory
+
+
+# ----------------------------------------------------------------- AC conformance gate
+# How to treat the validation phase's per-acceptance-criterion verdicts:
+#   blocking  => a NOT_MET (or unverified) criterion halts / loops back
+#   advisory  => reported, run continues
+#   off       => the gate does not scan
+# Start advisory; move to blocking once the verdicts are trustworthy on this repo.
+ac_gate: advisory
+
+# Where a NOT_MET criterion sends the work. An unimplemented criterion is a
+# production-code gap, so this is coding (not unit_testing).
+ac_loopback_phase: "coding"
+
+# How many AC-driven loopbacks before halting for a human.
+max_ac_retries: 2
+
+# Whether an UNVERIFIABLE criterion (one nothing could confirm) halts the run.
+#   false => reported, run continues (recommended during rollout: most
+#            UNVERIFIABLE findings early on are test-fixture gaps, not code gaps)
+#   true  => an unverified criterion halts (an unverified criterion is unknown,
+#            not satisfied)
+halt_on_inconclusive: false
+
+
+# ----------------------------------------------------------------- termination
+# GLOBAL cap on how many times any ONE phase may execute in a single run, across
+# every loop type combined (review + coverage + AC + validation). This is the
+# backstop that guarantees the run stops even when several gates fire in turn.
+max_phase_runs: 3
+
+# Where a RED test build that is the TEST code's own compile fault loops back to.
+# 'coding' may only write src/main and cannot fix a test that won't compile, so
+# test-compilation failures go to unit_testing instead.
+test_failure_loopback_phase: "unit_testing"
+
+
+# ----------------------------------------------------------------- phase skills
+# Which named skills (folder names under the toolkit's skills/) load in each
+# phase. Skills have no path scope, so this mapping is explicit. This block
+# REPLACES the engine default wholesale — list every phase you want skills for;
+# an omitted phase gets no skills. A skill named here must exist in the toolkit.
+#
+# For a BACKEND repo, review-angular-code is intentionally NOT listed (it is an
+# Angular rubric — it would nitpick reactive Java). A frontend repo would add it
+# to code_review.
+phase_skills:
+  # Runs only when .github/copilot-instructions.md is missing. Use the skill for
+  # this repo's stack: -backend, -angular-frontend or -mobile-frontend.
+  repo_instructions: ["build-copilot-instructions-backend"]
+  context:       ["build-context", "analyze-service"]
+  prompt_steps:  ["build-prompt-steps"]
+  design:        ["build-design"]
+  coding:        ["security-review"]
+  code_review:   ["security-review"]
+  unit_testing:  []
+  validation:    ["build-validation"]
+  documentation: []
+  raise_pr:      []
+
+
+# ------------------------------------------------------ phase instruction scope
+# The file area each phase's instructions apply to. An instruction file loads in
+# a phase when its own `applyTo` glob intersects that phase's scope here; an
+# applyTo of "**" is an always-on guardrail and loads in every phase regardless.
+# This block REPLACES the engine default wholesale — keep all phases.
+#
+# STACK-SPECIFIC paths. These are stack-NEUTRAL src/main, src/test globs that fit
+# Java and Kotlin. An Angular repo (sources under src/app, tests *.spec.ts) must
+# override coding/code_review/unit_testing/validation accordingly.
+#
+# Do NOT leave code_review or validation out: a missing key means an empty scope,
+# which drops every path-scoped instruction (naming, error-handling, reactive,
+# OWASP) from that phase and leaves only the always-on guardrails.
+phase_file_scope:
+  repo_instructions: []
+  context:       ["src/**"]
+  prompt_steps:  ["src/**"]
+  design:        ["src/main/**"]
+  coding:        ["src/main/**"]
+  code_review:   ["src/main/**"]
+  unit_testing:  ["src/test/**"]
+  validation:    ["src/main/**", "src/test/**"]
+  documentation: ["docs/**"]
+  raise_pr:      []
+
+
+# ------------------------------------------------- learning from clarifications
+# How answers to [NEEDS CLARIFICATION] questions are reused so they are not
+# asked again — by the same developer or anyone else, in any later story.
+#
+# Developers answer in the story file on the BASE branch (any heading, e.g.
+# "Response to clarification"; repeating the question is optional) and RESUME
+# the run (resume: true). The harness then:
+#   - records each SERVICE rule from the answers in docs/decisions/<feature_id>.md
+#     and adds it as one line to .github/copilot-instructions.md — both ship in
+#     the harness PR and are approved with the code;
+#   - loads docs/decisions/*.md into later stories' context, design,
+#     prompt_steps and validation phases.
+# One-off, story-only answers are not recorded.
+
+# Inline this repo's .github/copilot-instructions.md in every phase.
+load_copilot_instructions: true
+
+# Create .github/copilot-instructions.md when the repo has none (first phase),
+# and add new service rules to it at the end (additions only; an edit that
+# removes more than 10% of the file is reverted). false => leave the file alone.
+manage_copilot_instructions: true
+
+# Where recorded decisions live. Must stay under docs/ (the documentation
+# phase's write boundary). knowledge_paths are loaded into the phases listed in
+# knowledge_phases, newest first, up to knowledge_max_chars characters.
+decisions_dir: "docs/decisions"
+knowledge_paths: ["docs/decisions/*.md"]
+knowledge_phases: ["context", "design", "prompt_steps", "validation"]
+knowledge_max_chars: 40000
