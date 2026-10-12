@@ -355,3 +355,25 @@ def test_old_phase_skills_override_still_gets_the_instructions_skill():
     assert cfg.skills_for_phase("repo_instructions") == [
         "build-copilot-instructions-backend"]
     assert cfg.skills_for_phase("coding") == []    # other phases: override wins
+
+
+def test_copilot_instructions_is_never_inlined_as_a_skill_template():
+    from sdk_runner import _load_capability_layer
+    with tempfile.TemporaryDirectory() as d:
+        repo = _service(d, "phase_skills:\n  context: [build-context]\n")
+        sk = repo / ".github" / "skills" / "build-context"
+        sk.mkdir(parents=True)
+        (sk / "SKILL.md").write_text("Read `copilot-instructions.md` first.", encoding="utf-8")
+        text, manifest = _load_capability_layer(repo, phase_by_id("context"))
+        assert manifest["assets"] == []
+        assert text.count("Use constructor injection.") == 1
+
+
+def test_documentation_final_line_allows_copilot_instructions():
+    from sdk_runner import _phase_instruction
+    with tempfile.TemporaryDirectory() as d:
+        repo = _service(d)
+        run = RunState(feature_id="F-1", story="s", current_phase="documentation")
+        prompt = _phase_instruction(phase_by_id("documentation"), run, repo)
+        last = prompt.strip().splitlines()[-1]
+        assert "copilot-instructions.md" in last, last

@@ -348,6 +348,11 @@ def _resolve_skill_assets(skill_md: Path, gh: Path) -> list:
             return False
         if not cand.is_file() or cand.suffix.lower() != ".md" or cand.name.lower() == "skill.md":
             return False
+        # Skills often MENTION copilot-instructions.md; it is the repo's own
+        # instructions (inlined separately), never a template to copy. Resolving
+        # it here inlined it a second time under "REQUIRED template".
+        if cand.name.lower() == "copilot-instructions.md":
+            return False
         try:
             content = cand.read_text(encoding="utf-8")
         except Exception:
@@ -1216,7 +1221,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Document the change as a markdown file under {docs_dir}/ (the directory "
             f"ALREADY EXISTS, do not mkdir, shell is disallowed) for:\n  STORY: {story}\n"
             f"{_learning_block}"
-            f"Write ONLY under {docs_dir}/ and {rr}/.harness/."
+            f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
+            f"above) {_repo_instr}."
         ),
         "raise_pr": (
             f"Summarize the change for a pull request body and write it to "
