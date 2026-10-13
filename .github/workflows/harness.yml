@@ -44,10 +44,11 @@ on:
         type: string
       base:
         description: >-
-          Development branch to run against and open the PR into (e.g. PM_Sep,
-          VoC_Oct). The story file and existing code are read from this branch,
-          and the harness PR targets it. Blank uses the repository's default
-          branch.
+          Branch to run against and open the PR into (typically the story
+          branch). The story file, .harness/config.yaml and the code are read
+          from this branch, and the harness PR targets it. Blank falls back to
+          the branch the caller was run from ("Use workflow from"), so callers
+          should make this input required.
         required: false
         default: ""
         type: string
