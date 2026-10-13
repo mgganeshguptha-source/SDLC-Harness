@@ -8,12 +8,11 @@ on:
         required: true
         type: string
       base:
-        description: "Dev branch to run against and PR into (e.g. PM_Sep, VoC_Oct). Blank = repo default."
-        required: false
-        default: ""
+        description: "Story branch: the harness reads the story, config and code from it and opens its PR into it"
+        required: true
         type: string
       resume:
-        description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the base branch."
+        description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the story branch."
         required: false
         default: false
         type: boolean
