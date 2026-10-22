@@ -168,6 +168,14 @@ jobs:
       contents: write
       pull-requests: write
       copilot-requests: write
+    # Developers build on IBM Semeru (OpenJ9), which ignores JVM options it does
+    # not recognise. The runner's Temurin (HotSpot) rejects them instead: an
+    # obsolete flag such as -XX:MaxPermSize in a POM's surefire argLine stops
+    # the test JVM from starting ("Unrecognized VM option"). This makes every
+    # JVM on the runner skip unknown options, like the developers' JVM, without
+    # changing the service's POMs.
+    env:
+      JAVA_TOOL_OPTIONS: -XX:+IgnoreUnrecognizedVMOptions
     steps:
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.

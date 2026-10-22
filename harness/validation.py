@@ -234,6 +234,18 @@ _TOOLCHAIN_SIGNATURES = (
     "mavenwrappermain",
     "no compiler is provided in this environment",
 )
+# FORKED TEST JVM could not start. Maven itself ran (compile done, the
+# "T E S T S" banner printed), so _lifecycle_started() is true and the generic
+# toolchain check above is skipped - but no test ever executed. The cause is
+# the JVM or its options (e.g. an obsolete -XX flag in the surefire argLine),
+# never the code, so these are trusted even after the lifecycle started.
+# Observed at BCBSM: "Unrecognized VM option 'MaxPermSize=256m'" was treated
+# as a code failure and looped coding/unit_testing three times.
+_FORK_START_SIGNATURES = (
+    "error occurred in starting fork",
+    "unrecognized vm option",
+    "could not create the java virtual machine",
+)
 
 _HINTS = {
     "toolchain": (
@@ -263,6 +275,15 @@ _HINTS = {
         "           connection, TLS certificate, or 401/403). Check the runner's\n"
         "           network access, proxy/certificate setup, and repository\n"
         "           credentials, then resume."),
+    "coverage_report": (
+        "The build and tests passed, but the coverage command produced no\n"
+        "           JaCoCo report, so coverage cannot be measured. New tests cannot\n"
+        "           fix this. Read the coverage command output above. Common cause in\n"
+        "           a multi-module repo: a bare 'jacoco:report' runs no lifecycle\n"
+        "           phase, so sibling modules cannot be resolved and the goal fails.\n"
+        "           Set coverage_command in the service's .harness/config.yaml to\n"
+        "           include a phase (e.g. 'mvn -s $MAVEN_SETTINGS test-compile\n"
+        "           jacoco:report'), then resume from unit_testing."),
     "unattributable": (
         "The build failed the same way again after a phase changed the code, and\n"
         "           the failure names no source file, no test and no compile error —\n"
@@ -329,6 +350,8 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
     low = (output or "").lower()
     if any(s in low for s in _DEPENDENCY_SIGNATURES):
         return "dependency"
+    if any(s in low for s in _FORK_START_SIGNATURES):
+        return "toolchain"
     if any(s in low for s in _NETWORK_AUTH_SIGNATURES) and not _lifecycle_started(low):
         return "network_auth"
     if any(s in low for s in _TOOLCHAIN_SIGNATURES) and not _lifecycle_started(low):
@@ -495,9 +518,13 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     cov_measured: list = []
     if passed and cfg.min_coverage > 0:
         log(f"  [harness] coverage: {cfg.coverage_command}")
+        cov_out = ""
+        cov_rc = None
         try:
-            subprocess.run(cfg.coverage_command, cwd=str(repo_root), shell=True,
-                           capture_output=True, text=True, timeout=cfg.test_timeout)
+            _cov = subprocess.run(cfg.coverage_command, cwd=str(repo_root), shell=True,
+                                  capture_output=True, text=True, timeout=cfg.test_timeout)
+            cov_rc = _cov.returncode
+            cov_out = (_cov.stdout or "") + "\n" + (_cov.stderr or "")
         except Exception as e:
             log(f"  [harness] coverage command error: {e} (continuing to parse if report exists)")
 
@@ -508,9 +535,27 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         # reports "unmeasurable" while the tests are actually green.
         csv_path = cfg.resolved_coverage_csv(repo_root)
         if csv_path is None:
-            # Nothing found anywhere — keep a concrete path for the message so the
-            # failure names what was looked for rather than a None.
-            csv_path = repo_root / cfg.coverage_csv
+            # NO REPORT ANYWHERE. Tests are green, so this is the coverage
+            # TOOLING, not missing tests: looping to unit_testing "to add tests"
+            # cannot make a report appear. Observed at BCBSM: two coverage
+            # loopbacks (~3M tokens) on green tests because a bare
+            # `jacoco:report` wrote nothing - and its output was discarded, so
+            # nobody could see why. Halt as an environment failure and show it.
+            cov_errors = maven_error_summary(cov_out)
+            cov_tail = "\n".join(cov_out.strip().splitlines()[-20:])
+            detail = (f"coverage command: {cfg.coverage_command} (exit {cov_rc})\n"
+                      + ("--- coverage MAVEN ERRORS ---\n" + cov_errors + "\n" if cov_errors else "")
+                      + "--- coverage output tail ---\n" + cov_tail)
+            log(f"  ! COVERAGE REPORT MISSING: no {Path(cfg.coverage_csv).name} found after "
+                f"'{cfg.coverage_command}' (exit {cov_rc})")
+            log("  --- coverage command output ---\n" + detail)
+            return ValidationResult(
+                False, proc.returncode, "COVERAGE REPORT MISSING",
+                tail + "\n\n" + detail,
+                failure_kind="environment",
+                env_reason="coverage_report",
+                env_hint=environment_hint("coverage_report"),
+            )
         else:
             try:
                 log(f"  [harness] coverage report: {csv_path.relative_to(repo_root)}")
