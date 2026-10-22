@@ -298,7 +298,6 @@ _MAVEN_ERROR_NOISE = (
     "to see the full stack trace",
     "for more information about the errors",
     "[help ",
-    "-> [help",
 )
 
 
@@ -317,6 +316,13 @@ def maven_error_summary(output: str, max_lines: int = 40) -> str:
         if not stripped.startswith("[ERROR]"):
             continue
         body = stripped[len("[ERROR]"):].strip()
+        # The line that NAMES the failure ("Failed to execute goal ...",
+        # "Non-resolvable parent POM ...") ends in "-> [Help 1]". Trim that
+        # link and keep the line; dropping it hid the actual cause.
+        cut = body.lower().rfind("-> [help")
+        if cut != -1:
+            body = body[:cut].rstrip()
+            line = line[:line.lower().rfind("-> [help")].rstrip()
         if not body or any(n in body.lower() for n in _MAVEN_ERROR_NOISE):
             continue
         if line not in keep:
