@@ -62,7 +62,7 @@ on:
         type: string
       node-version:
         required: false
-        default: "20"
+        default: "22"
         type: string
       engine_ref:
         description: "Tag/branch of SDLC-Harness to run"
@@ -159,7 +159,10 @@ on:
 
 jobs:
   harness:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: GitHub moves ubuntu-latest to Ubuntu 26 from
+    # 2026-10-19 (runner-images #14748). A pilot should not change OS mid-way;
+    # move this deliberately after a test run.
+    runs-on: ubuntu-24.04
     # A job-level permissions block sets every UNLISTED permission to none.
     # copilot-requests: write lets the built-in Actions token pay for Copilot
     # model calls (billed to the organization). It must be granted here AND in
@@ -177,13 +180,22 @@ jobs:
     env:
       JAVA_TOOL_OPTIONS: -XX:+IgnoreUnrecognizedVMOptions
     steps:
+      # --- 0. one name for this run ---
+      # <feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST> names the run's audit
+      # folder and metrics file (engine state.run_label). US Eastern time, the
+      # client's zone; the EDT/EST suffix keeps the repeated hour at the end of
+      # daylight saving unambiguous. The time is fixed HERE, once, so the
+      # autorun step (metrics) and collect-audit (audit folder) agree.
+      - name: Set run stamp
+        run: echo "HARNESS_RUN_STAMP=$(TZ=America/New_York date +%Y%m%d-%H%M%S%Z)" >> "$GITHUB_ENV"
+
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
       # That branch carries the source the agent wrote, any fix a human pushed on
       # top of it, and .harness/run-state.json — without it there is nothing to
       # resume from and the run would silently start over.
       - name: Checkout target service repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: service
           fetch-depth: 0
@@ -211,7 +223,7 @@ jobs:
       # fails with "could not read Username for 'https://github.com'". The same
       # COPILOT_GITHUB_TOKEN that reads the toolkit reads the engine.
       - name: Checkout SDLC-Harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ inputs.engine_repo }}
           ref: ${{ inputs.engine_ref }}
@@ -248,7 +260,7 @@ jobs:
       # Workable options: make YOUR-TOOLKIT-REPO public, or host both repos in an org
       # where members' tokens can be granted access (the BCBSM case).
       - name: Checkout YOUR-TOOLKIT-REPO
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ inputs.toolkit_repo }}
           ref: ${{ inputs.toolkit_ref }}
@@ -331,7 +343,7 @@ jobs:
 
       # --- 4. toolchains ---
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
@@ -350,7 +362,7 @@ jobs:
       # ~/.m2/settings.xml that this step replaces.
       - name: Checkout Maven library store
         if: ${{ inputs.maven_libs_repo != '' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ inputs.maven_libs_repo }}
           ref: ${{ inputs.maven_libs_ref }}
@@ -390,12 +402,12 @@ jobs:
           echo "Build from ${{ inputs.maven_libs_repo }}@${{ inputs.maven_libs_ref }} with $("${MVN_HOME}bin/mvn" -v 2>/dev/null | head -1)"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python-version }}
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node-version }}
 
@@ -523,7 +535,8 @@ jobs:
       # run-state.json + blocked.md are force-added past .gitignore because resume
       # needs them. The run artifacts (context files, prompt-steps, audit trail)
       # are NOT committed here — they live on harness-metrics under
-      # audit/<feature>/<run_id>/ (see step 8a), so the WIP branch stays lean
+      # audit/<feature>/<feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST>/ (step 8a), so
+      # the WIP branch stays lean
       # and there is exactly one home for them.
       #
       # A human fixing code by hand works on THIS branch, pushes, and re-triggers
@@ -579,8 +592,10 @@ jobs:
       # and every feature, so the trail persists whether the run succeeded or halted.
       #
       # Layout on the branch:
-      #   metrics/<yyyy>/<mm>/<feature>-<run_id>.json   one metrics record per run
-      #   audit/<feature>/<run_id>/                     ONE folder per run holding
+      #   metrics/<yyyy>/<mm>/<feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST>.json
+      #                                                 one metrics record per run
+      #   audit/<feature>/<feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST>/
+      #                                                 ONE folder per run holding
       #       everything about it: context.md, design.md, prompt-steps.md,
       #       review.md, validation.md, validation-report.txt, pr-body.md,
       #       run-summary.json, run-state.json, blocked.md, and docs/ (the
@@ -649,7 +664,10 @@ jobs:
               echo "Push raced with another run; rebasing (attempt $i)."
               git pull -q --rebase origin harness-metrics || break
             done
-            echo "::notice title=Metrics + audit published::harness-metrics — audit/${FEATURE}/${{ github.run_id }}/"
+            RUN_DIRS=$(cd "$MDIR" && git show --name-only --format= HEAD -- audit | cut -d/ -f1-3 | sort -u | tr '\n' ' ')
+            echo "Published to harness-metrics in this commit:"
+            git show --name-only --format= HEAD | sed 's/^/  /'
+            echo "::notice title=Metrics + audit published::harness-metrics — ${RUN_DIRS:-audit/${FEATURE}/}"
           fi
           cd - >/dev/null
           git worktree remove --force "$MDIR"
@@ -658,7 +676,7 @@ jobs:
       # The PR branch must contain the CODE CHANGE ONLY, never the run workspace
       # (.harness/), the audit trail (audit/), metrics (metrics/) or the
       # documentation phase output (docs/). Those all live on the harness-metrics
-      # branch (metrics/ + audit/<feature>/<run_id>/) and must not leak into a
+      # branch (metrics/ + audit/<feature>/<run label>/) and must not leak into a
       # reviewable, mergeable PR.
       #
       # The working tree at this point is the WIP state and holds everything the

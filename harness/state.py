@@ -142,6 +142,33 @@ def current_run_id() -> str:
     return os.environ.get("GITHUB_RUN_ID") or "local"
 
 
+def run_label(feature_id: str | None) -> str:
+    """Human-readable, unique-per-run name:
+    <feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST>, in US Eastern time (the
+    client's time zone). Used for the run's audit folder and its metrics file.
+    The zone abbreviation is part of the name so the repeated hour when
+    daylight saving ends is never ambiguous.
+
+    The timestamp comes from HARNESS_RUN_STAMP, which the workflow sets ONCE at
+    job start, so every step of a run (autorun writes metrics, collect-audit
+    writes the audit folder) produces the same name. Outside CI, or if the
+    variable is missing, the current US Eastern time is used. The Actions run id stays
+    inside the files (run_id) for traceability to the run page."""
+    import os, re
+    from datetime import datetime, timezone
+    stamp = (os.environ.get("HARNESS_RUN_STAMP") or "").strip()
+    if not stamp:
+        try:
+            from zoneinfo import ZoneInfo
+            stamp = datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m%d-%H%M%S%Z")
+        except Exception:  # no tz database on this machine
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SUTC")
+    actor = os.environ.get("GITHUB_ACTOR") or "local"
+    def _clean(v, fb):
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", str(v or "")).strip("-") or fb
+    return f"{_clean(feature_id, 'nofeature')}-{_clean(actor, 'local')}-{_clean(stamp, 'nostamp')}"
+
+
 def this_run_entries(run) -> list:
     """phase_token_log entries produced by the current run (entries written
     before run stamping existed have no run_id and count as earlier runs)."""

@@ -11,7 +11,7 @@ Aggregation is unaffected — `cat metrics/**/*.json | jq -s` gives the same JSO
 you would have had, and pandas reads the directory just as happily. The
 concurrency problem simply never arises.
 
-    metrics/2026/08/BOOK-1-31493208647.json
+    metrics/2026/08/BOOK-1-jdoe-20260814-093012.json
 
 Date-partitioned so a repo with thousands of runs does not end up with one
 directory holding all of them.
@@ -318,15 +318,26 @@ def _add_validation_metrics(rec: dict, repo_root: Path, log) -> None:
 
 
 def write_record(rec: dict, repo_root: Path, log=print) -> Path | None:
-    """Write the record to metrics/<yyyy>/<mm>/<feature>-<run_id>.json.
+    """Write the record to metrics/<yyyy>/<mm>/<feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST>.json
+    (state.run_label). The Actions run id stays inside the record (run_id).
 
     Returns the path, or None on failure — a metrics write must NEVER fail a run.
     """
     try:
-        now = datetime.now(timezone.utc)
-        d = repo_root / "metrics" / now.strftime("%Y") / now.strftime("%m")
+        # Year/month folder from the same run stamp as the file name (US Eastern,
+        # set once per run), so a run near midnight at month end is not filed
+        # under a different month than its name says.
+        import os
+        stamp = (os.environ.get("HARNESS_RUN_STAMP") or "").strip()
+        if len(stamp) >= 6 and stamp[:6].isdigit():
+            yyyy, mm = stamp[:4], stamp[4:6]
+        else:
+            now = datetime.now(timezone.utc)
+            yyyy, mm = now.strftime("%Y"), now.strftime("%m")
+        d = repo_root / "metrics" / yyyy / mm
         d.mkdir(parents=True, exist_ok=True)
-        name = f"{_safe(rec.get('feature_id'), 'nofeature')}-{_safe(rec.get('run_id'), 'norun')}.json"
+        from state import run_label
+        name = f"{run_label(rec.get('feature_id'))}.json"
         p = d / name
         p.write_text(json.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
         log(f"  [metrics] wrote {p.relative_to(repo_root)}")

@@ -71,7 +71,7 @@ jobs:
       base: ${{ inputs.base }}
       java-version: "17"
       python-version: "3.13"
-      node-version: "20"
+      node-version: "22"   # Node 20 is deprecated on GitHub runners
       resume: ${{ inputs.resume }}
 #      start_phase: ${{ inputs.start_phase }}
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the

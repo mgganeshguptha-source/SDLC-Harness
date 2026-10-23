@@ -611,7 +611,29 @@ def _src_test(repo_root: Path) -> str:
     return f"{_module_prefix(repo_root)}src/test"
 
 
-def _build_review_dossier(repo_root: Path, log=print) -> str | None:
+def _committed_changes(repo_root: Path, changed_hint: list | None, log=print) -> list:
+    """Production files this run changed that are ALREADY COMMITTED.
+
+    The dossiers find changed files with `git diff HEAD` + untracked files, which
+    is right on a fresh run (the coding phase's edits are uncommitted). On a
+    RESUME the run continues from harness-wip/<feature>, where those edits are
+    committed, so the diff is empty and the dossier used to come back empty
+    ("dossier unavailable"), leaving the phase to rediscover the code by reading.
+    Fall back to the run's recorded changed_main_files, keeping those that exist.
+    """
+    out = []
+    for rel in changed_hint or []:
+        rel = str(rel).replace("\\", "/")
+        if (repo_root / rel).is_file() and rel not in out:
+            out.append(rel)
+    if out:
+        log(f"  [dossier] no uncommitted changes (resume) — using the {len(out)} "
+            f"production file(s) this run recorded")
+    return out
+
+
+def _build_review_dossier(repo_root: Path, log=print,
+                          changed_hint: list | None = None) -> str | None:
     """Assemble the inline review material. Returns None if nothing changed
     (or git failed) — caller falls back to legacy pull-mode review."""
     src_main = _src_main(repo_root)  # <module>/src/main in multi-module, else src/main
@@ -623,6 +645,8 @@ def _build_review_dossier(repo_root: Path, log=print) -> str | None:
         repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
     ).splitlines() if ln.strip()]
     changed = list(dict.fromkeys(tracked + untracked))  # de-dupe, keep order
+    if not changed:
+        changed = _committed_changes(repo_root, changed_hint, log)
     if not changed:
         return None
 
@@ -661,7 +685,8 @@ def _build_review_dossier(repo_root: Path, log=print) -> str | None:
     return dossier
 
 
-def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
+def _build_unittest_dossier(repo_root: Path, log=print,
+                            changed_hint: list | None = None) -> str | None:
     """Inline EVERYTHING the test author needs, so it never explores the repo.
 
     Backlog #6: unit_testing was token-heavy because, given only the story, the
@@ -686,6 +711,8 @@ def _build_unittest_dossier(repo_root: Path, log=print) -> str | None:
         repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
     ).splitlines() if ln.strip()]
     changed = list(dict.fromkeys(tracked + untracked))
+    if not changed:
+        changed = _committed_changes(repo_root, changed_hint, log)
     if not changed:
         return None
 
@@ -1316,7 +1343,9 @@ class SdkAgentRunner:
         # inline and read access is disabled below; if not, legacy pull mode.
         review_dossier: str | None = None
         if phase.id == "code_review":
-            review_dossier = _build_review_dossier(repo_root, log=self.log)
+            review_dossier = _build_review_dossier(
+                repo_root, log=self.log,
+                changed_hint=getattr(run, "changed_main_files", None))
             if review_dossier is None:
                 self.log("  [review] dossier unavailable — falling back to "
                          "legacy pull-mode review (reads allowed)")
@@ -1327,7 +1356,9 @@ class SdkAgentRunner:
         # under test. Reads stay enabled (tests need fixtures).
         unittest_dossier: str | None = None
         if phase.id == "unit_testing":
-            unittest_dossier = _build_unittest_dossier(repo_root, log=self.log)
+            unittest_dossier = _build_unittest_dossier(
+                repo_root, log=self.log,
+                changed_hint=getattr(run, "changed_main_files", None))
             if unittest_dossier is None:
                 self.log("  [unit_testing] dossier unavailable — falling back to "
                          "story-only prompt (reads allowed)")

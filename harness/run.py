@@ -350,22 +350,26 @@ def _run_id() -> str:
 
 
 def cmd_collect_audit(args):
-    """Collect the run's audit artifacts into audit/<feature>/<run_id>/ for
+    """Collect the run's audit artifacts into audit/<feature>/<label>/ for
     permanent retention in the repo. Gathers: the context file(s), prompt-steps.md
     (which includes the appended EXECUTION RECORD), validation-report.txt,
     pr-body.md, and a run-summary with token/cost totals. The PR step then commits
-    this folder. Each run writes to its OWN run_id subfolder, so re-running the
-    same feature never overwrites a prior run's trail."""
+    this folder. Each run writes to its OWN subfolder, named
+    <feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST> (state.run_label), so re-running the
+    same feature never overwrites a prior run's trail. The JaCoCo report
+    (jacoco.csv / jacoco.xml) is kept under coverage/ as evidence of the
+    measured run."""
     import shutil, json, os
-    from state import this_run_entries, sum_entries
+    from state import this_run_entries, sum_entries, run_label
     repo = Path(args.repo).resolve()
     run = _load(repo)
     feature = run.feature_id
     run_id = _run_id()
+    label = run_label(feature)
 
     def _sum_this_run(r):
         return sum_entries(this_run_entries(r))
-    audit_dir = repo / "audit" / feature / run_id
+    audit_dir = repo / "audit" / feature / label
     audit_dir.mkdir(parents=True, exist_ok=True)
 
     hd = _harness_dir(repo)
@@ -382,6 +386,7 @@ def cmd_collect_audit(args):
         retain_audit_branch = _cfg_a.retain_audit_branch
         credit_source = str(getattr(_cfg_a, "credit_source", "sdk") or "sdk").lower()
     except Exception:
+        _cfg_a = None
         retain_audit_branch = True
         credit_source = "sdk"
 
@@ -402,10 +407,26 @@ def cmd_collect_audit(args):
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)
 
+    # Coverage evidence: the JaCoCo report the coverage gate measured. It lives
+    # under the module's target/ on the runner and is discarded with the job,
+    # so keep the CSV (what the gate read) and the XML next to it.
+    try:
+        _csv = _cfg_a.resolved_coverage_csv(repo) if _cfg_a is not None else None
+        if _csv is not None and _csv.is_file():
+            cov_dir = audit_dir / "coverage"
+            cov_dir.mkdir(exist_ok=True)
+            for f in (_csv, _csv.with_name("jacoco.xml")):
+                if f.is_file():
+                    shutil.copy2(f, cov_dir / f.name)
+                    copied.append(f"coverage/{f.name}")
+    except Exception as e:
+        print(f"  (coverage report not kept: {type(e).__name__}: {e})")
+
     # a machine-readable run summary (tokens, cost, phases, status)
     summary = {
         "feature": feature,
         "run_id": run_id,
+        "run_label": label,
         "status": run.status,
         # Compliance policy from the service repo's .harness/config.yaml. The
         # workflow reads this to decide whether to keep the per-run audit branch.
@@ -456,7 +477,7 @@ def cmd_collect_audit(args):
     (audit_dir / "run-summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     copied.append("run-summary.json")
 
-    print(f"Collected audit trail into audit/{feature}/{run_id}/:")
+    print(f"Collected audit trail into audit/{feature}/{label}/:")
     for c in copied:
         print(f"  - {c}")
 

@@ -117,7 +117,20 @@ class PhaseExecutor:
 
         # Deterministic setup: ensure declared dirs exist so the agent never needs
         # shell to mkdir. These are within the phase's allowed_writes by construction.
-        for d in getattr(phase, "pre_create_dirs", ()):
+        _dirs = list(getattr(phase, "pre_create_dirs", ()))
+        # The documentation phase writes the decision record to decisions_dir
+        # (config, default docs/decisions). Shell is denied, so the agent cannot
+        # mkdir it; without this the record was silently skipped ("blocked by
+        # tooling") while copilot-instructions.md still referenced its rules.
+        if phase.id == "documentation":
+            try:
+                from config import HarnessConfig as _HCx
+                _dd = _HCx.load(self.repo_root / ".harness").decisions_dir
+            except Exception:
+                _dd = "docs/decisions"
+            if _dd and _dd not in _dirs:
+                _dirs.append(_dd)
+        for d in _dirs:
             target = self.repo_root / d
             try:
                 target.mkdir(parents=True, exist_ok=True)
