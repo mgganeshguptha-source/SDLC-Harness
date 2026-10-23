@@ -13,6 +13,9 @@ on:
         type: string
       resume:
         description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the story branch."
+        # NOTE: a resume reads .harness/config.yaml from harness-wip/<feature_id>,
+        # not from the story branch — put a config fix on BOTH branches. A resume
+        # also re-runs the AI phase it halted in before the build gate runs.
         required: false
         default: false
         type: boolean
@@ -54,6 +57,14 @@ jobs:
     # Engine pinned to tag v1. v1 must point at an engine commit that has the
     # clarification-learning changes (toolkit_proposals input) — retag v1 on
     # main after merging them, or the run fails on the unknown input.
+    #
+    # `uses:` decides where the WORKFLOW STEPS come from; engine_repo below
+    # decides where the ENGINE CODE comes from. Both must name the same repo.
+    # In a client org set both to the client's engine copy (e.g.
+    # BCBSM/dx_SDLC-Harness). Check on the first run: the "Set up job" log line
+    # "Uses: <owner>/<repo>/.github/workflows/harness.yml@refs/tags/v1" must
+    # show the client repo. (At BCBSM this still pointed at the personal repo,
+    # so engine workflow fixes made in the client copy were silently ignored.)
     uses: mgganeshguptha-source/SDLC-Harness/.github/workflows/harness.yml@v1
     with:
       feature_id: ${{ inputs.feature_id }}
@@ -63,8 +74,9 @@ jobs:
       node-version: "20"
       resume: ${{ inputs.resume }}
 #      start_phase: ${{ inputs.start_phase }}
-      # Engine + toolkit locations. engine_ref MUST match the @ref in `uses:`
-      # above — it is the engine code the job checks out and runs.
+      # Engine + toolkit locations. engine_repo / engine_ref MUST match the
+      # repo and @ref in `uses:` above — they are the engine code the job checks
+      # out and runs.
       engine_repo: mgganeshguptha-source/SDLC-Harness
       engine_ref: v1
       toolkit_repo: mgganeshguptha-source/copilot-toolkit
@@ -74,9 +86,19 @@ jobs:
       # unit_testing (loops back on red / low coverage). false = skip; the
       # developer builds and tests locally before approving the PR.
       runs_build: true
-      # Offline build: resolve every library from this git store only (Maven
-      # Central is blocked on the runner). Blank = normal online build.
+      # Git library store, for runners that cannot reach the company artifact
+      # repository. Internal libraries come from the store's repository folders
+      # (e.g. bcbsm-libs/, Maven layout); public libraries come from Maven
+      # Central — unless the store also has a maven-remote/ folder, which makes
+      # the build fully offline and blocks Maven Central. The store must also
+      # hold the Maven distribution as tools/apache-maven-<version>-bin.zip
+      # (3.6.3 or later for Spring Boot 3.x). Blank = normal online build.
+      # Fill the store before the first run: list internal libraries with
+      #   grep -rn -A2 "<groupId>com.<client>" --include=pom.xml .
+      # then repeat on each downloaded POM for its <parent> and dependencies.
       maven_libs_repo: mgganeshguptha-source/maven-libs
+      # Branch of the store. Engine default is main; BCBSM's store uses master.
+      maven_libs_ref: main
       # Toolkit proposals: when a story's answers show a toolkit skill or
       # instruction should change, raise it as a PR on toolkit_repo for the
       # toolkit owner to review (never merged automatically). Uses

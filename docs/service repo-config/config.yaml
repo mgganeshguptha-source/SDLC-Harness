@@ -56,9 +56,20 @@ coverage_metric: "LINE"
 # STACK-SPECIFIC: this path is Maven/JaCoCo. A Gradle or JS toolchain differs.
 coverage_csv: "target/site/jacoco/jacoco.csv"
 
-# The goal that produces the JaCoCo CSV. jacoco:report binds to prepare-package,
-# so the harness invokes it explicitly after tests.
-coverage_command: "mvn -s $MAVEN_SETTINGS jacoco:report"
+# The command that produces the JaCoCo CSV, run by the harness after the tests
+# pass (jacoco:report binds to prepare-package, which `test` never reaches).
+# Two rules for a MULTI-MODULE repo (both learned on BCBSM, 2026-10-22):
+#   - include a lifecycle phase (test-compile): a bare plugin goal runs no
+#     phase, so sibling modules cannot be resolved and the goal fails;
+#     test-compile does not re-run the tests, so the jacoco.exec they wrote
+#     is kept;
+#   - give the plugin's FULL name: the short prefix "jacoco:" only resolves in
+#     modules that declare the plugin ("No plugin found for prefix 'jacoco'").
+# Use the JaCoCo version the build already uses (here: mem-starter-parent).
+# If no report is produced the run halts as an ENVIRONMENT FAILURE and logs
+# this command's output — new tests cannot fix a missing report.
+# Single-module repo: "mvn -s $MAVEN_SETTINGS jacoco:report" is enough.
+coverage_command: "mvn -s $MAVEN_SETTINGS test-compile org.jacoco:jacoco-maven-plugin:0.8.12:report"
 
 # On a coverage MISS (tests pass but coverage below the bar), which phase to loop
 # back to. Coverage is a test problem, so this is unit_testing.
@@ -67,6 +78,12 @@ coverage_loopback_phase: "unit_testing"
 # How many coverage-driven loopbacks before halting for a human. Independent of
 # the review and AC retry budgets, but all are bounded by max_phase_runs below.
 max_coverage_retries: 2
+
+# How many loopbacks a RED build (compile error or failing test) gets before
+# halting for a human. Engine default 3. Each loopback is a full AI phase run,
+# so keep it low. Environment failures (missing library, JVM cannot start,
+# missing coverage report) never loop — they halt at once.
+max_validation_retries: 2
 
 
 # ----------------------------------------------------------------- write boundary
@@ -78,34 +95,24 @@ write_exclude:
   - "**/*MapperImpl.java"    # MapStruct-generated mapper implementations
 
 
-# ----------------------------------------------------------------- audit retention
-# Whether to KEEP the per-run audit branch (harness-audit/<feature>/<stamp>-
-# <outcome>-<run_id>) after the workflow pushes it. The branch is a complete,
-# immutable trail of one run — written on success AND on halt. Retention is a
-# COMPLIANCE decision owned by this repo, which is why it lives here.
-#   true  => keep the audit branch (default). The safe choice for a regulated /
-#            healthcare repo: the full run trail persists unless someone with
-#            retention authority opts out.
-#   false => the workflow pushes the branch, then deletes it — for repos whose
-#            run trail is captured elsewhere and where per-run branches are noise.
-# The engine only records this value into run-summary.json; the workflow acts on
-# it (the engine never deletes remote branches).
-retain_audit_branch: false
+# (retain_audit_branch was removed: there is no audit branch any more — run
+# artifacts live on the harness-metrics branch. The engine ignores the key.)
 
 
-# ----------------------------------------------------------------- credit metrics
-# The metrics layer reads GitHub's AI-credit counter before and after each phase
-# to estimate that phase's cost (which model cost what). GitHub's counter LAGS the
-# requests that produced it, so this sets how long to wait after a phase finishes
-# before taking the "after" reading.
-#   > 0 => wait this many seconds, then read. More accurate — the counter has time
-#          to settle. This wait is paid on EVERY phase attempt (loopbacks too), so
-#          30 across nine phases adds ~4.5 min of waiting to a run.
-#   0   => read IMMEDIATELY, no wait. Faster runs, but the per-phase credit figure
-#          is rough (the counter may not have caught up yet).
-# Either way the per-phase MODEL is always recorded; only credit accuracy changes.
-# Org-billed Copilot seats cannot read the counter at all — those phases record
-# the model but no credit figure, regardless of this value.
+# ----------------------------------------------------------------- cost metrics
+# Where per-phase usage and cost come from:
+#   sdk     => the Copilot SDK reports each phase session's own usage (premium-
+#              request cost and nano-AI units). Works on org-billed seats, is not
+#              affected by other runs, and needs no waiting. Recommended.
+#   account => the old before/after read of the account's AI-credit counter.
+#              Account-wide (concurrent runs inflate it) and blank on org-billed
+#              seats. Only for reconciling on a personal seat.
+# SDK units have no documented conversion to AI credits or dollars — reconcile
+# against the org billing report before quoting a figure as money.
+credit_source: sdk
+
+# Seconds to wait after each phase before reading the counter. Used ONLY when
+# credit_source is "account"; ignored under "sdk".
 credit_settle_seconds: 30
 
 
@@ -126,6 +133,11 @@ repo_stacks: ["backend"]
 
 
 # ----------------------------------------------------------------- model routing
+# Use only models the run's MODEL credential can call — the list differs per
+# organisation (at BCBSM gpt-5.5 was not available). Check with the engine's
+# harness/list_models.py run under COPILOT_MODEL_TOKEN || github.token, not the
+# repo PAT. An unavailable model fails the first phase with
+# 'Model "<name>" is not available'.
 # The default model for every phase unless overridden below.
 model: "gpt-5.4"
 
