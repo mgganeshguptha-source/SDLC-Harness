@@ -179,6 +179,11 @@ jobs:
     # changing the service's POMs.
     env:
       JAVA_TOOL_OPTIONS: -XX:+IgnoreUnrecognizedVMOptions
+      # Angular repos without their own karma.conf.js: the engine's Karma config
+      # (Angular CLI defaults + an Istanbul json-summary reporter for the coverage
+      # gate). Used only when the service's test_command passes
+      # --karma-config="$HARNESS_KARMA_CONFIG".
+      HARNESS_KARMA_CONFIG: ${{ github.workspace }}/engine/scripts/karma.harness.conf.js
     steps:
       # --- 0. one name for this run ---
       # <feature>-<actor>-<yyyymmdd>-<HHMMSS><EDT|EST> names the run's audit

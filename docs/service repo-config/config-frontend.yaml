@@ -12,14 +12,20 @@
 # Written for dx_mycoverage-ui (Angular 19, ngx-build-plus module federation,
 # Karma + Jasmine). Fields marked "STACK-SPECIFIC" differ from the backend file.
 #
-# ENGINE LIMITATION — READ BEFORE A FULL RUN (verified 2026-10-25):
-#   The engine's write boundary still uses the Java layout: the coding phase may
-#   write only src/main/** and unit_testing only src/test/** (phases.py), and the
-#   review/unit-test dossiers look for changes under src/main. Angular code lives
-#   in src/app/**, so on this engine the context, design and prompt_steps phases
-#   work, but CODING WILL BE DENIED. Use this file now to run up to the context
-#   phase (clarification questions); a full run needs the engine change that
-#   makes the source and test paths configurable (status note backlog).
+# NEEDS the engine version with frontend support (source/test paths per stack,
+# skip_phases, Istanbul coverage — SDLC-Harness PR "Frontend support"). On an
+# older engine, coding is denied (Java-only write paths).
+#
+# BEFORE THE FIRST RUN — decide which of the two modes below fits the repo:
+#   A. UNIT TESTS ON (default in this file): the AI writes *.spec.ts tests, the
+#      harness runs Karma and gates coverage of the changed files. Precondition:
+#      the repo's EXISTING specs pass today —
+#        npm install && npx ng test --watch=false --browsers=ChromeHeadless
+#      on the base branch must be green, or the run will try to fix specs it
+#      did not break.
+#   B. BUILD ONLY: the AI writes no tests (skip_phases: ["unit_testing"]); the
+#      harness still compiles and runs whatever specs exist; coverage off.
+#      Switch by following the "MODE B" notes below.
 # =============================================================================
 
 
@@ -36,10 +42,18 @@ target_module: ""
 # Frontend: install from the PUBLIC npm registry, then run Karma once in
 # headless Chrome (installed on GitHub's Ubuntu runners). package.json has no
 # BCBSM-private packages and the repo has no .npmrc, so no library store is
-# needed. --replace-registry-host=always rewrites any registry host recorded in
-# package-lock.json (e.g. if the lock file was created against JFrog) to the
-# public registry. "npm ci" requires package-lock.json to be committed.
-test_command: "npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress"
+# needed. The repo has NO package-lock.json, so "npm ci" cannot be used; "npm
+# install" resolves versions within package.json's ranges, so the runner may
+# get newer patch/minor versions than a developer's machine. --no-package-lock
+# stops the install writing a package-lock.json that would otherwise be carried
+# into the WIP branch and the PR.
+# --code-coverage with --karma-config="$HARNESS_KARMA_CONFIG" uses the engine's
+# Karma config (Angular CLI defaults + an Istanbul json-summary reporter), which
+# the coverage gate reads. This repo has no karma.conf.js; if one is added
+# later, drop --karma-config and add { type: 'json-summary' } to that file's
+# coverageReporter instead.
+# MODE B: drop " --code-coverage --karma-config=..." (no coverage needed).
+test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress --code-coverage --karma-config=\"$HARNESS_KARMA_CONFIG\""
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.
@@ -56,9 +70,11 @@ pre_validation_command: ""
 # ----------------------------------------------------------------- coverage gate
 # Minimum line coverage on the CHANGED classes, as a fraction (0.90 = 90%).
 # 0 (or 0.0) => coverage gate disabled entirely.
-# STACK-SPECIFIC: OFF for frontend. The engine's coverage gate reads JaCoCo
-# (Java) reports only; it cannot read Karma/Istanbul coverage yet.
-min_coverage: 0
+# STACK-SPECIFIC: read from the Istanbul coverage-summary.json that Karma writes
+# (coverage_format below). Only TypeScript files count; a change that touches
+# only templates/styles is treated as fully covered.
+# MODE B: set to 0.
+min_coverage: 0.90
 
 # What the coverage figure is measured over:
 #   "changed" => only the classes the coding phase wrote this run
@@ -66,15 +82,26 @@ min_coverage: 0
 #   "global"  => the whole module (legacy behaviour).
 coverage_scope: "changed"
 
-# Which JaCoCo metric the gate reads. One of: LINE, BRANCH, INSTRUCTION, METHOD.
+# Which metric the gate reads. One of: LINE, BRANCH, INSTRUCTION, METHOD
+# (Istanbul: lines, branches, statements, functions).
 coverage_metric: "LINE"
 
-# Where JaCoCo writes its CSV (repo-relative). Resolved module-aware at run time.
-# STACK-SPECIFIC: this path is Maven/JaCoCo. A Gradle or JS toolchain differs.
+# STACK-SPECIFIC: coverage report format.
+#   "auto"     => istanbul for frontend stacks, jacoco for backend
+#   "istanbul" => Istanbul coverage-summary.json (Karma / Jest json-summary)
+#   "jacoco"   => JaCoCo CSV (Java)
+coverage_format: "istanbul"
+
+# Where the json-summary is written (repo-relative). Blank => the newest
+# coverage-summary.json under coverage/ is used. The engine's Karma config writes
+# coverage/harness/coverage-summary.json.
+coverage_json: ""
+
+# JaCoCo only — not used for this repo.
 coverage_csv: "target/site/jacoco/jacoco.csv"
 
-# The command that produces the coverage report. Not used while min_coverage
-# is 0 (frontend). Backend repos use the JaCoCo command in config-backend.yaml.
+# Istanbul coverage is written by the TEST command itself (--code-coverage), so
+# no separate coverage command is needed.
 coverage_command: ""
 
 # On a coverage MISS (tests pass but coverage below the bar), which phase to loop
@@ -138,6 +165,18 @@ credit_settle_seconds: 30
 # CAVEAT: validated against BACKEND repositories only to date. Frontend and
 # mobile stacks are wired but NOT yet tested end to end.
 repo_stacks: ["angular-frontend"]   # STACK-SPECIFIC
+
+# STACK-SPECIFIC (optional): where application code and unit tests live. Blank
+# => preset from repo_stacks — for angular-frontend: code src/app/** (coding may
+# write it, but never *.spec.ts) and tests src/app/**/*.spec.ts (unit_testing
+# may write only these). Set these only for an unusual layout, e.g. an Angular
+# workspace with projects/<lib>/src/**.
+# source_globs: ["src/app/**"]
+# test_globs:   ["src/app/**/*.spec.ts"]
+
+# MODE B: skip the unit_testing phase — the AI writes no tests, but its build
+# gate still runs (compile + existing specs). Only "unit_testing" may be skipped.
+skip_phases: []
 
 
 # ----------------------------------------------------------------- model routing

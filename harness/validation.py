@@ -11,6 +11,7 @@ This is the interlock that makes "you cannot ship red tests" a guarantee rather
 than a hope: the green run is verified by code, as a precondition to proceeding.
 """
 from __future__ import annotations
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,66 @@ def _parse_changed_coverage(csv_path: Path, metric: str,
         return (100.0 * covered / total, covered, missed, measured)
     except Exception:
         return (None, 0, 0, [])
+
+
+_ISTANBUL_METRIC = {"LINE": "lines", "BRANCH": "branches",
+                    "METHOD": "functions", "INSTRUCTION": "statements"}
+
+
+def _find_istanbul_summary(repo_root: Path, configured: str = "") -> Path | None:
+    """Locate an Istanbul json-summary (coverage-summary.json). Configured path
+    first; otherwise the newest coverage-summary.json under coverage/ (any depth),
+    never inside node_modules."""
+    if configured:
+        c = Path(configured)
+        c = c if c.is_absolute() else repo_root / c
+        return c if c.is_file() else None
+    try:
+        found = [f for f in (repo_root / "coverage").rglob("coverage-summary.json")
+                 if "node_modules" not in f.parts]
+    except Exception:
+        found = []
+    return max(found, key=lambda f: f.stat().st_mtime) if found else None
+
+
+def _parse_istanbul(summary_path: Path, metric: str, changed_files: list,
+                    scope: str) -> tuple:
+    """Coverage from an Istanbul json-summary: (pct | None, covered, missed, measured).
+
+    Keys are file paths as instrumented (usually absolute); a changed file matches
+    a key that ends with its repo-relative path. Only TypeScript production files
+    count — templates and styles carry no line coverage. A change with no
+    TypeScript file at all is reported as 100% (nothing to cover)."""
+    import json as _json
+    key = _ISTANBUL_METRIC.get(str(metric).upper(), "lines")
+    try:
+        data = _json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return (None, 0, 0, [])
+    if scope != "changed":
+        t = (data.get("total") or {}).get(key) or {}
+        tot, cov = int(t.get("total") or 0), int(t.get("covered") or 0)
+        return ((100.0 * cov / tot) if tot else None, cov, tot - cov, ["(global)"])
+    wanted = [str(f).replace("\\", "/") for f in (changed_files or [])
+              if str(f).endswith(".ts") and not str(f).endswith(".spec.ts")]
+    if not wanted:
+        return (100.0, 0, 0, ["(no TypeScript in the change)"])
+    covered = total = 0
+    measured = []
+    for fk, entry in data.items():
+        if fk == "total":
+            continue
+        k = fk.replace("\\", "/")
+        if any(k.endswith("/" + w) or k == w for w in wanted):
+            m = (entry or {}).get(key) or {}
+            total += int(m.get("total") or 0)
+            covered += int(m.get("covered") or 0)
+            measured.append(k.rsplit("/src/", 1)[-1] if "/src/" in k else k)
+    if not measured:
+        return (None, 0, 0, [])
+    if total == 0:
+        return (100.0, covered, 0, measured)
+    return (100.0 * covered / total, covered, total - covered, measured)
 
 
 def _parse_coverage(csv_path: Path, metric: str) -> float | None:
@@ -241,6 +302,26 @@ _TOOLCHAIN_SIGNATURES = (
 # never the code, so these are trusted even after the lifecycle started.
 # Observed at BCBSM: "Unrecognized VM option 'MaxPermSize=256m'" was treated
 # as a code failure and looped coding/unit_testing three times.
+# npm could not install packages (backlog B4): registry unreachable, a package or
+# version that does not exist there, or an unresolvable peer-dependency tree.
+# The code phases cannot fix any of these.
+_NPM_SIGNATURES = (
+    "npm err! code e404", "npm error code e404",
+    "npm err! code eresolve", "npm error code eresolve",
+    "npm err! code etarget", "npm error code etarget",
+    "npm err! code enotfound", "npm error code enotfound",
+    "npm err! code e401", "npm error code e401",
+    "npm err! code e403", "npm error code e403",
+)
+# The test browser could not start (Karma) — no Chrome on the runner, or Chrome
+# refused to launch. Environment, like a JVM that cannot start.
+_BROWSER_START_SIGNATURES = (
+    "no binary for chromeheadless",
+    "no binary for chrome browser",
+    "cannot start chromeheadless",
+    "cannot start chrome",
+    "chromeheadless have not captured",
+)
 _FORK_START_SIGNATURES = (
     "error occurred in starting fork",
     "unrecognized vm option",
@@ -276,14 +357,17 @@ _HINTS = {
         "           network access, proxy/certificate setup, and repository\n"
         "           credentials, then resume."),
     "coverage_report": (
-        "The build and tests passed, but the coverage command produced no\n"
-        "           JaCoCo report, so coverage cannot be measured. New tests cannot\n"
+        "The build and tests passed, but no coverage report (JaCoCo CSV or\n"
+        "           Istanbul coverage-summary.json) was produced, so coverage cannot be\n"
+        "           measured. New tests cannot\n"
         "           fix this. Read the coverage command output above. Common cause in\n"
         "           a multi-module repo: a bare 'jacoco:report' runs no lifecycle\n"
         "           phase, so sibling modules cannot be resolved and the goal fails.\n"
         "           Set coverage_command in the service's .harness/config.yaml to\n"
         "           include a phase (e.g. 'mvn -s $MAVEN_SETTINGS test-compile\n"
-        "           jacoco:report'), then resume from unit_testing."),
+        "           jacoco:report'), then resume from unit_testing. Angular: run the\n"
+        "           tests with --code-coverage and a json-summary reporter, or set\n"
+        "           min_coverage: 0."),
     "unattributable": (
         "The build failed the same way again after a phase changed the code, and\n"
         "           the failure names no source file, no test and no compile error —\n"
@@ -313,6 +397,13 @@ def maven_error_summary(output: str, max_lines: int = 40) -> str:
     keep = []
     for line in output.splitlines():
         stripped = line.strip()
+        # Angular / Karma (backlog B4): TypeScript compile errors and failed specs
+        # carry no [ERROR] prefix and are often far above the output tail.
+        if (" - error TS" in stripped or ") FAILED" in stripped
+                or stripped.endswith(" FAILED")):
+            if line not in keep:
+                keep.append(line)
+            continue
         if not stripped.startswith("[ERROR]"):
             continue
         body = stripped[len("[ERROR]"):].strip()
@@ -339,7 +430,10 @@ def _lifecycle_started(low: str) -> bool:
     return ("tests run:" in low
             or "compilation error" in low
             or "compilation failure" in low
-            or "t e s t s" in low)
+            or "t e s t s" in low
+            # Karma / Angular (backlog B4)
+            or "executed " in low and " of " in low and ("success" in low or "failed" in low)
+            or " - error ts" in low)
 
 
 def classify_environment_failure(exit_code: int, output: str) -> str | None:
@@ -357,6 +451,10 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
     if any(s in low for s in _DEPENDENCY_SIGNATURES):
         return "dependency"
     if any(s in low for s in _FORK_START_SIGNATURES):
+        return "toolchain"
+    if any(s in low for s in _NPM_SIGNATURES):
+        return "dependency"
+    if any(s in low for s in _BROWSER_START_SIGNATURES):
         return "toolchain"
     if any(s in low for s in _NETWORK_AUTH_SIGNATURES) and not _lifecycle_started(low):
         return "network_auth"
@@ -378,7 +476,10 @@ def is_code_attributable(output: str) -> bool:
     return (_lifecycle_started(low)
             or "/src/main/" in low or "\\src\\main\\" in low
             or "/src/test/" in low or "\\src\\test\\" in low
-            or ".java:[" in low)
+            or ".java:[" in low
+            # Angular / TypeScript (backlog B4)
+            or "src/app/" in low or "src\\app\\" in low
+            or " - error ts" in low)
 
 
 def _is_environment_failure(exit_code: int, output: str) -> bool:
@@ -453,6 +554,9 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         return ValidationResult(False, -2, f"ERROR: {type(e).__name__}: {e}", "")
 
     out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    # Strip terminal colour codes (Angular CLI / Karma colour their output even
+    # when piped); they break error parsing and clutter the log.
+    out = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out)
     tail = "\n".join(out.splitlines()[-25:])  # last lines hold the BUILD result
     # Put Maven's actual error lines first: the tail can be all stack trace.
     if proc.returncode != 0:
@@ -522,7 +626,70 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     cov_pct = None
     cov_covered = cov_missed = 0
     cov_measured: list = []
-    if passed and cfg.min_coverage > 0:
+    if passed and cfg.min_coverage > 0 and cfg.resolved_coverage_format() == "istanbul":
+        # ---- ISTANBUL (Karma / Jest json-summary) — frontend, backlog B5 ----
+        # The report is normally written by the TEST command itself (e.g.
+        # ng test --code-coverage with a json-summary reporter); a separate
+        # coverage_command runs only if one is configured.
+        cov_out, cov_rc = "", None
+        if (cfg.coverage_command or "").strip():
+            log(f"  [harness] coverage: {cfg.coverage_command}")
+            try:
+                _cov = subprocess.run(cfg.coverage_command, cwd=str(repo_root), shell=True,
+                                      capture_output=True, text=True, timeout=cfg.test_timeout)
+                cov_rc = _cov.returncode
+                cov_out = (_cov.stdout or "") + "\n" + (_cov.stderr or "")
+            except Exception as e:
+                log(f"  [harness] coverage command error: {e}")
+        summary_path = _find_istanbul_summary(repo_root, cfg.coverage_json)
+        if summary_path is None:
+            detail = (
+                "No Istanbul coverage-summary.json was found "
+                f"({cfg.coverage_json or 'searched coverage/**'}). The test command must "
+                "write one: run the tests with coverage on and a 'json-summary' reporter "
+                "(for Angular/Karma: ng test --code-coverage --karma-config="
+                "$HARNESS_KARMA_CONFIG uses the engine's karma.harness.conf.js), or set "
+                "min_coverage: 0 to turn the gate off."
+                + (f"\ncoverage command: {cfg.coverage_command} (exit {cov_rc})\n"
+                   + "\n".join(cov_out.strip().splitlines()[-20:]) if cov_out else ""))
+            log("  ! COVERAGE REPORT MISSING: " + detail)
+            return ValidationResult(
+                False, proc.returncode, "COVERAGE REPORT MISSING",
+                tail + "\n\n" + detail,
+                failure_kind="environment",
+                env_reason="coverage_report",
+                env_hint=environment_hint("coverage_report"),
+            )
+        try:
+            log(f"  [harness] coverage report: {summary_path.relative_to(repo_root)}")
+        except Exception:
+            log(f"  [harness] coverage report: {summary_path}")
+        log(f"  [harness] coverage scope: changed files = "
+            f"{changed_files if changed_files else '(none recorded)'}")
+        cov_pct, cov_covered, cov_missed, cov_measured = _parse_istanbul(
+            summary_path, cfg.coverage_metric, changed_files or [], cfg.coverage_scope)
+        scope_lbl = "changed-file" if cfg.coverage_scope == "changed" else "global"
+        if cov_pct is None:
+            passed = False
+            failure_kind = "coverage"
+            summary = "COVERAGE UNREADABLE"
+            coverage_note = (f"Could not measure {cfg.coverage_metric} coverage for the "
+                             f"changed file(s) {changed_files or '[]'} in {summary_path.name}.")
+            log("  ! " + coverage_note)
+        elif cov_pct < cfg.min_coverage:
+            passed = False
+            failure_kind = "coverage"
+            summary = f"COVERAGE {cov_pct:.1f}% < {cfg.min_coverage:.1f}% ({scope_lbl})"
+            coverage_note = (
+                f"{scope_lbl} {cfg.coverage_metric} coverage {cov_pct:.1f}% is below the "
+                f"required {cfg.min_coverage:.1f}% (covered={cov_covered}, missed={cov_missed}; "
+                f"measured: {', '.join(cov_measured) if cov_measured else 'n/a'})")
+            log("  ! " + coverage_note)
+        else:
+            coverage_note = (f"{scope_lbl} {cfg.coverage_metric} coverage {cov_pct:.1f}% "
+                             f"(>= {cfg.min_coverage:.1f}%)")
+            log(f"  [harness] {coverage_note}")
+    elif passed and cfg.min_coverage > 0:
         log(f"  [harness] coverage: {cfg.coverage_command}")
         cov_out = ""
         cov_rc = None

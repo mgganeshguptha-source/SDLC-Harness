@@ -12,6 +12,29 @@ import os
 import re
 
 
+# Source/test layout per stack (backlog B4). Keys match repo_stacks values.
+STACK_PATHS = {
+    "backend":          (["src/main/**"], ["src/test/**"]),
+    "kotlin":           (["src/main/**"], ["src/test/**"]),
+    "angular-frontend": (["src/app/**"], ["src/app/**/*.spec.ts"]),
+    "frontend":         (["src/app/**"], ["src/app/**/*.spec.ts"]),
+    "mobile-frontend":  (["src/app/**"], ["src/app/**/*.spec.ts"]),
+    "ionic":            (["src/app/**"], ["src/app/**/*.spec.ts"]),
+}
+# Code files recorded as "changed production source" (coverage scope, dossiers).
+STACK_EXTENSIONS = {
+    "backend":          (".java", ".kt"),
+    "kotlin":           (".kt", ".java"),
+    "angular-frontend": (".ts", ".html", ".scss", ".css"),
+    "frontend":         (".ts", ".html", ".scss", ".css"),
+    "mobile-frontend":  (".ts", ".html", ".scss", ".css"),
+    "ionic":            (".ts", ".html", ".scss", ".css"),
+}
+FRONTEND_STACKS = {"angular-frontend", "frontend", "mobile-frontend", "ionic"}
+# Phases a repo may skip by config (backlog B5).
+SKIPPABLE_PHASES = ("unit_testing",)
+
+
 def harness_runs_build() -> bool:
     """True when the harness builds the code and runs the unit tests itself.
 
@@ -381,6 +404,32 @@ class HarnessConfig:
         "**/*MapperImpl.java",   # MapStruct-generated mapper impls
     ])
 
+    # --- source and test paths (frontend support, backlog B4) ---
+    # Where production code and unit tests live, as repo-relative globs. Empty =>
+    # preset from repo_stacks (STACK_PATHS below): backend src/main/** and
+    # src/test/**; Angular / Ionic src/app/** with specs as src/app/**/*.spec.ts.
+    # The coding phase may write source_globs MINUS test_globs; unit_testing may
+    # write test_globs only. The same globs drive the dossiers, the prompts, the
+    # scope gate and changed-file detection. Module-prefixed like allowed_writes
+    # in a multi-module Maven repo.
+    source_globs: list = field(default_factory=list)
+    test_globs: list = field(default_factory=list)
+
+    # --- phases skipped by config (backlog B5) ---
+    # Only "unit_testing" may be skipped. Its build gate still runs (compile +
+    # the repo's existing tests + coverage), but the AI writes no tests — for
+    # repos without a maintained unit-test suite. Empty => no phase skipped.
+    skip_phases: list = field(default_factory=list)
+
+    # --- coverage report format (backlog B5) ---
+    #   "auto"     => jacoco for backend stacks, istanbul for frontend stacks
+    #   "jacoco"   => JaCoCo CSV at coverage_csv (Java)
+    #   "istanbul" => Istanbul coverage-summary.json (Karma/Jest json-summary)
+    coverage_format: str = "auto"
+    # Istanbul json-summary location (repo-relative). Blank => searched for under
+    # coverage/ (any depth), outside node_modules.
+    coverage_json: str = ""
+
     # --- audit branch retention (compliance policy — the SERVICE repo owns this) ---
     # The immutable per-run audit branch (harness-audit/<feature>/<stamp>-<outcome>-<run_id>)
     # is written on every run, success OR halt. Whether it is RETAINED afterwards is
@@ -489,6 +538,14 @@ class HarnessConfig:
             context_output_dir=data.get("context_output_dir", cls.context_output_dir),
             selective_capability=bool(data.get("selective_capability", cls.selective_capability)),
             repo_stacks=data.get("repo_stacks") if data.get("repo_stacks") is not None else cls().repo_stacks,
+            source_globs=list(data.get("source_globs") or []),
+            test_globs=list(data.get("test_globs") or []),
+            skip_phases=[str(x).strip() for x in (data.get("skip_phases") or [])
+                         if str(x).strip() in SKIPPABLE_PHASES],
+            coverage_format=(str(data.get("coverage_format", "auto")).strip().lower()
+                             if str(data.get("coverage_format", "auto")).strip().lower()
+                             in ("auto", "jacoco", "istanbul") else "auto"),
+            coverage_json=str(data.get("coverage_json") or "").strip(),
             phase_file_scope=data.get("phase_file_scope") or cls().phase_file_scope,
             phase_skills=data.get("phase_skills") or cls().phase_skills,
             skill_stacks=data.get("skill_stacks") or cls().skill_stacks,
@@ -548,6 +605,84 @@ class HarnessConfig:
                 cfg.write_exclude.append(glob)
 
         return cfg
+
+    # ---------------------------------------------------------------- B4: paths
+    def _preset_paths(self) -> tuple:
+        """(source_globs, test_globs) for this repo's stacks, before module prefix."""
+        stacks = [str(s).strip().lower() for s in (self.repo_stacks or [])] or ["backend"]
+        if "*" in stacks:
+            stacks = list(STACK_PATHS)
+        src, tst = [], []
+        for st in stacks:
+            ps, pt = STACK_PATHS.get(st, STACK_PATHS["backend"])
+            src += [g for g in ps if g not in src]
+            tst += [g for g in pt if g not in tst]
+        return src, tst
+
+    def source_paths(self) -> tuple:
+        """Production-code globs, module-prefixed (multi-module Maven)."""
+        src = self.source_globs or self._preset_paths()[0]
+        return self.module_writes(src)
+
+    def test_paths(self) -> tuple:
+        """Unit-test globs, module-prefixed (multi-module Maven)."""
+        tst = self.test_globs or self._preset_paths()[1]
+        return self.module_writes(tst)
+
+    def is_test_file(self, rel: str) -> bool:
+        from boundaries import _matches
+        return any(_matches(rel, g) for g in self.test_paths())
+
+    def is_source_file(self, rel: str) -> bool:
+        """Production code: under a source glob and NOT a test file."""
+        from boundaries import _matches
+        return (any(_matches(rel, g) for g in self.source_paths())
+                and not self.is_test_file(rel))
+
+    def code_extensions(self) -> tuple:
+        stacks = [str(s).strip().lower() for s in (self.repo_stacks or [])] or ["backend"]
+        if "*" in stacks:
+            stacks = list(STACK_EXTENSIONS)
+        out = []
+        for st in stacks:
+            for e in STACK_EXTENSIONS.get(st, STACK_EXTENSIONS["backend"]):
+                if e not in out:
+                    out.append(e)
+        return tuple(out)
+
+    def phase_writes(self, phase) -> tuple:
+        """A phase's allowed_writes with the Java placeholders replaced by this
+        repo's source/test globs, then module-prefixed.
+
+        phases.py keeps "src/main/**" (coding) and "src/test/**" (unit_testing) as
+        the canonical tokens, so a backend repo resolves to exactly what it had
+        before. A frontend repo gets src/app/** and src/app/**/*.spec.ts."""
+        out = []
+        for g in phase.allowed_writes:
+            if g == "src/main/**":
+                out += list(self.source_globs or self._preset_paths()[0])
+            elif g == "src/test/**":
+                out += list(self.test_globs or self._preset_paths()[1])
+            else:
+                out.append(g)
+        return self.module_writes(tuple(dict.fromkeys(out)))
+
+    def phase_exclude(self, phase) -> list:
+        """Always-deny globs for a phase: write_exclude, plus the test globs for a
+        phase that writes production code (in Angular, specs sit inside src/app,
+        so src/app/** alone would let coding write tests)."""
+        out = list(self.write_exclude or [])
+        if "src/main/**" in phase.allowed_writes and "src/test/**" not in phase.allowed_writes:
+            for g in self.test_paths():
+                if g not in out:
+                    out.append(g)
+        return out
+
+    def resolved_coverage_format(self) -> str:
+        if self.coverage_format in ("jacoco", "istanbul"):
+            return self.coverage_format
+        stacks = {str(s).strip().lower() for s in (self.repo_stacks or [])}
+        return "istanbul" if stacks & FRONTEND_STACKS and "backend" not in stacks else "jacoco"
 
     def module_writes(self, allowed_globs) -> tuple:
         """Rewrite a phase's allowed_writes for a multi-module repo (Option A).

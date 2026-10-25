@@ -34,6 +34,16 @@ write_exclude:                          # deny-wins; the -openapi-code module is
   - "**/*MapperImpl.java"
 
 repo_stacks: ["backend"]                # filters instruction files AND skills
+# Source / test paths. Blank => preset from repo_stacks:
+#   backend           code src/main/**   tests src/test/**
+#   angular-frontend  code src/app/**    tests src/app/**/*.spec.ts  (coding never writes specs)
+# source_globs: []
+# test_globs: []
+# Skip the AI unit_testing phase (its build gate still runs). Only unit_testing.
+# skip_phases: []
+# Coverage report: auto (jacoco for backend, istanbul for frontend) | jacoco | istanbul
+# coverage_format: auto
+# coverage_json: ""                       # Istanbul coverage-summary.json; blank = search coverage/
 
 # ---------------------------------------------------------------- model routing
 model: "gpt-5-mini"                     # default for every phase

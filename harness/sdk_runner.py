@@ -611,6 +611,49 @@ def _src_test(repo_root: Path) -> str:
     return f"{_module_prefix(repo_root)}src/test"
 
 
+def _layout(repo_root: Path):
+    """The repo's config (source/test globs), or None if it cannot load."""
+    try:
+        from config import HarnessConfig
+        return HarnessConfig.load(repo_root / ".harness", repo_root=repo_root)
+    except Exception:
+        return None
+
+
+def _source_pathspecs(repo_root: Path) -> list:
+    """git pathspecs for production source (config source globs). Backend:
+    ['<module>/src/main'] as before; Angular: [':(glob)src/app/**']."""
+    cfg = _layout(repo_root)
+    if cfg is None:
+        return [_src_main(repo_root)]
+    out = []
+    for g in cfg.source_paths():
+        if g.endswith("/**") and "*" not in g[:-3]:
+            out.append(g[:-3])                 # plain directory: same as before
+        else:
+            out.append(f":(glob){g}")
+    return out or [_src_main(repo_root)]
+
+
+def _only_source(repo_root: Path, paths: list) -> list:
+    """Keep production files only (drops tests that sit inside the source tree,
+    e.g. Angular *.spec.ts under src/app)."""
+    cfg = _layout(repo_root)
+    if cfg is None:
+        return paths
+    return [p for p in paths if cfg.is_source_file(p)]
+
+
+def _test_files(repo_root: Path) -> list:
+    """Repo-relative test files (tracked + untracked) matching the test globs."""
+    cfg = _layout(repo_root)
+    if cfg is None:
+        return []
+    listed = _run_git(repo_root, "ls-files", "--cached", "--others",
+                      "--exclude-standard").splitlines()
+    return sorted({p.strip() for p in listed if p.strip() and cfg.is_test_file(p.strip())})
+
+
 def _committed_changes(repo_root: Path, changed_hint: list | None, log=print) -> list:
     """Production files this run changed that are ALREADY COMMITTED.
 
@@ -636,14 +679,14 @@ def _build_review_dossier(repo_root: Path, log=print,
                           changed_hint: list | None = None) -> str | None:
     """Assemble the inline review material. Returns None if nothing changed
     (or git failed) — caller falls back to legacy pull-mode review."""
-    src_main = _src_main(repo_root)  # <module>/src/main in multi-module, else src/main
-    diff = _run_git(repo_root, "diff", "HEAD", "--", src_main)
-    tracked = [ln.strip() for ln in _run_git(
-        repo_root, "diff", "HEAD", "--name-only", "--", src_main
-    ).splitlines() if ln.strip()]
-    untracked = [ln.strip() for ln in _run_git(
-        repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
-    ).splitlines() if ln.strip()]
+    specs = _source_pathspecs(repo_root)  # <module>/src/main, or src/app/** etc.
+    tracked = _only_source(repo_root, [ln.strip() for ln in _run_git(
+        repo_root, "diff", "HEAD", "--name-only", "--", *specs
+    ).splitlines() if ln.strip()])
+    untracked = _only_source(repo_root, [ln.strip() for ln in _run_git(
+        repo_root, "ls-files", "--others", "--exclude-standard", "--", *specs
+    ).splitlines() if ln.strip()])
+    diff = _run_git(repo_root, "diff", "HEAD", "--", *tracked) if tracked else ""
     changed = list(dict.fromkeys(tracked + untracked))  # de-dupe, keep order
     if not changed:
         changed = _committed_changes(repo_root, changed_hint, log)
@@ -703,13 +746,13 @@ def _build_unittest_dossier(repo_root: Path, log=print,
     With all of that inline there is no legitimate reason to read, and the
     caller denies reads for this phase (see on_permission_request).
     """
-    src_main = _src_main(repo_root)  # <module>/src/main in multi-module, else src/main
-    tracked = [ln.strip() for ln in _run_git(
-        repo_root, "diff", "HEAD", "--name-only", "--", src_main
-    ).splitlines() if ln.strip()]
-    untracked = [ln.strip() for ln in _run_git(
-        repo_root, "ls-files", "--others", "--exclude-standard", "--", src_main
-    ).splitlines() if ln.strip()]
+    specs = _source_pathspecs(repo_root)  # <module>/src/main, or src/app/** etc.
+    tracked = _only_source(repo_root, [ln.strip() for ln in _run_git(
+        repo_root, "diff", "HEAD", "--name-only", "--", *specs
+    ).splitlines() if ln.strip()])
+    untracked = _only_source(repo_root, [ln.strip() for ln in _run_git(
+        repo_root, "ls-files", "--others", "--exclude-standard", "--", *specs
+    ).splitlines() if ln.strip()])
     changed = list(dict.fromkeys(tracked + untracked))
     if not changed:
         changed = _committed_changes(repo_root, changed_hint, log)
@@ -742,6 +785,30 @@ def _build_unittest_dossier(repo_root: Path, log=print,
     # Anchor on the module's own src/test (multi-module) or repo-root src/test.
     test_root = ((repo_root / _module_prefix(repo_root).rstrip("/") / "src" / "test")
                  if _module_prefix(repo_root) else (repo_root / "src" / "test"))
+    _java_layout = test_root.is_dir()
+    if not _java_layout:
+        # Non-Java layout (Angular / Ionic): tests are *.spec.ts files next to the
+        # code they test. Push the specs in the changed files' folders (the
+        # conventions to follow) and a listing of every spec in the repo.
+        all_specs = _test_files(repo_root)
+        dirs = {str(Path(r).parent).replace("\\", "/") for r in changed}
+        near = [t for t in all_specs if str(Path(t).parent).replace("\\", "/") in dirs]
+        for rel_f in near[:6]:
+            try:
+                text = (repo_root / rel_f).read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if len(text) > _DOSSIER_FILE_CAP:
+                text = text[:_DOSSIER_FILE_CAP] + "\n... [TRUNCATED by harness — file cap reached]"
+            parts.append(
+                f"--- EXISTING TEST IN THE SAME FOLDER (follow these conventions): {rel_f} ---\n{text}"
+            )
+        if all_specs:
+            shown = all_specs[:200]
+            listing = "\n".join(shown)
+            if len(all_specs) > len(shown):
+                listing += f"\n... (+{len(all_specs) - len(shown)} more)"
+            parts.append("--- EXISTING TEST FILES (full listing) ---\n" + listing)
     if test_root.is_dir():
         # packages touched by the change, e.g. .../petclinic/owner. Derive the
         # package path by finding 'src/main/java' positionally rather than
@@ -826,8 +893,18 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     _mod = _module_prefix(repo_root)  # '<module>/' or ''
     ctx_dir = f"{rr}/.github/story-context-files"
     plan_file = f"{rr}/.harness/prompt-steps.md"
-    src_main = f"{rr}/{_mod}src/main"
-    src_test = f"{rr}/{_mod}src/test"
+    src_main = f"{rr}/{_mod}src/main/"
+    src_test = f"{rr}/{_mod}src/test/"
+    # Frontend layouts (backlog B4): name the real source/test scopes in the
+    # prompts. Backend repos keep the exact wording above.
+    _cfgp = _layout(repo_root)
+    if _cfgp is not None and list(_cfgp.source_paths()) != [f"{_mod}src/main/**"]:
+        src_main = (", ".join(f"{rr}/" + (g[:-2] if g.endswith("/**") else g)
+                              for g in _cfgp.source_paths())
+                    + " (application code; files matching "
+                    + ", ".join(_cfgp.test_paths()) + " are tests, not application code)")
+        src_test = (", ".join(f"{rr}/{g}" for g in _cfgp.test_paths())
+                    + " (test files, next to the code they test)")
     docs_dir = f"{rr}/docs"
     pr_body = f"{rr}/.harness/pr-body.md"
     design_file = f"{rr}/.harness/design.md"
@@ -929,14 +1006,14 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"You are an INDEPENDENT code reviewer. You did NOT write this code. "
             f"Review ONLY the production source implementation of the change for:\n  STORY: {story}\n"
             f"Read (read-only) the plan at {plan_file} and the application source under "
-            f"{src_main}/. Do NOT open or read files under {src_test}/.\n"
+            f"{src_main}. Do NOT open or read files under {src_test}.\n"
             f"{_review_rules}"
         )
 
     if unittest_dossier is not None:
         unit_testing_task = (
-            f"Write unit tests under {src_test}/ that verify:\n  STORY: {story}\n"
-            f"Do NOT modify application code under {src_main}/. Tests only.\n"
+            f"Write unit tests under {src_test} that verify:\n  STORY: {story}\n"
+            f"Do NOT modify application code under {src_main}. Tests only.\n"
             f"EVERYTHING you need is provided INLINE below: the production code under "
             f"test, the implementation plan, existing tests in the same package (follow "
             f"their conventions, imports, and fixtures), and a listing of the whole test "
@@ -949,8 +1026,8 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         )
     else:
         unit_testing_task = (
-            f"Write unit tests under {src_test}/ that verify:\n  STORY: {story}\n"
-            f"Do NOT modify application code under {src_main}/. Tests only."
+            f"Write unit tests under {src_test} that verify:\n  STORY: {story}\n"
+            f"Do NOT modify application code under {src_main}. Tests only."
         )
 
     # coding prompt: state the APPROVED file list explicitly. The scope gate will
@@ -1188,10 +1265,10 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         ),
         "coding": (
             f"Implement the change described in {plan_file} for:\n  STORY: {story}\n"
-            f"Edit ONLY application source under {src_main}/. Do NOT create or edit any test files.\n"
+            f"Edit ONLY application source under {src_main}. Do NOT create or edit any test files.\n"
             f"IF THIS CHANGE NEEDS SOMETHING YOU ARE NOT ALLOWED TO WRITE — a new "
-            f"dependency in pom.xml, a build or plugin configuration change, "
-            f"anything outside {src_main}/ — STOP and DECLARE it instead of "
+            f"dependency in pom.xml or package.json, a build or plugin configuration change, "
+            f"anything outside {src_main} — STOP and DECLARE it instead of "
             f"working around it. Write {rr}/.harness/blocked.md containing "
             f"exactly:\n"
             f"  **BLOCKED: MANUAL_CHANGE_REQUIRED**\n"
@@ -1333,8 +1410,8 @@ class SdkAgentRunner:
         try:
             from config import HarnessConfig as _HCb
             _cfgb = _HCb.load(repo_root / ".harness", repo_root=repo_root)
-            eff_allowed = _cfgb.module_writes(phase.allowed_writes)
-            eff_exclude = _cfgb.write_exclude
+            eff_allowed = _cfgb.phase_writes(phase)
+            eff_exclude = _cfgb.phase_exclude(phase)
             self.log(f"  [module] target_module={_cfgb.target_module!r} "
                      f"allowed_writes={list(eff_allowed)} "
                      f"exclude={list(eff_exclude or [])}")
