@@ -36,10 +36,12 @@ target_module: ""
 # Frontend: install from the PUBLIC npm registry, then run Karma once in
 # headless Chrome (installed on GitHub's Ubuntu runners). package.json has no
 # BCBSM-private packages and the repo has no .npmrc, so no library store is
-# needed. --replace-registry-host=always rewrites any registry host recorded in
-# package-lock.json (e.g. if the lock file was created against JFrog) to the
-# public registry. "npm ci" requires package-lock.json to be committed.
-test_command: "npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress"
+# needed. The repo has NO package-lock.json, so "npm ci" cannot be used; "npm
+# install" resolves versions within package.json's ranges, so the runner may
+# get newer patch/minor versions than a developer's machine. --no-package-lock
+# stops the install writing a package-lock.json that would otherwise be carried
+# into the WIP branch and the PR.
+test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress"
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.
