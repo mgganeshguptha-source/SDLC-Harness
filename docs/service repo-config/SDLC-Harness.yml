@@ -1,3 +1,6 @@
+# BCBSM caller workflow — the same file for backend (Maven) and frontend
+# (Angular) service repos. Copy to .github/workflows/SDLC-Harness.yml on the
+# service repo's default branch (master).
 name: SDLC-Harness
 
 on:
@@ -56,7 +59,8 @@ jobs:
   harness:
     # Engine pinned to tag v1. v1 must point at an engine commit that has the
     # clarification-learning changes (toolkit_proposals input) — retag v1 on
-    # main after merging them, or the run fails on the unknown input.
+    # the engine's default branch (master at BCBSM) after merging them, or the
+    # run fails on the unknown input.
     #
     # `uses:` decides where the WORKFLOW STEPS come from; engine_repo below
     # decides where the ENGINE CODE comes from. Both must name the same repo.
@@ -65,11 +69,11 @@ jobs:
     # "Uses: <owner>/<repo>/.github/workflows/harness.yml@refs/tags/v1" must
     # show the client repo. (At BCBSM this still pointed at the personal repo,
     # so engine workflow fixes made in the client copy were silently ignored.)
-    uses: mgganeshguptha-source/SDLC-Harness/.github/workflows/harness.yml@v1
+    uses: BCBSM/dx_SDLC-Harness/.github/workflows/harness.yml@v1
     with:
       feature_id: ${{ inputs.feature_id }}
       base: ${{ inputs.base }}
-      java-version: "17"
+      java-version: "17"     # used by backend (Maven) repos; harmless for frontend
       python-version: "3.13"
       node-version: "22"   # Node 20 is deprecated on GitHub runners
       resume: ${{ inputs.resume }}
@@ -77,11 +81,11 @@ jobs:
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the
       # repo and @ref in `uses:` above — they are the engine code the job checks
       # out and runs.
-      engine_repo: mgganeshguptha-source/SDLC-Harness
+      engine_repo: BCBSM/dx_SDLC-Harness
       engine_ref: v1
-      toolkit_repo: mgganeshguptha-source/copilot-toolkit
-      # Toolkit's default branch. BCBSM toolkit repos use 'master'.
-      toolkit_ref: main
+      toolkit_repo: BCBSM/dx_copilot-standards-workspace
+      # Toolkit's default branch. All BCBSM repos use 'master' (no 'main').
+      toolkit_ref: master
       # Harness builds the code, runs unit tests + the coverage gate after
       # unit_testing (loops back on red / low coverage). false = skip; the
       # developer builds and tests locally before approving the PR.
@@ -96,9 +100,11 @@ jobs:
       # Fill the store before the first run: list internal libraries with
       #   grep -rn -A2 "<groupId>com.<client>" --include=pom.xml .
       # then repeat on each downloaded POM for its <parent> and dependencies.
-      maven_libs_repo: mgganeshguptha-source/maven-libs
+      # Frontend (npm) repos: the store is not used for npm packages; leaving it
+      # set is harmless (it only prepares Maven), or set it to "" for those repos.
+      maven_libs_repo: BCBSM/dx_Artifactory
       # Branch of the store. Engine default is main; BCBSM's store uses master.
-      maven_libs_ref: main
+      maven_libs_ref: master
       # Toolkit proposals: when a story's answers show a toolkit skill or
       # instruction should change, raise it as a PR on toolkit_repo for the
       # toolkit owner to review (never merged automatically). Uses

@@ -1,0 +1,305 @@
+# =============================================================================
+# SDLC-Harness — per-repo configuration (.harness/config.yaml)
+# =============================================================================
+# This file lives in the SERVICE repository, at .harness/config.yaml. It is the
+# only per-repo configuration the harness reads. Anything not set here falls back
+# to the engine default (see the engine's config.py). Every value below is
+# annotated with: what it controls, the effect of the value, and the other
+# values it accepts.
+#
+# FRONTEND version (Angular web app, npm + Karma). Copy to the service repo as
+# .harness/config.yaml. The backend version is config-backend.yaml.
+# Written for dx_mycoverage-ui (Angular 19, ngx-build-plus module federation,
+# Karma + Jasmine). Fields marked "STACK-SPECIFIC" differ from the backend file.
+#
+# ENGINE LIMITATION — READ BEFORE A FULL RUN (verified 2026-10-25):
+#   The engine's write boundary still uses the Java layout: the coding phase may
+#   write only src/main/** and unit_testing only src/test/** (phases.py), and the
+#   review/unit-test dossiers look for changes under src/main. Angular code lives
+#   in src/app/**, so on this engine the context, design and prompt_steps phases
+#   work, but CODING WILL BE DENIED. Use this file now to run up to the context
+#   phase (clarification questions); a full run needs the engine change that
+#   makes the source and test paths configurable (status note backlog).
+# =============================================================================
+
+
+# ----------------------------------------------------------------- build module
+# STACK-SPECIFIC. Angular repos have a single project at the repo root (no
+# Maven modules), so leave this blank.
+target_module: ""
+
+
+# ----------------------------------------------------------------- build / tests
+# The command the harness runs to execute unit tests. The HARNESS runs this, not
+# the agent. A non-zero exit fails the validation gate and halts/loops the run.
+# STACK-SPECIFIC: Maven "./mvnw test", Gradle "./gradlew test", npm "npm test".
+# Frontend: install from the PUBLIC npm registry, then run Karma once in
+# headless Chrome (installed on GitHub's Ubuntu runners). package.json has no
+# BCBSM-private packages and the repo has no .npmrc, so no library store is
+# needed. --replace-registry-host=always rewrites any registry host recorded in
+# package-lock.json (e.g. if the lock file was created against JFrog) to the
+# public registry. "npm ci" requires package-lock.json to be committed.
+test_command: "npm ci --registry=https://registry.npmjs.org/ --replace-registry-host=always --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress"
+
+# Narrow the test run to a subset. Blank => run the whole suite.
+# Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.
+test_filter: ""
+
+# A deterministic, known formatting/normalisation goal the harness runs BEFORE
+# validation (e.g. spring-javaformat:apply). Blank => skip. Not arbitrary
+# execution — set this only to a fixed, reviewed goal. The repo has Prettier
+# (devDependency); a fixed goal such as "npx prettier --write src/app" could go
+# here once the team confirms it is their standard.
+pre_validation_command: ""
+
+
+# ----------------------------------------------------------------- coverage gate
+# Minimum line coverage on the CHANGED classes, as a fraction (0.90 = 90%).
+# 0 (or 0.0) => coverage gate disabled entirely.
+# STACK-SPECIFIC: OFF for frontend. The engine's coverage gate reads JaCoCo
+# (Java) reports only; it cannot read Karma/Istanbul coverage yet.
+min_coverage: 0
+
+# What the coverage figure is measured over:
+#   "changed" => only the classes the coding phase wrote this run
+#                ("did MY change get tested"). Recommended.
+#   "global"  => the whole module (legacy behaviour).
+coverage_scope: "changed"
+
+# Which JaCoCo metric the gate reads. One of: LINE, BRANCH, INSTRUCTION, METHOD.
+coverage_metric: "LINE"
+
+# Where JaCoCo writes its CSV (repo-relative). Resolved module-aware at run time.
+# STACK-SPECIFIC: this path is Maven/JaCoCo. A Gradle or JS toolchain differs.
+coverage_csv: "target/site/jacoco/jacoco.csv"
+
+# The command that produces the coverage report. Not used while min_coverage
+# is 0 (frontend). Backend repos use the JaCoCo command in config-backend.yaml.
+coverage_command: ""
+
+# On a coverage MISS (tests pass but coverage below the bar), which phase to loop
+# back to. Coverage is a test problem, so this is unit_testing.
+coverage_loopback_phase: "unit_testing"
+
+# How many coverage-driven loopbacks before halting for a human. Independent of
+# the review and AC retry budgets, but all are bounded by max_phase_runs below.
+max_coverage_retries: 2
+
+# How many loopbacks a RED build (compile error or failing test) gets before
+# halting for a human. Engine default 3. Each loopback is a full AI phase run,
+# so keep it low. Environment failures (missing library, JVM cannot start,
+# missing coverage report) never loop — they halt at once.
+max_validation_retries: 2
+
+
+# ----------------------------------------------------------------- write boundary
+# Always-deny write globs. DENY WINS over any phase's allowed_writes, so these
+# files can never be written regardless of phase. The generated module(s) are
+# added automatically; list here only EXTRA patterns to protect.
+# STACK-SPECIFIC: frontend build output and installed packages.
+write_exclude:
+  - "**/node_modules/**"     # installed packages
+  - "dist/**"                # build output
+  - "package-lock.json"      # dependency changes are made by hand, not by the AI
+
+
+# (retain_audit_branch was removed: there is no audit branch any more — run
+# artifacts live on the harness-metrics branch. The engine ignores the key.)
+
+
+# ----------------------------------------------------------------- cost metrics
+# Where per-phase usage and cost come from:
+#   sdk     => the Copilot SDK reports each phase session's own usage (premium-
+#              request cost and nano-AI units). Works on org-billed seats, is not
+#              affected by other runs, and needs no waiting. Recommended.
+#   account => the old before/after read of the account's AI-credit counter.
+#              Account-wide (concurrent runs inflate it) and blank on org-billed
+#              seats. Only for reconciling on a personal seat.
+# SDK units have no documented conversion to AI credits or dollars — reconcile
+# against the org billing report before quoting a figure as money.
+credit_source: sdk
+
+# Seconds to wait after each phase before reading the counter. Used ONLY when
+# credit_source is "account"; ignored under "sdk".
+credit_settle_seconds: 30
+
+
+# ----------------------------------------------------------------- repo stack
+# STACK-SPECIFIC. Declares the technology stack(s) this repository contains.
+# Drives two filters: which instruction SUBFOLDERS load (backend/, angular-
+# frontend/, mobile-frontend/) and which stack-tagged skills load. Instruction
+# files directly under instructions/ (not in a stack subfolder) always load —
+# those are the cross-cutting guardrails (HIPAA, logging, prompt-injection).
+#   ["backend"]                    a Java/Kotlin backend service
+#   ["angular-frontend"]           an Angular web app
+#   ["mobile-frontend"] / ["ionic"] an Ionic mobile app
+#   ["backend","angular-frontend"] a full-stack repo (loads both)
+#   [] or ["*"]                    include every stack (no filtering)
+# CAVEAT: validated against BACKEND repositories only to date. Frontend and
+# mobile stacks are wired but NOT yet tested end to end.
+repo_stacks: ["angular-frontend"]   # STACK-SPECIFIC
+
+
+# ----------------------------------------------------------------- model routing
+# Use only models the run's MODEL credential can call — the list differs per
+# organisation (at BCBSM gpt-5.5 was not available). Check with the engine's
+# harness/list_models.py run under COPILOT_MODEL_TOKEN || github.token, not the
+# repo PAT. An unavailable model fails the first phase with
+# 'Model "<name>" is not available'.
+# The default model for every phase unless overridden below.
+# "auto" lets Copilot pick a model per task (billed at the chosen model's rate,
+# 10% discount on paid plans). Phases that need a consistent judge are pinned.
+model: "auto"
+
+# Per-phase model overrides. Any phase omitted uses `model` above. Keys are phase
+# ids: repo_instructions, context, design, prompt_steps, coding, unit_testing,
+# validation, documentation. (code_review is set via review_model, NOT here.)
+phase_models:
+  context: "claude-opus-4.8"        # clarification quality matters most here
+  coding: "gpt-5.3-codex"
+  validation: "claude-sonnet-5"     # judges each acceptance criterion — keep fixed
+
+# The code_review model. SET HERE, not in phase_models. Should DIFFER from the
+# coding model so the reviewer is genuinely independent; a same-as-coding value
+# is allowed but the harness warns. Blank => falls back to phase_models/default.
+review_model: "claude-sonnet-5"
+
+# On a review MISS (reviewer reports issues), which phase to loop back to.
+review_loopback_phase: "coding"
+
+# How many review-driven loopbacks before halting for a human.
+max_review_retries: 2
+
+
+# ----------------------------------------------------------------- context gate
+# Feasibility half of the context gate — how to treat [BLOCKER] findings the
+# context phase writes:
+#   blocking  => a classified blocker halts the run
+#   advisory  => blockers reported, run continues
+#   off       => feasibility is not assessed at all
+# NOTE: [NEEDS CLARIFICATION] ALWAYS blocks, in every mode — an ambiguous story
+# is never guessed into code. This setting governs only the feasibility half.
+# Start advisory for early runs; move to blocking once verdicts prove sound.
+blocker_gate: advisory
+
+
+# ----------------------------------------------------------------- AC conformance gate
+# How to treat the validation phase's per-acceptance-criterion verdicts:
+#   blocking  => a NOT_MET (or unverified) criterion halts / loops back
+#   advisory  => reported, run continues
+#   off       => the gate does not scan
+# Start advisory; move to blocking once the verdicts are trustworthy on this repo.
+ac_gate: advisory
+
+# Where a NOT_MET criterion sends the work. An unimplemented criterion is a
+# production-code gap, so this is coding (not unit_testing).
+ac_loopback_phase: "coding"
+
+# How many AC-driven loopbacks before halting for a human.
+max_ac_retries: 2
+
+# Whether an UNVERIFIABLE criterion (one nothing could confirm) halts the run.
+#   false => reported, run continues (recommended during rollout: most
+#            UNVERIFIABLE findings early on are test-fixture gaps, not code gaps)
+#   true  => an unverified criterion halts (an unverified criterion is unknown,
+#            not satisfied)
+halt_on_inconclusive: false
+
+
+# ----------------------------------------------------------------- termination
+# GLOBAL cap on how many times any ONE phase may execute in a single run, across
+# every loop type combined (review + coverage + AC + validation). This is the
+# backstop that guarantees the run stops even when several gates fire in turn.
+max_phase_runs: 3
+
+# Where a RED test build that is the TEST code's own compile fault loops back to.
+# 'coding' may only write src/main and cannot fix a test that won't compile, so
+# test-compilation failures go to unit_testing instead.
+test_failure_loopback_phase: "unit_testing"
+
+
+# ----------------------------------------------------------------- phase skills
+# Which named skills (folder names under the toolkit's skills/) load in each
+# phase. Skills have no path scope, so this mapping is explicit. This block
+# REPLACES the engine default wholesale — list every phase you want skills for;
+# an omitted phase gets no skills. A skill named here must exist in the toolkit.
+#
+# For a BACKEND repo, review-angular-code is intentionally NOT listed (it is an
+# Angular rubric — it would nitpick reactive Java). A frontend repo would add it
+# to code_review.
+# STACK-SPECIFIC: Angular skills. analyze-service is written for microservices
+# and is left out. review-angular-code is the engine's default Angular review
+# rubric — add it to code_review ONLY if the toolkit has a skills/review-angular-
+# code folder (it is not in copilot-toolkit today; check dx_copilot-standards-
+# workspace).
+phase_skills:
+  repo_instructions: ["build-copilot-instructions-angular-frontend"]
+  context:       ["build-context"]
+  prompt_steps:  ["build-prompt-steps"]
+  design:        ["build-design"]
+  coding:        ["security-review"]
+  code_review:   ["security-review"]   # + "review-angular-code" once it exists
+  unit_testing:  []
+  validation:    ["build-validation"]
+  documentation: []
+  raise_pr:      []
+
+
+# ------------------------------------------------------ phase instruction scope
+# The file area each phase's instructions apply to. An instruction file loads in
+# a phase when its own `applyTo` glob intersects that phase's scope here; an
+# applyTo of "**" is an always-on guardrail and loads in every phase regardless.
+# This block REPLACES the engine default wholesale — keep all phases.
+#
+# STACK-SPECIFIC paths. These are stack-NEUTRAL src/main, src/test globs that fit
+# Java and Kotlin. An Angular repo (sources under src/app, tests *.spec.ts) must
+# override coding/code_review/unit_testing/validation accordingly.
+#
+# Do NOT leave code_review or validation out: a missing key means an empty scope,
+# which drops every path-scoped instruction (naming, error-handling, reactive,
+# OWASP) from that phase and leaves only the always-on guardrails.
+# STACK-SPECIFIC: Angular paths. The toolkit's angular-frontend instructions use
+# applyTo src/app/**/*.ts, src/app/**/*.html and src/app/**/*.spec.ts, so these
+# scopes make them load. (The Java src/main/** scopes would load none of them.)
+phase_file_scope:
+  repo_instructions: []
+  context:       ["src/**"]
+  prompt_steps:  ["src/**"]
+  design:        ["src/app/**"]
+  coding:        ["src/app/**"]
+  code_review:   ["src/app/**"]
+  unit_testing:  ["src/app/**/*.spec.ts"]
+  validation:    ["src/app/**"]
+  documentation: ["docs/**"]
+  raise_pr:      []
+
+
+# ------------------------------------------------- learning from clarifications
+# How answers to [NEEDS CLARIFICATION] questions are reused so they are not
+# asked again — by the same developer or anyone else, in any later story.
+#
+# Developers answer in the story file on the BASE branch (any heading, e.g.
+# "Response to clarification"; repeating the question is optional) and RESUME
+# the run (resume: true). The harness then:
+#   - records each SERVICE rule from the answers in docs/decisions/<feature_id>.md
+#     and adds it as one line to .github/copilot-instructions.md — both ship in
+#     the harness PR and are approved with the code;
+#   - loads docs/decisions/*.md into later stories' context, design,
+#     prompt_steps and validation phases.
+# One-off, story-only answers are not recorded.
+
+# Inline this repo's .github/copilot-instructions.md in every phase.
+load_copilot_instructions: true
+
+# Create .github/copilot-instructions.md when the repo has none (first phase),
+# and add new service rules to it at the end (additions only; an edit that
+# removes more than 10% of the file is reverted). false => leave the file alone.
+manage_copilot_instructions: true
+
+# Where recorded decisions live. Must stay under docs/ (the documentation
+# phase's write boundary). knowledge_paths are loaded into the phases listed in
+# knowledge_phases, newest first, up to knowledge_max_chars characters.
+decisions_dir: "docs/decisions"
+knowledge_paths: ["docs/decisions/*.md"]
+knowledge_phases: ["context", "design", "prompt_steps", "validation"]
+knowledge_max_chars: 40000
