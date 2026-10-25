@@ -93,6 +93,8 @@ _TEST_GOAL = re.compile(r"(maven-compiler-plugin[^\n]*?:testCompile"
                         r"|:testCompile\b"
                         r"|Failed to execute goal[^\n]*testCompile)", re.IGNORECASE)
 _MAIN_PATH = re.compile(r"[/\\]src[/\\]main[/\\]", re.IGNORECASE)
+# Angular / TypeScript (backlog B4): "src/app/x.component.spec.ts:12:5 - error TS2345"
+_TS_ERROR = re.compile(r"([\w./\\-]+\.ts):\d+:\d+\s*-\s*error\s+TS\d+", re.IGNORECASE)
 
 
 def _scope_detail(repo_root, run) -> str:
@@ -146,7 +148,7 @@ def _failure_is_in_tests(output: str) -> bool:
     """
     if not output:
         return False
-    text = str(output)
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(output))
 
     # ---- signatures that are unambiguously the TEST's own fault ----
     # A failing assertion usually means production is wrong, but some runtime
@@ -168,6 +170,13 @@ def _failure_is_in_tests(output: str) -> bool:
     )
     if test_only:
         return True
+
+    # TypeScript compile errors name the file: a spec file => the test's fault,
+    # any other .ts => production code. Mixed => production (conservative).
+    ts_files = [m.group(1).replace("\\", "/") for m in _TS_ERROR.finditer(text)]
+    if ts_files:
+        ts_test = [f for f in ts_files if f.endswith(".spec.ts")]
+        return bool(ts_test) and len(ts_test) == len(ts_files)
 
     compile_failure = ("COMPILATION ERROR" in text.upper()
                        or "Compilation failure" in text
@@ -416,7 +425,20 @@ class StateMachine:
             except Exception:
                 _ri_before = None
 
-        code = self.executor.run_phase(phase, run)
+        # Phases a repo skips by config (backlog B5: skip_phases: [unit_testing]).
+        # The AI does no work, but the phase's gates still run — for unit_testing
+        # that is the build gate: compile, the repo's existing tests, coverage.
+        try:
+            from config import HarnessConfig as _HCsk
+            _skip = phase.id in (_HCsk.load(self.harness_dir).skip_phases or [])
+        except Exception:
+            _skip = False
+        if _skip:
+            self.log(f"  [harness] '{phase.id}' skipped by config (skip_phases) — "
+                     f"no AI work; its gates still run.")
+            code = ExitCode.OK
+        else:
+            code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
 
         if _ri_before is not None:
@@ -1087,6 +1109,12 @@ class StateMachine:
 
                         run.coverage_attempts += 1
                         cov_loop = cfg.coverage_loopback_phase
+                        if cov_loop in (cfg.skip_phases or []):
+                            # Nothing can add tests: the loopback phase is skipped.
+                            self.log(f"  ! coverage below target, and '{cov_loop}' is "
+                                     f"skipped by config — no phase can add tests; halting.")
+                            cov_loop = None
+                            run.coverage_attempts = cfg.max_coverage_retries + 1
                         pct = getattr(vr, "coverage_pct", None)
                         target = getattr(vr, "coverage_target", None) or cfg.min_coverage
                         measured = getattr(vr, "coverage_classes", []) or []
@@ -1208,6 +1236,12 @@ class StateMachine:
                             "The test build FAILED. Fix the production code so tests pass. "
                             "Do not edit tests. Failure output:\n"
                         )
+                    if loopback in (cfg.skip_phases or []):
+                        # e.g. existing specs are broken and unit_testing is skipped:
+                        # sending work to a skipped phase would only repeat the gate.
+                        self.log(f"  ! build failure routed to '{loopback}', which is "
+                                 f"skipped by config — halting for a human.")
+                        loopback = None
                     if loopback and run.validation_attempts <= cfg.max_validation_retries:
                         # CONDITIONAL TRANSITION (known edge, not dynamic):
                         # red build -> back to the phase that owns the broken file,

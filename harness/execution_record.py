@@ -192,8 +192,19 @@ def find_duplicate_classes(repo_root: Path, of_interest: list,
             if p.is_file():
                 by_name.setdefault(p.stem, []).append(
                     _norm(str(p.relative_to(repo_root))))
+        # Angular: a component/service class lives in <name>.<kind>.ts; two
+        # files with the same name in different folders are the same symptom.
+        for p in base.rglob("*.ts"):
+            # barrel/entry files legitimately repeat in every folder
+            if (p.is_file() and not p.name.endswith(".spec.ts")
+                    and p.name not in ("index.ts", "public-api.ts", "main.ts",
+                                       "polyfills.ts", "test.ts")
+                    and "node_modules" not in p.parts):
+                by_name.setdefault(p.name[:-3], []).append(
+                    _norm(str(p.relative_to(repo_root))))
 
-    touched_names = {Path(_norm(t)).stem for t in of_interest}
+    touched_names = {(Path(_norm(t)).name[:-3] if _norm(t).endswith(".ts")
+                      else Path(_norm(t)).stem) for t in of_interest}
     return {name: sorted(paths) for name, paths in by_name.items()
             if len(paths) > 1 and name in touched_names}
 

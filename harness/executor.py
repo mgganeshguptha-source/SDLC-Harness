@@ -98,6 +98,22 @@ class PhaseExecutor:
         self.harness_dir = harness_dir
         self.log = log
 
+    def _source_roots(self) -> tuple:
+        """Directory prefixes of this repo's production source (from the config's
+        source globs, e.g. 'src/main/', '<module>/src/main/', 'src/app/'). Used by
+        the scope gate. Falls back to the historical 'src/main/'."""
+        try:
+            from config import HarnessConfig as _HCs
+            cfg = _HCs.load(self.harness_dir, repo_root=self.repo_root)
+            roots = []
+            for g in cfg.source_paths():
+                base = g.split("*", 1)[0].rstrip("/")
+                if base and base + "/" not in roots:
+                    roots.append(base + "/")
+            return tuple(roots) or ("src/main/",)
+        except Exception:
+            return ("src/main/",)
+
     def _build_prompt(self, phase: Phase, run: RunState) -> str:
         """Capability layer. In Phase 4 this pulls in .github/skills + instructions.
         For now, a phase-specific instruction string + any rejection feedback."""
@@ -170,7 +186,8 @@ class PhaseExecutor:
         if getattr(phase, "record_execution", False):
             try:
                 from execution_record import snapshot_source_files
-                _pre_existing_sources = snapshot_source_files(self.repo_root)
+                _pre_existing_sources = snapshot_source_files(
+                    self.repo_root, source_roots=self._source_roots())
             except Exception as e:
                 self.log(f"  [harness] scope snapshot failed (gate will not fire): {e}")
 
@@ -265,8 +282,8 @@ class PhaseExecutor:
         try:
             from config import HarnessConfig as _HCw
             _cfgw = _HCw.load(self.harness_dir, repo_root=self.repo_root)
-            _allowed = _cfgw.module_writes(phase.allowed_writes)
-            _exclude = _cfgw.write_exclude
+            _allowed = _cfgw.phase_writes(phase)
+            _exclude = _cfgw.phase_exclude(phase)
             self.log(f"  [module] target_module={_cfgw.target_module!r} "
                      f"allowed_writes={list(_allowed)} exclude={list(_exclude or [])}")
         except Exception as _e:
@@ -295,10 +312,18 @@ class PhaseExecutor:
         # repo-relative paths into run state so the validation gate can scope
         # coverage to ONLY the classes this run changed. Accumulate across loopbacks
         # (a coding retry may touch the same or additional files) without dupes.
+        try:
+            from config import HarnessConfig as _HCc
+            _cfgc = _HCc.load(self.harness_dir, repo_root=self.repo_root)
+            _is_src = _cfgc.is_source_file
+            _exts = _cfgc.code_extensions()
+        except Exception:
+            _is_src = lambda r: "/src/main/" in ("/" + r)  # noqa: E731 — old behaviour
+            _exts = (".java",)
         for w in result.attempted_writes:
             from execution_record import _rel_to_repo as _rel
-            rel = _rel(w, self.repo_root)
-            if "/src/main/" in ("/" + rel.replace("\\", "/")) and rel.endswith(".java"):
+            rel = _rel(w, self.repo_root).replace("\\", "/")
+            if _is_src(rel) and rel.endswith(_exts):
                 if rel not in run.changed_main_files:
                     run.changed_main_files.append(rel)
         if run.changed_main_files:
@@ -324,7 +349,8 @@ class PhaseExecutor:
                 if summary["scope_additions"]:
                     from execution_record import classify_scope_additions
                     split = classify_scope_additions(
-                        summary["scope_additions"], _pre_existing_sources)
+                        summary["scope_additions"], _pre_existing_sources,
+                        source_roots=self._source_roots())
 
                     if split["modified"]:
                         self.log("  [harness] ⚠ SCOPE ADDITION (unplanned edit to an "
@@ -361,7 +387,8 @@ class PhaseExecutor:
                 # of the same type. Check the symptom, not just one of its causes.
                 from execution_record import find_duplicate_classes, _rel_to_repo as _r
                 touched = [_r(w, self.repo_root) for w in result.attempted_writes]
-                dupes = find_duplicate_classes(self.repo_root, touched)
+                dupes = find_duplicate_classes(self.repo_root, touched,
+                                               source_roots=self._source_roots())
                 if dupes:
                     self.log("  ! SCOPE VIOLATION — DUPLICATE CLASS(ES): the same class "
                              "name now exists at more than one path:")

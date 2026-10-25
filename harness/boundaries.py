@@ -48,8 +48,12 @@ def _matches(path: str, pattern: str) -> bool:
         prefix = pattern[:-3].rstrip("/")
         return path == prefix or path.startswith(prefix + "/")
 
-    # exact or single-level fnmatch fallback
-    return fnmatch.fnmatch(path, pattern)
+    # exact or fnmatch fallback. '**/' must also match ZERO directories, so
+    # 'src/app/**/*.spec.ts' matches 'src/app/a.spec.ts' as well as
+    # 'src/app/x/a.spec.ts' (fnmatch alone needs at least one '/').
+    if fnmatch.fnmatch(path, pattern):
+        return True
+    return "**/" in pattern and fnmatch.fnmatch(path, pattern.replace("**/", ""))
 
 
 def _to_repo_relative(path: str, repo_root: str | None) -> str:
