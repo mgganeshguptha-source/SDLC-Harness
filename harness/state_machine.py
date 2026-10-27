@@ -782,11 +782,23 @@ class StateMachine:
                     for it in cr.items:
                         self.log("      • " + it)
                     _sp = getattr(run, "story_path", None) or "the story file"
+                    # Name the branch the resume will actually read: the
+                    # workflow's `base` input, or the "Use workflow from" branch
+                    # when base is blank (set by harness.yml). "BASE branch" on
+                    # its own was read as the dev base (e.g. master).
+                    import os as _os
+                    _bb = (_os.environ.get("HARNESS_BASE_BRANCH") or "").strip()
+                    _where = (f"on branch '{_bb}' (the run's base: the `base` input, "
+                              f"or the \"Use workflow from\" branch when base is blank)"
+                              if _bb else
+                              "on the run's base branch (the `base` input, or the "
+                              "\"Use workflow from\" branch when base is blank)")
                     self.log(
-                        f"    Answer each question in {_sp} on the BASE branch — "
-                        f"preferably as a new acceptance criterion — then re-run "
-                        f"with resume=true. The resume re-reads the story from the "
-                        f"base branch.")
+                        f"    Answer each question in {_sp} {_where} — preferably as "
+                        f"a new acceptance criterion — then re-run with resume=true "
+                        f"and the SAME base. The resume re-reads the story from that "
+                        f"branch; .harness/config.yaml is read from the working "
+                        f"branch (harness-wip/<feature>), not from base.")
                     try:
                         from state import current_run_id
                         run.clarification_log.append({
