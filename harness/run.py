@@ -222,24 +222,24 @@ def _report_sdk_cost(run: RunState):
         return
 
     print("  AI USAGE THIS RUN (reported by the Copilot SDK, per session):")
-    print(f"    {'phase':<14}{'model(s) actually used':<30}"
+    print(f"    {'phase':<19}{'model(s) actually used':<30}"
           f"{'input':>11}{'output':>9}{'premium':>10}{'nano-AIU':>16}")
     for e in rows:
         models = ",".join(e.get("models_used") or []) or f"({e.get('model') or '?'})"
-        print(f"    {e.get('phase',''):<14}{models[:29]:<30}"
+        print(f"    {str(e.get('phase',''))[:18]:<19}{models[:29]:<30}"
               f"{_fmt_num(e.get('input_tokens'), ',d'):>11}"
               f"{_fmt_num(e.get('output_tokens'), ',d'):>9}"
               f"{_fmt_num(e.get('premium_cost'), '.4f'):>10}"
               f"{_fmt_num(e.get('nano_aiu'), ',.0f'):>16}")
     t = sum_entries(rows)
-    print(f"    {'TOTAL':<14}{'':<30}"
+    print(f"    {'TOTAL':<19}{'':<30}"
           f"{_fmt_num(t['input'], ',d'):>11}"
           f"{_fmt_num(t['output'], ',d'):>9}"
           f"{_fmt_num(t['premium_cost'], '.4f'):>10}"
           f"{_fmt_num(t['nano_aiu'], ',.0f'):>16}")
     if len(rows) < len(run.phase_token_log or []):
         tk = run.total_tokens or {}
-        print(f"    {'ALL RUNS':<14}{'(this feature, incl. resumes)':<30}"
+        print(f"    {'ALL RUNS':<19}{'(this feature, incl. resumes)':<30}"
               f"{_fmt_num(tk.get('input'), ',d'):>11}"
               f"{_fmt_num(tk.get('output'), ',d'):>9}"
               f"{_fmt_num(run.total_premium_cost, '.4f'):>10}"

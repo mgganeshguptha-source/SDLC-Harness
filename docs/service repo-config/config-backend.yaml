@@ -148,6 +148,10 @@ model: "auto"
 # ids: repo_instructions, context, design, prompt_steps, coding, unit_testing,
 # validation, documentation. (code_review is set via review_model, NOT here.)
 phase_models:
+  # Runs once per repo (only when .github/copilot-instructions.md is missing);
+  # the file is reviewed in the harness PR. Pinned rather than "auto" so the
+  # first-run output is reproducible.
+  repo_instructions: "gpt-5.3-codex"
   context: "claude-opus-4.8"        # clarification quality matters most here
   coding: "gpt-5.3-codex"
   validation: "claude-sonnet-5"     # judges each acceptance criterion — keep fixed

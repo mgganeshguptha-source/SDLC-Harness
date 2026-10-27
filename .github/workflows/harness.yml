@@ -495,6 +495,9 @@ jobs:
           HARNESS_RESUMED: ${{ inputs.resume }}
           HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
           HARNESS_TOOLKIT_PROPOSALS: ${{ inputs.toolkit_proposals }}
+          # Branch the story is read from (and a resume re-reads it from) —
+          # named in the clarification halt message.
+          HARNESS_BASE_BRANCH: ${{ inputs.base != '' && inputs.base || github.ref_name }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py autorun --repo ../../service
@@ -896,4 +899,4 @@ jobs:
       - name: Explain how to resume (halt only)
         if: failure() && hashFiles('engine/harness/run.py') != ''
         run: |
-          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on the base branch instead; the resume re-reads it from there."
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on branch '${{ inputs.base != '' && inputs.base || github.ref_name }}' (this run's base) instead, then resume with the same base; the resume re-reads the story from there."
