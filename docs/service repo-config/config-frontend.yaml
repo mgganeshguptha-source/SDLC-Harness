@@ -16,16 +16,26 @@
 # skip_phases, Istanbul coverage — SDLC-Harness PR "Frontend support"). On an
 # older engine, coding is denied (Java-only write paths).
 #
+# DEFAULT IS MODE B (BUILD ONLY). BCBSM frontend teams write no unit tests in
+# sprint delivery (agreed with the dx_mycoverage-ui developer, 28 Oct 2026), so
+# the harness matches that. Unit tests (mode A) are a later value-add.
+#
 # BEFORE THE FIRST RUN — decide which of the two modes below fits the repo:
-#   A. UNIT TESTS ON (default in this file): the AI writes *.spec.ts tests, the
+#   A. UNIT TESTS ON: the AI writes *.spec.ts tests, the
 #      harness runs Karma and gates coverage of the changed files. Precondition:
 #      the repo's EXISTING specs pass today —
 #        npm install && npx ng test --watch=false --browsers=ChromeHeadless
 #      on the base branch must be green, or the run will try to fix specs it
 #      did not break.
-#   B. BUILD ONLY: the AI writes no tests (skip_phases: ["unit_testing"]); the
-#      harness still compiles and runs whatever specs exist; coverage off.
-#      Switch by following the "MODE B" notes below.
+#   B. BUILD ONLY (default in this file): the AI writes no tests
+#      (skip_phases: ["unit_testing"]); the harness compiles the app with
+#      "ng build"; no specs run; coverage off.
+#      Switch to A by following the "Mode A" notes below.
+#
+# Do NOT use "ng serve" as the build command: it starts a dev server that never
+# exits, so the build gate would wait until test_timeout and fail. "ng build"
+# with the configuration that the repo's serve target uses (angular.json:
+# serve -> configurations -> development -> buildTarget) compiles the same code.
 # =============================================================================
 
 
@@ -36,7 +46,7 @@ target_module: ""
 
 
 # ----------------------------------------------------------------- build / tests
-# The command the harness runs to execute unit tests. The HARNESS runs this, not
+# The command the harness runs to build / test the code. The HARNESS runs this, not
 # the agent. A non-zero exit fails the validation gate and halts/loops the run.
 # STACK-SPECIFIC: Maven "./mvnw test", Gradle "./gradlew test", npm "npm test".
 # Frontend: install from the PUBLIC npm registry, then run Karma once in
@@ -53,7 +63,13 @@ target_module: ""
 # later, drop --karma-config and add { type: 'json-summary' } to that file's
 # coverageReporter instead.
 # MODE B: drop " --code-coverage --karma-config=..." (no coverage needed).
-test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress --code-coverage --karma-config=\"$HARNESS_KARMA_CONFIG\""
+# MODE B (active): compile the app with the repo's own angular.json build target
+# (ngx-build-plus / module federation included). No specs run. To also run the
+# existing specs once they pass on master, append:
+#   && npx ng test --watch=false --browsers=ChromeHeadless --no-progress
+# Mode A command (for later):
+#   npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress --code-coverage --karma-config="$HARNESS_KARMA_CONFIG"
+test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng build --configuration development"
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.
@@ -73,8 +89,8 @@ pre_validation_command: ""
 # STACK-SPECIFIC: read from the Istanbul coverage-summary.json that Karma writes
 # (coverage_format below). Only TypeScript files count; a change that touches
 # only templates/styles is treated as fully covered.
-# MODE B: set to 0.
-min_coverage: 0.90
+# MODE B (active): 0 = coverage gate off. Mode A: 0.90.
+min_coverage: 0
 
 # What the coverage figure is measured over:
 #   "changed" => only the classes the coding phase wrote this run
@@ -175,8 +191,9 @@ repo_stacks: ["angular-frontend"]   # STACK-SPECIFIC
 # test_globs:   ["src/app/**/*.spec.ts"]
 
 # MODE B: skip the unit_testing phase — the AI writes no tests, but its build
-# gate still runs (compile + existing specs). Only "unit_testing" may be skipped.
-skip_phases: []
+# gate still runs (the test_command above). Only "unit_testing" may be skipped.
+# MODE B (active). Mode A: [].
+skip_phases: ["unit_testing"]
 
 
 # ----------------------------------------------------------------- model routing
