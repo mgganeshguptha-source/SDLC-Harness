@@ -63,13 +63,16 @@ target_module: ""
 # later, drop --karma-config and add { type: 'json-summary' } to that file's
 # coverageReporter instead.
 # MODE B: drop " --code-coverage --karma-config=..." (no coverage needed).
+# --legacy-peer-deps: dx_mycoverage-ui uses primeng@17 (declares Angular 17/18
+# peers) in an Angular 19 app; plain npm install fails with ERESOLVE. Remove it
+# once the repo's peer dependencies match (or a lock file / .npmrc is committed).
 # MODE B (active): compile the app with the repo's own angular.json build target
 # (ngx-build-plus / module federation included). No specs run. To also run the
 # existing specs once they pass on master, append:
 #   && npx ng test --watch=false --browsers=ChromeHeadless --no-progress
 # Mode A command (for later):
 #   npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress --code-coverage --karma-config="$HARNESS_KARMA_CONFIG"
-test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng build --configuration development"
+test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund --legacy-peer-deps && npx ng build --configuration development"
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.
