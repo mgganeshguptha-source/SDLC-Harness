@@ -91,10 +91,25 @@ def test_typescript_error_routing():
 
 
 def test_npm_and_browser_failures_are_environment():
-    assert validation.classify_environment_failure(1, "npm error code E404\n404 Not Found") == "dependency"
-    assert validation.classify_environment_failure(1, "npm ERR! code ERESOLVE") == "dependency"
+    assert validation.classify_environment_failure(1, "npm error code E404\n404 Not Found") == "npm_install"
+    assert validation.classify_environment_failure(1, "npm ERR! code ERESOLVE") == "npm_peer_conflict"
     assert validation.classify_environment_failure(
-        1, "No binary for ChromeHeadless browser on your platform") == "toolchain"
+        1, "No binary for ChromeHeadless browser on your platform") == "browser"
+
+
+def test_npm_peer_conflict_gets_npm_hint_not_maven():
+    # Observed at BCBSM (dx_mycoverage-ui): primeng@17 vs Angular 19.
+    out = ("npm error code ERESOLVE\nnpm error ERESOLVE unable to resolve dependency tree\n"
+           "npm error Could not resolve dependency:\n"
+           "npm error peer @angular/common@\"^17.0.0 || ^18.0.0\" from primeng@17.18.15\n")
+    reason = validation.classify_environment_failure(1, out)
+    assert reason == "npm_peer_conflict"
+    hint = validation.environment_hint(reason)
+    assert "--legacy-peer-deps" in hint
+    assert "Maven" not in hint and "POM" not in hint
+    for r in ("npm_install", "browser"):
+        h = validation.environment_hint(r)
+        assert h and "Maven" not in h
 
 
 def test_istanbul_changed_and_global(tmp_path):
