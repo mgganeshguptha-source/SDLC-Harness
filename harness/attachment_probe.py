@@ -11,8 +11,15 @@ What it does, per model:
   2. TEXT   — sends a small text file (a fake error log holding a random code)
               as a "file" attachment and asks for the code. Checked
               automatically.
-  3. --image PATH (optional) — sends YOUR image (e.g. a real design screenshot)
+  3. DOCX   — builds a small Word document holding a random code and sends it
+              twice: (a) the raw .docx as a "file" attachment (informational —
+              shows whether the model can read Word files unconverted; does NOT
+              affect the exit code), and (b) converted to Markdown by the probe
+              (standard library only) and sent as a "file" attachment (checked).
+  4. --image PATH (optional) — sends YOUR image (e.g. a real design screenshot)
               and prints the model's description, for a human to judge.
+  5. --doc PATH (optional) — converts YOUR .docx to Markdown, sends it, and
+              prints the model's summary, for a human to judge.
 
 Every tool call is DENIED, so the model cannot open the files with its own
 read/view tools: a correct answer proves the attachment itself was delivered.
@@ -25,10 +32,11 @@ Run (laptop, Copilot CLI logged in, or a model token in COPILOT_MODEL_TOKEN):
   python attachment_probe.py --model claude-sonnet-5
   python attachment_probe.py --model claude-sonnet-5 --model gpt-5.3-codex
   python attachment_probe.py --model claude-sonnet-5 --image ./design.png
-  python attachment_probe.py --model claude-sonnet-5 --skip-text
+  python attachment_probe.py --model claude-sonnet-5 --doc ./requirements.docx
+  python attachment_probe.py --model claude-sonnet-5 --skip-text --skip-docx
 
 Exit code: 0 when every automatic check passed, 1 otherwise.
-Do not use real member data (PHI/PII) in --image: this is a probe.
+Do not use real member data (PHI/PII) in --image or --doc: this is a probe.
 """
 from __future__ import annotations
 
@@ -41,6 +49,8 @@ import secrets
 import struct
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
 import zlib
 from pathlib import Path
 
@@ -103,6 +113,86 @@ def make_log_file(folder: Path) -> tuple[Path, str]:
         "2026-10-28T10:15:04Z INFO  falling back to empty state\n",
         encoding="utf-8")
     return p, code
+
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def make_docx(folder: Path) -> tuple[Path, str]:
+    """A minimal valid .docx (heading, paragraph, table) holding a random code
+    — standard library only."""
+    code = "REQ-" + secrets.token_hex(3).upper()
+    ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+    def para(text, style=None):
+        ppr = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+        return f"<w:p>{ppr}<w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p>"
+
+    def cell(text):
+        return f"<w:tc>{para(text)}</w:tc>"
+
+    table = ("<w:tbl>"
+             f"<w:tr>{cell('Field')}{cell('Rule')}</w:tr>"
+             f"<w:tr>{cell('status')}{cell('FAILED shows the outage banner')}</w:tr>"
+             f"<w:tr>{cell('requirement id')}{cell(code)}</w:tr>"
+             "</w:tbl>")
+    body = (para("Visit summary display rules", "Heading1")
+            + para("The table below lists the display rules for this story.")
+            + table)
+    doc = (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+           f"<w:document {ns}><w:body>{body}<w:sectPr/></w:body></w:document>")
+    ctypes = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+              '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+              '<Default Extension="xml" ContentType="application/xml"/>'
+              '<Override PartName="/word/document.xml" ContentType="application/'
+              'vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+              "</Types>")
+    rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/'
+            '2006/relationships/officeDocument" Target="word/document.xml"/>'
+            "</Relationships>")
+    p = folder / "probe-requirements.docx"
+    with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", ctypes)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+    return p, code
+
+
+def docx_to_markdown(path: Path) -> str:
+    """Body text of a .docx as Markdown: headings (Heading1-6 styles), paragraphs
+    and tables. Standard library only — enough for the probe; the engine will use
+    a full converter. Images and text boxes are not extracted."""
+    with zipfile.ZipFile(path) as z:
+        root = ET.fromstring(z.read("word/document.xml"))
+    body = root.find(f"{_W}body")
+
+    def text_of(el):
+        return "".join(t.text or "" for t in el.iter(f"{_W}t")).strip()
+
+    lines: list[str] = []
+    for el in list(body) if body is not None else []:
+        if el.tag == f"{_W}p":
+            txt = text_of(el)
+            if not txt:
+                continue
+            style = el.find(f"{_W}pPr/{_W}pStyle")
+            sval = style.get(f"{_W}val", "") if style is not None else ""
+            level = sval[-1] if sval.lower().startswith("heading") and sval[-1:].isdigit() else ""
+            lines.append(("#" * int(level) + " " if level else "") + txt)
+            lines.append("")
+        elif el.tag == f"{_W}tbl":
+            rows = [[text_of(c) for c in tr.findall(f"{_W}tc")]
+                    for tr in el.findall(f"{_W}tr")]
+            if rows:
+                lines.append("| " + " | ".join(rows[0]) + " |")
+                lines.append("|" + "---|" * len(rows[0]))
+                for r in rows[1:]:
+                    lines.append("| " + " | ".join(r) + " |")
+                lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 def blob(data: bytes, mime: str, name: str) -> dict:
@@ -170,8 +260,8 @@ def report(label: str, res: dict, ok: bool | None) -> None:
 
 
 # ---------------------------------------------------------------- checks
-async def probe_model(client, model: str, image: Path | None,
-                      skip_text: bool, workdir: Path) -> bool:
+async def probe_model(client, model: str, image: Path | None, doc: Path | None,
+                      skip_text: bool, skip_docx: bool, workdir: Path) -> bool:
     print(f"\n=== model: {model} ===")
     all_ok = True
 
@@ -207,7 +297,30 @@ async def probe_model(client, model: str, image: Path | None,
         report(f"text (file attachment; expected {code})", res, ok)
         all_ok &= ok
 
-    # 3. the user's own image, for a human to judge
+    # 3. Word document: raw (informational) and converted (checked)
+    if not skip_docx:
+        docx_path, code = make_docx(workdir)
+        ask_code = ("A requirements document is attached. Reply with ONLY the "
+                    "requirement id from its table (it starts with REQ-), nothing "
+                    "else. If you cannot read the attachment, reply NO_ATTACHMENT.")
+        res = await ask(client, model, ask_code,
+                        [{"type": "file", "path": str(docx_path.resolve()),
+                          "displayName": docx_path.name}])
+        raw_ok = code in res["text"]
+        report(f"docx RAW as file attachment (informational; expected {code}; "
+               f"{'model read it' if raw_ok else 'model could NOT read it'})",
+               res, None)
+
+        md_path = workdir / "probe-requirements.md"
+        md_path.write_text(docx_to_markdown(docx_path), encoding="utf-8")
+        res = await ask(client, model, ask_code,
+                        [{"type": "file", "path": str(md_path.resolve()),
+                          "displayName": "probe-requirements.docx (converted to Markdown)"}])
+        ok = code in res["text"]
+        report(f"docx CONVERTED to Markdown (file attachment; expected {code})", res, ok)
+        all_ok &= ok
+
+    # 4. the user's own image, for a human to judge
     if image:
         mime = mimetypes.guess_type(image.name)[0] or "image/png"
         res = await ask(
@@ -220,6 +333,21 @@ async def probe_model(client, model: str, image: Path | None,
             [blob(image.read_bytes(), mime, image.name)])
         report(f"your image ({image.name}, {mime}) — judge the description", res, None)
 
+    # 5. the user's own Word document, converted, for a human to judge
+    if doc:
+        md_path = workdir / (doc.stem + ".md")
+        md_path.write_text(docx_to_markdown(doc), encoding="utf-8")
+        print(f"\n  ({doc.name} converted: {md_path.stat().st_size} bytes of Markdown)")
+        res = await ask(
+            client, model,
+            "A requirements document is attached (converted from Word to "
+            "Markdown). Summarise it for a developer: its headings, every rule or "
+            "acceptance criterion it states, and any table contents. Quote exact "
+            "values. If you cannot read the attachment, reply NO_ATTACHMENT.",
+            [{"type": "file", "path": str(md_path.resolve()),
+              "displayName": f"{doc.name} (converted to Markdown)"}])
+        report(f"your document ({doc.name}) — judge the summary", res, None)
+
     return all_ok
 
 
@@ -227,6 +355,14 @@ async def main(args) -> int:
     image = Path(args.image).expanduser() if args.image else None
     if image and not image.is_file():
         print(f"--image not found: {image}")
+        return 2
+    doc = Path(args.doc).expanduser() if args.doc else None
+    if doc and not doc.is_file():
+        print(f"--doc not found: {doc}")
+        return 2
+    if doc and doc.suffix.lower() != ".docx":
+        print(f"--doc must be a .docx (got {doc.suffix}). Save legacy .doc files as "
+              f".docx first.")
         return 2
 
     ok_all = True
@@ -250,8 +386,9 @@ async def main(args) -> int:
                                           "supports", None), "vision", None)
                     print(f"\n(model {model} reports vision={sup})")
                 try:
-                    ok_all &= await probe_model(client, model, image,
-                                                args.skip_text, Path(tmp))
+                    ok_all &= await probe_model(client, model, image, doc,
+                                                args.skip_text, args.skip_docx,
+                                                Path(tmp))
                 except Exception as e:
                     print(f"\n  [FAIL] {model}: {e!r}")
                     ok_all = False
@@ -267,6 +404,9 @@ if __name__ == "__main__":
     ap.add_argument("--model", action="append", required=True,
                     help="model id to probe (repeatable)")
     ap.add_argument("--image", help="optional real image to describe (no PHI/PII)")
+    ap.add_argument("--doc", help="optional real .docx to summarise (no PHI/PII)")
     ap.add_argument("--skip-text", action="store_true",
                     help="skip the text-file attachment check")
+    ap.add_argument("--skip-docx", action="store_true",
+                    help="skip the Word-document checks")
     sys.exit(asyncio.run(main(ap.parse_args())))
