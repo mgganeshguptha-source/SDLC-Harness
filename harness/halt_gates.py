@@ -43,6 +43,11 @@ PHASE_RUN_CAP = "phase_run_cap"      # one phase re-entered past the global cap
 # dependency in pom.xml, a build-config edit — and stopped rather than working
 # around it. Distinct from write_boundary: nothing was breached, the phase asked.
 MANUAL_CHANGE_REQUIRED = "manual_change_required"
+# The story or an attachment failed the input guard before any model call:
+# possible PII/PHI found, the developer did not confirm the input is free of it,
+# or an attachment the harness cannot send (unsupported type, too large, a
+# scanned PDF, OCR unavailable). Nothing was sent to a model.
+INPUT_GUARD = "input_guard"
 
 # --- gates that stopped the run because OUR PLUMBING failed ---
 SDK_ERROR = "sdk_error"              # auth, network, Copilot CLI
@@ -54,7 +59,8 @@ OTHER = "other"                      # unmapped; halt_detail carries the text
 HALT_GATES = frozenset({
     CLARIFICATION, FEASIBILITY, WRITE_BOUNDARY, SCOPE, CODE_REVIEW,
     COVERAGE, TEST_BUILD, AC_CONFORMANCE, ARTIFACT_MISSING, ITERATION_CAP,
-    PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, SDK_ERROR, CONFIG_ERROR, OTHER,
+    PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, INPUT_GUARD, SDK_ERROR, CONFIG_ERROR,
+    OTHER,
 })
 
 # Halts caused by our own plumbing rather than by the work being unacceptable.
@@ -75,6 +81,7 @@ LABELS = {
     ITERATION_CAP: "Phase exhausted its turn budget",
     PHASE_RUN_CAP: "Phase re-entered too many times",
     MANUAL_CHANGE_REQUIRED: "A human must make a change the harness cannot",
+    INPUT_GUARD: "Story or attachment blocked by the input guard (PII/PHI, type, size)",
     SDK_ERROR: "Infrastructure or authentication failure",
     CONFIG_ERROR: "Configuration error",
     OTHER: "Unclassified halt",

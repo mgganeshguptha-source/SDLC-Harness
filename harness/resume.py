@@ -161,6 +161,45 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
     return run
 
 
+def refresh_attachments(run: RunState, repo: Path, base_ref: str, cfg, log=print) -> None:
+    """Bring the story's attachments folder in line with the base branch.
+
+    Like the story, attachments are added and changed by the developer on the
+    BASE (story) branch, while a resume runs on harness-wip/<feature>, which
+    only has them as they were when the run started. Replace the folder with
+    the base branch's copy (or remove it when the base no longer has one).
+    Never fails the resume; the input guard re-checks whatever is there.
+    """
+    import shutil
+    import subprocess
+    from attachments import resolve_dir
+    try:
+        folder = resolve_dir(repo, cfg, run.feature_id)
+        rel = str(folder.relative_to(repo.resolve())).replace("\\", "/")
+    except Exception as e:
+        log(f"  [resume] attachments: could not resolve the folder ({e}) — not refreshed")
+        return
+
+    def _git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+
+    listing = _git("ls-tree", "--name-only", base_ref, "--", rel)
+    on_base = listing.returncode == 0 and bool(listing.stdout.strip())
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
+    if not on_base:
+        log(f"  [resume] attachments: {rel}/ is not on {base_ref} — none for this resume")
+        return
+    co = _git("checkout", base_ref, "--", rel)
+    if co.returncode != 0:
+        log(f"  [resume] attachments: could not check out {rel}/ from {base_ref} "
+            f"({co.stderr.strip()[:200]})")
+        return
+    n = sum(1 for p in folder.rglob("*") if p.is_file()) if folder.exists() else 0
+    log(f"  [resume] attachments: {rel}/ refreshed from {base_ref} ({n} file(s))")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Rewind a halted harness run so it resumes at a chosen phase.")
@@ -194,8 +233,9 @@ def main(argv=None) -> int:
     rewind(run, target)
     if args.base_ref:
         from config import HarnessConfig
-        story_file = HarnessConfig.load(harness_dir).story_file
-        refresh_story(run, repo, args.base_ref, story_file)
+        _cfg = HarnessConfig.load(harness_dir)
+        refresh_story(run, repo, args.base_ref, _cfg.story_file)
+        refresh_attachments(run, repo, args.base_ref, _cfg)
     run.save(harness_dir)
     print(f"  [resume] state saved — autorun will start at '{run.current_phase}'")
     return 0

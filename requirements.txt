@@ -12,3 +12,11 @@ github-copilot-sdk==1.0.4
 
 # YAML config parsing (config.yaml).
 pyyaml>=6.0
+
+# Story attachments (attachments.py):
+#   pypdf        — text out of .pdf attachments
+#   pytesseract  — OCR of image attachments for the PII scan (needs the
+#   Pillow         tesseract-ocr program; the workflow installs it when needed)
+pypdf>=4.0
+pytesseract>=0.3.10
+Pillow>=10.0

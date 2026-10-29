@@ -22,6 +22,13 @@ class RunState:
     # whether the developer has edited the story since the run started.
     story_path: Optional[str] = None
     story_sha256: Optional[str] = None
+    # Story attachments sent to models (attachments.py): one entry per file
+    # actually sent — name, kind, size, sha256, what it was converted from.
+    attachments: list = field(default_factory=list)
+    # Input guard result for the latest check: confirm_no_phi (the developer's
+    # workflow checkbox), who confirmed, whether the PII scan ran, and how many
+    # findings (types and locations only — never the values).
+    input_guard: dict = field(default_factory=dict)
     # Every set of questions the context gate halted on, oldest first:
     # {"run_id", "story_sha256", "questions": [...]}. Developers often answer
     # under their own heading without repeating the question, so later phases

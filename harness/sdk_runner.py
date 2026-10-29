@@ -1645,7 +1645,58 @@ class SdkAgentRunner:
         # the PREVIOUS phase's cost as its own.
         self._last_usage_metrics = {}
 
+        # ---- STORY ATTACHMENTS (attachments.py) ----
+        # Staged by the input guard just before this phase (state_machine), which
+        # has already checked confirm_no_phi, the PII scan, types and sizes. Images
+        # go as base64 blobs, text (incl. converted Word/PDF) as file attachments.
+        _att_manifest = None
+        _att_list: list = []
+        try:
+            if phase.id in (getattr(_cfg, "attachment_phases", None) or []):
+                import attachments as _AT
+                _att_manifest = _AT.load_manifest(repo_root)
+                if _att_manifest and _att_manifest.get("ok"):
+                    _att_list = _AT.sdk_attachments(_att_manifest)
+                    full_prompt = full_prompt + _AT.prompt_note(_att_manifest)
+                    self.log(f"  [attachments] phase '{phase.id}': sending "
+                             f"{len(_att_list)} attachment(s)")
+        except Exception as _ae:
+            msg = (f"ATTACHMENT: could not prepare the story attachments for this "
+                   f"phase ({type(_ae).__name__}: {_ae})")
+            self.log("  ! " + msg)
+            run.halt_detail = msg[:300]
+            return AgentResult(errored=True, error_msg=msg)
+
         async with CopilotClient(**client_kwargs) as client:
+            # The phase's model must accept the images (and their count, size and
+            # type) — checked against what the service reports for the model,
+            # before any model call. "auto" cannot be checked in advance.
+            if _att_manifest and any(i.get("kind") == "image"
+                                     for i in _att_manifest.get("items", [])):
+                if str(phase_model).lower() == "auto":
+                    self.log("  [attachments] WARNING: model is 'auto' — cannot confirm "
+                             "in advance that the chosen model accepts images. Pin a "
+                             "vision model for this phase in phase_models to be sure.")
+                else:
+                    _why = ""
+                    try:
+                        _info = {getattr(m, "id", None): m for m in await client.list_models()}
+                        _mi = _info.get(phase_model)
+                        _why = ("is not in this credential's model list" if _mi is None
+                                else _AT.check_vision(_mi, _att_manifest))
+                    except Exception as _ve:
+                        self.log(f"  [attachments] could not read model capabilities "
+                                 f"({type(_ve).__name__}) — continuing")
+                    if _why:
+                        msg = (f"ATTACHMENT: model '{phase_model}' {_why}. The story has "
+                               f"image attachments for phase '{phase.id}'. Set a model "
+                               f"that accepts images for this phase (phase_models / "
+                               f"review_model; check with list_models.py), or remove "
+                               f"'{phase.id}' from attachment_phases.")
+                        self.log("  ! " + msg)
+                        run.halt_detail = msg[:300]
+                        return AgentResult(errored=True, error_msg=msg)
+
             async with await client.create_session(
                 on_permission_request=on_permission_request,
                 model=phase_model,
@@ -1743,7 +1794,10 @@ class SdkAgentRunner:
                         done.set()
 
                 session.on(on_event)
-                await session.send(full_prompt)
+                if _att_list:
+                    await session.send(full_prompt, attachments=_att_list)
+                else:
+                    await session.send(full_prompt)
                 # guard against hanging forever if no terminal event arrives
                 try:
                     await asyncio.wait_for(done.wait(), timeout=300)

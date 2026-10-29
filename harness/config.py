@@ -496,6 +496,35 @@ class HarnessConfig:
     # Where the documentation phase records this story's answered questions.
     decisions_dir: str = "docs/decisions"
 
+    # ---- story attachments (see attachments.py) ----
+    # Folder holding the story's attachments on the story branch: design
+    # screenshots, error logs, requirement documents. {feature_id} is replaced.
+    # A missing or empty folder means "no attachments" — nothing changes.
+    attachments_dir: str = "stories/{feature_id}"
+    # Phases whose model receives the attachments with its prompt.
+    attachment_phases: list = field(default_factory=lambda: [
+        "context", "design", "prompt_steps", "coding", "code_review", "validation"])
+    # PII/PHI guard: scan the story and every attachment (text, converted
+    # Word/PDF, OCR text of images) before ANY model call, and halt on a match.
+    # ON by default. Set false only when the input is known to be mocked test
+    # data (the developer still ticks confirm_no_phi on the workflow).
+    attachment_pii_scan: bool = True
+    # Which identifier types the scan looks for: ssn, dob, phone, email.
+    attachment_pii_patterns: list = field(default_factory=lambda: [
+        "ssn", "dob", "phone", "email"])
+    # Exact values (case-insensitive) that are known-safe and never count as a
+    # match, e.g. a team mailbox or a published support number.
+    attachment_pii_allow: list = field(default_factory=list)
+    # Read text out of images (and images inside Word files) with OCR so the
+    # PII scan covers them. Needs Tesseract on the runner (the engine workflow
+    # installs it when the story has images). If OCR is on but unavailable, the
+    # run halts rather than sending an unscanned image.
+    attachment_ocr: bool = True
+    # Size limits, checked before any model call.
+    attachment_max_file_mb: float = 10.0
+    attachment_max_total_mb: float = 25.0
+    attachment_max_images: int = 10
+
     @classmethod
     def load(cls, harness_dir: Path, repo_root: Path | None = None) -> "HarnessConfig":
         p = harness_dir / "config.yaml"
@@ -573,6 +602,24 @@ class HarnessConfig:
                                                       cls.manage_copilot_instructions)),
             decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
                           or cls.decisions_dir,
+            attachments_dir=(str(data.get("attachments_dir", cls.attachments_dir)).strip().strip("/")
+                             or cls.attachments_dir),
+            attachment_phases=(list(data.get("attachment_phases"))
+                               if data.get("attachment_phases") is not None
+                               else cls().attachment_phases),
+            attachment_pii_scan=bool(data.get("attachment_pii_scan", cls.attachment_pii_scan)),
+            attachment_pii_patterns=([str(x).strip().lower()
+                                      for x in data.get("attachment_pii_patterns")]
+                                     if data.get("attachment_pii_patterns") is not None
+                                     else cls().attachment_pii_patterns),
+            attachment_pii_allow=[str(x) for x in (data.get("attachment_pii_allow") or [])],
+            attachment_ocr=bool(data.get("attachment_ocr", cls.attachment_ocr)),
+            attachment_max_file_mb=float(data.get("attachment_max_file_mb",
+                                                  cls.attachment_max_file_mb)),
+            attachment_max_total_mb=float(data.get("attachment_max_total_mb",
+                                                   cls.attachment_max_total_mb)),
+            attachment_max_images=int(data.get("attachment_max_images",
+                                               cls.attachment_max_images)),
             credit_source=(str(data.get("credit_source", cls.credit_source)).strip().lower()
                            if str(data.get("credit_source", cls.credit_source)).strip().lower()
                            in ("sdk", "account") else "sdk"),

@@ -135,6 +135,17 @@ on:
         required: false
         default: false
         type: boolean
+      confirm_no_phi:
+        description: >-
+          The developer's confirmation that the story and every attachment
+          contain no real PII or PHI (mocked test data only). The caller shows
+          it as a checkbox on the "Run workflow" form. Unticked (the default),
+          the run stops at its first step — before any checkout or model call.
+          Required on every run, including resumes. Recorded with the GitHub
+          login of whoever ran it (metrics + audit).
+        required: false
+        default: false
+        type: boolean
     secrets:
       COPILOT_GITHUB_TOKEN:
         description: >-
@@ -193,6 +204,19 @@ jobs:
       # autorun step (metrics) and collect-audit (audit folder) agree.
       - name: Set run stamp
         run: echo "HARNESS_RUN_STAMP=$(TZ=America/New_York date +%Y%m%d-%H%M%S%Z)" >> "$GITHUB_ENV"
+
+      # --- 0b. the developer's PII/PHI confirmation ---
+      # First real step, on purpose: an unticked run does nothing else — no
+      # checkout, no model call, no metrics. The engine checks the same value
+      # again before every model call (attachments.py), so a caller that skips
+      # this step still cannot reach a model without it.
+      - name: Confirm no PII/PHI in the input
+        run: |
+          if [ "${{ inputs.confirm_no_phi }}" != "true" ]; then
+            echo "::error title=Confirmation required::Tick 'I confirm the story and all attachments contain no real PII or PHI' on the Run workflow form, then run again. The harness has not started."
+            exit 1
+          fi
+          echo "PII/PHI confirmation given by ${{ github.actor }} (run ${{ github.run_id }})."
 
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
@@ -477,6 +501,23 @@ jobs:
           fi
           python resume.py "${ARGS[@]}"
 
+      # Story attachments: OCR so the input guard can scan images for PII.
+      # Installed only when the story has images or Word files and the scan +
+      # OCR are on (attachments.py needs-ocr). Without it the guard halts
+      # rather than send an unscanned image.
+      - name: Install OCR (story has images)
+        working-directory: engine/harness
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          NEED=$(python attachments.py needs-ocr --repo ../../service --feature "${{ inputs.feature_id }}" 2>/dev/null || echo false)
+          if [ "$NEED" = "true" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr >/dev/null \
+              && echo "Tesseract $(tesseract --version 2>&1 | head -1) installed for the PII scan." \
+              || echo "::warning title=OCR not installed::tesseract-ocr could not be installed; the input guard will halt on image attachments."
+          else
+            echo "No image attachments to scan (or OCR/scan off) — OCR not installed."
+          fi
+
       - name: Autorun (all phases)
         working-directory: engine/harness
         env:
@@ -495,6 +536,9 @@ jobs:
           HARNESS_RESUMED: ${{ inputs.resume }}
           HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
           HARNESS_TOOLKIT_PROPOSALS: ${{ inputs.toolkit_proposals }}
+          # The developer's PII/PHI checkbox — re-checked by the engine's input
+          # guard before every model call, and recorded in the metrics record.
+          HARNESS_CONFIRM_NO_PHI: ${{ inputs.confirm_no_phi }}
           # Branch the story is read from (and a resume re-reads it from) —
           # named in the clarification halt message.
           HARNESS_BASE_BRANCH: ${{ inputs.base != '' && inputs.base || github.ref_name }}
@@ -733,10 +777,15 @@ jobs:
           # folder instead, so the PR carries the code change only — except the
           # decision records, added below. artifacts/
           # is the old metrics-branch layout and must never reach a PR.
+          # The story's attachments folder (config attachments_dir) is input,
+          # not output: a resume refreshes it from the base branch, which would
+          # otherwise show up as a change here.
+          ATT_DIR=$(PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 "$GITHUB_WORKSPACE/engine/harness/attachments.py" dir --repo . --feature "$FEATURE" 2>/dev/null || echo "stories/$FEATURE")
+          ATT_DIR="${ATT_DIR:-stories/$FEATURE}"
           EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics'
                 ':(exclude)docs' ':(exclude)artifacts'
                 ':(exclude).github/skills' ':(exclude).github/instructions'
-                ':(exclude).github/story-context-files')
+                ':(exclude).github/story-context-files' ":(exclude)$ATT_DIR")
           git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/changed"
           # EXCEPT the decision records (config decisions_dir, default
           # docs/decisions): they must merge with the code, because the next
