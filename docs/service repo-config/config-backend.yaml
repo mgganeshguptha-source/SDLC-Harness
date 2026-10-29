@@ -287,6 +287,13 @@ load_copilot_instructions: true
 # removes more than 10% of the file is reverted). false => leave the file alone.
 manage_copilot_instructions: true
 
+# Add the harness entries to this repo's .gitignore on a fresh run when any are
+# missing, and fix a whole-folder ".harness/" line (which stops config.yaml from
+# ever being committed). Lines added, in a marked block:
+#   .harness/*   !.harness/config.yaml   audit/   metrics/
+# The change ships in the harness PR for review. false => leave .gitignore alone.
+manage_gitignore: true
+
 # Where recorded decisions live. Must stay under docs/ (the documentation
 # phase's write boundary). knowledge_paths are loaded into the phases listed in
 # knowledge_phases, newest first, up to knowledge_max_chars characters.
