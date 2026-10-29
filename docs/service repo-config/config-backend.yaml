@@ -294,3 +294,50 @@ decisions_dir: "docs/decisions"
 knowledge_paths: ["docs/decisions/*.md"]
 knowledge_phases: ["context", "design", "prompt_steps", "validation"]
 knowledge_max_chars: 40000
+
+
+# ------------------------------------------------------------ story attachments
+# Files the developer puts next to the story on the story branch: design
+# screenshots (frontend), error logs or requirement documents (backend). They
+# are sent to the phases below with the story. A missing or empty folder means
+# no attachments — nothing changes.
+#   accepted : .png .jpg .jpeg (.webp .gif if the model lists them), .docx
+#              (converted to Markdown + its images), .pdf (text; a scanned PDF
+#              halts — export its pages as PNG), .md .txt .log .json .yaml .yml
+#              .csv .xml
+#   refused  : .doc (save as .docx), .xlsx/.xls (save as .csv), .pptx, .zip,
+#              anything else — the run halts and says why.
+# {feature_id} is replaced, e.g. stories/OP018-6418/.
+attachments_dir: "stories/{feature_id}"
+
+# Phases whose model receives the attachments. Each listed phase's model must
+# accept images when there are images (checked before the call; "auto" cannot
+# be checked — pin a vision model). Check models with harness/list_models.py.
+attachment_phases: ["context", "design", "prompt_steps", "coding", "code_review", "validation"]
+
+# INPUT GUARD — deterministic Python, before ANY model call. The developer must
+# also tick confirm_no_phi on the workflow form (every run, incl. resumes).
+#   true  => scan the story, every text attachment, converted Word/PDF text and
+#            the OCR text of every image for the patterns below; any match
+#            halts the run (values are masked in the log). DEFAULT.
+#   false => no scan. Use only when ALL input is mocked test data — the
+#            developer's checkbox is then the only control.
+attachment_pii_scan: true
+
+# What the scan looks for: ssn, dob (a date labelled as date of birth), phone
+# (North American format), email. Member ID format: to be added later.
+attachment_pii_patterns: ["ssn", "dob", "phone", "email"]
+
+# Exact values that are known-safe and never count as a match (case-
+# insensitive), e.g. a team mailbox or a published support number.
+attachment_pii_allow: []
+
+# OCR images (and images inside Word files) so the scan covers them. The
+# engine workflow installs Tesseract when the story has images. If OCR is on
+# but unavailable, the run halts rather than send an unscanned image.
+attachment_ocr: true
+
+# Limits, checked before any model call.
+attachment_max_file_mb: 10
+attachment_max_total_mb: 25
+attachment_max_images: 10

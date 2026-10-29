@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Protocol
 
 from contracts import ExitCode, label
-from phases import PHASES, Phase, next_phase
+from phases import PHASES, Phase, PhaseKind, next_phase
 from state import RunState
 import halt_gates as HG
 
@@ -433,6 +433,14 @@ class StateMachine:
             _skip = phase.id in (_HCsk.load(self.harness_dir).skip_phases or [])
         except Exception:
             _skip = False
+        # ---- INPUT GUARD: before ANY model call ----
+        # The developer's confirm_no_phi checkbox, the PII scan of the story and
+        # its attachments, and the attachment type/size rules (attachments.py).
+        # Deterministic; a failure halts here, so nothing reaches a model.
+        if not _skip and phase.kind == PhaseKind.MODEL:
+            if self._input_guard(run, phase):
+                return run
+
         if _skip:
             self.log(f"  [harness] '{phase.id}' skipped by config (skip_phases) — "
                      f"no AI work; its gates still run.")
@@ -684,6 +692,11 @@ class StateMachine:
                                "kind, expiry, SSO authorisation and Copilot policy.")
                 elif any(s in _low for s in ("429", "rate limit", "quota")):
                     _action = "Rate limit or quota reached. Wait, then resume."
+                elif _low.startswith("attachment:"):
+                    _action = ("A story attachment could not be sent to this phase's "
+                               "model — see the Error line. Fix the model choice or the "
+                               "attachments (config.yaml on harness-wip/<feature_id> "
+                               "for a resume), then resume.")
                 else:
                     _action = ("Read the '[diag] ERROR EVENT' / 'SDK exception' lines "
                                "above for the cause.")
@@ -1310,6 +1323,53 @@ class StateMachine:
         run.halt_detail = f"unmapped exit code {int(code)}"
         run.save(self.harness_dir)
         return run
+
+    def _input_guard(self, run: RunState, phase: Phase) -> bool:
+        """Run the input guard for this phase. Returns True when it HALTED the run."""
+        import os
+        import attachments as AT
+        try:
+            from config import HarnessConfig as _HCig
+            cfg = _HCig.load(self.harness_dir)
+            res = AT.prepare(self.repo_root, cfg, run.feature_id, run.story, log=self.log)
+            send_here = phase.id in (cfg.attachment_phases or [])
+        except Exception as e:  # fail CLOSED
+            res = AT.GuardResult(ok=False, problems=[
+                f"the input guard could not run ({type(e).__name__}: {str(e)[:200]})"])
+            send_here = False
+
+        summary = res.summary()
+        summary["phase"] = phase.id
+        summary["actor"] = os.environ.get("GITHUB_ACTOR")
+        run.input_guard = summary
+        if res.ok:
+            run.attachments = [{k: it.get(k) for k in
+                                ("name", "kind", "bytes", "sha256", "source", "converted_from")}
+                               for it in res.items]
+            conf = {True: "yes", False: "NO", None: "n/a (not CI)"}[res.confirmed]
+            scan = ("on" if res.pii_scan else "OFF (attachment_pii_scan: false)")
+            self.log(f"  [input-guard] confirm_no_phi={conf} | PII scan {scan} | "
+                     f"story + {len(res.items)} attachment file(s) | findings 0")
+            if res.items:
+                where = "sent to this phase" if send_here else "not sent to this phase"
+                for it in res.items:
+                    frm = f" <- {it['source']}" if it.get("converted_from") else ""
+                    self.log(f"  [attachments] {it['name']} ({it['kind']}, {it['bytes']} B, "
+                             f"sha256 {it['sha256'][:12]}){frm} — {where}")
+            for n in res.notes:
+                self.log(f"  [input-guard] note: {n}")
+            return False
+
+        msg = AT.guard_message(res, run.feature_id, phase.id)
+        self.log(msg)
+        run.status = "halted"
+        run.halt_gate = HG.INPUT_GUARD
+        first = (str(res.findings[0]) if res.findings else
+                 (res.problems[0] if res.problems else "input guard"))
+        run.halt_detail = f"input guard: {first}"[:200]
+        run.last_feedback = msg
+        run.save(self.harness_dir)
+        return True
 
     def _halt_environment(self, run: RunState, phase: Phase, vr, reason, hint: str) -> None:
         """Halt on a build failure that no phase can fix, with a reason-specific

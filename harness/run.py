@@ -407,6 +407,22 @@ def cmd_collect_audit(args):
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)
 
+    # Story attachments: the guard's manifest (what was sent, by name/kind/size/
+    # sha256 — runner paths dropped). The files themselves stay on the story
+    # branch; the audit records exactly which versions the models saw.
+    try:
+        _am = hd / "attachments" / "manifest.json"
+        if _am.is_file():
+            import json as _json
+            _m = _json.loads(_am.read_text(encoding="utf-8"))
+            for _it in _m.get("items", []):
+                _it.pop("path", None)
+            (audit_dir / "attachments-manifest.json").write_text(
+                _json.dumps(_m, indent=2), encoding="utf-8")
+            copied.append("attachments-manifest.json")
+    except Exception:
+        pass
+
     # Coverage evidence: the JaCoCo report the coverage gate measured. It lives
     # under the module's target/ on the runner and is discarded with the job,
     # so keep the CSV (what the gate read) and the XML next to it.

@@ -58,7 +58,9 @@ from pathlib import Path
 # model the SDK reports as actually used (the configured one as fallback).
 # v4: story_path / story_sha256, clarification_items (question texts),
 # decisions_available (approved decision files the run could reuse).
-SCHEMA_VERSION = 4
+# v5: confirm_no_phi (workflow checkbox), input_guard (PII scan summary, no
+# values), attachments (name/kind/size/sha256 of files sent to models).
+SCHEMA_VERSION = 5
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -148,6 +150,15 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         # the same hash as the previous run means nobody answered the questions.
         "story_path": getattr(run, "story_path", None),
         "story_sha256": getattr(run, "story_sha256", None),
+
+        # --- input guard (schema 5) ---
+        # The developer's confirm_no_phi checkbox, whether the PII scan ran, and
+        # how many findings (types only — never values). Attachments: what was
+        # sent to models, by name, kind, size and hash.
+        "confirm_no_phi": (_env("HARNESS_CONFIRM_NO_PHI") == "true"
+                           if _env("HARNESS_CONFIRM_NO_PHI") is not None else None),
+        "input_guard": dict(getattr(run, "input_guard", None) or {}) or None,
+        "attachments": list(getattr(run, "attachments", None) or []),
 
         # --- flow ---
         "phases_run": len(getattr(run, "completed_phases", None) or []),

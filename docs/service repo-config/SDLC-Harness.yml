@@ -22,6 +22,16 @@ on:
         required: false
         default: false
         type: boolean
+      confirm_no_phi:
+        description: "I confirm the story and all attachments contain no real PII or PHI (mocked test data only). Required — the harness will not start without it."
+        # Shown as a checkbox, unticked by default. Must be ticked on EVERY run,
+        # including resumes. Recorded with your GitHub login in the run's
+        # metrics and audit. The engine also scans the story and attachments
+        # for SSN / date of birth / phone / email (attachment_pii_scan in
+        # .harness/config.yaml) and halts before any model call on a match.
+        required: true
+        default: false
+        type: boolean
 #      start_phase:
 #        description: "Resume only — phase to re-enter at. Blank = where it halted."
 #        required: false
@@ -77,6 +87,7 @@ jobs:
       python-version: "3.13"
       node-version: "22"   # Node 20 is deprecated on GitHub runners
       resume: ${{ inputs.resume }}
+      confirm_no_phi: ${{ inputs.confirm_no_phi }}
 #      start_phase: ${{ inputs.start_phase }}
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the
       # repo and @ref in `uses:` above — they are the engine code the job checks
