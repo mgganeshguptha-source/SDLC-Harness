@@ -146,6 +146,9 @@ class PhaseExecutor:
                 _dd = "docs/decisions"
             if _dd and _dd not in _dirs:
                 _dirs.append(_dd)
+        # Contract hand-off (handoff.py): the folder the contract is written to.
+        if phase.id in ("documentation", "contract") and ".harness/contract" not in _dirs:
+            _dirs.append(".harness/contract")
         for d in _dirs:
             target = self.repo_root / d
             try:

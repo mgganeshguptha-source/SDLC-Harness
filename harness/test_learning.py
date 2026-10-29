@@ -211,7 +211,7 @@ def test_documentation_prompt_asks_for_decisions_and_proposals():
     from sdk_runner import _phase_instruction
     with tempfile.TemporaryDirectory() as d:
         repo = _service(d)
-        run = RunState(feature_id="OP018-6418", story="s", current_phase="documentation")
+        run = RunState(feature_id="OP018-6418", story="s\n**Requires a new or changed contract from:** None", current_phase="documentation")
         run.story_path, run.story_sha256 = "stories/OP018-6418-story.md", "ab" * 32
         os.environ.pop("HARNESS_TOOLKIT_PROPOSALS", None)
         prompt = _phase_instruction(phase_by_id("documentation"), run, repo)
@@ -276,7 +276,7 @@ def test_earlier_questions_reach_context_and_documentation_prompts():
             prompt = _phase_instruction(phase_by_id(pid), run, repo)
             assert "round 1: [NEEDS CLARIFICATION]: CL-1 — Unknown status?" in prompt
             assert "Response to clarification" in prompt
-        fresh = RunState(feature_id="X", story="s", current_phase="context")
+        fresh = RunState(feature_id="X", story="s\n**Requires a new or changed contract from:** None", current_phase="context")
         assert "EARLIER ROUNDS" not in _phase_instruction(phase_by_id("context"), fresh, repo)
 
 
@@ -373,7 +373,7 @@ def test_documentation_final_line_allows_copilot_instructions():
     from sdk_runner import _phase_instruction
     with tempfile.TemporaryDirectory() as d:
         repo = _service(d)
-        run = RunState(feature_id="F-1", story="s", current_phase="documentation")
+        run = RunState(feature_id="F-1", story="s\n**Requires a new or changed contract from:** None", current_phase="documentation")
         prompt = _phase_instruction(phase_by_id("documentation"), run, repo)
         last = prompt.strip().splitlines()[-1]
         assert "copilot-instructions.md" in last, last

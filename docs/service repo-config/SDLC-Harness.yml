@@ -22,6 +22,16 @@ on:
         required: false
         default: false
         type: boolean
+      contract_only:
+        description: "Contract only: write the hand-off contract for a change already on contract_branch (no code, no PR). base = the branch that change was made against."
+        required: false
+        default: false
+        type: boolean
+      contract_branch:
+        description: "Contract only: branch holding the finished change (e.g. the approved harness PR branch)."
+        required: false
+        default: ""
+        type: string
       confirm_no_phi:
         description: "I confirm the story and all attachments contain no real PII or PHI (mocked test data only). Required — the harness will not start without it."
         # Shown as a checkbox, unticked by default. Must be ticked on EVERY run,
@@ -88,6 +98,8 @@ jobs:
       node-version: "22"   # Node 20 is deprecated on GitHub runners
       resume: ${{ inputs.resume }}
       confirm_no_phi: ${{ inputs.confirm_no_phi }}
+      contract_only: ${{ inputs.contract_only }}
+      contract_branch: ${{ inputs.contract_branch }}
 #      start_phase: ${{ inputs.start_phase }}
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the
       # repo and @ref in `uses:` above — they are the engine code the job checks

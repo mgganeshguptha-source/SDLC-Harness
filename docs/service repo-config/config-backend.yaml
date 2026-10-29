@@ -235,7 +235,7 @@ phase_skills:
   code_review:   ["security-review"]
   unit_testing:  []
   validation:    ["build-validation"]
-  documentation: []
+  documentation: ["build-contract"]   # contract hand-off for the next story
   raise_pr:      []
 
 
@@ -348,3 +348,26 @@ attachment_ocr: true
 attachment_max_file_mb: 10
 attachment_max_total_mb: 25
 attachment_max_images: 10
+
+
+# ------------------------------------------------- contract hand-off (handoff.py)
+# For a requirement split into stories in different repos. Every story must have
+# the line (checked before any model call; the run halts without it):
+#   **Requires a new or changed contract from:** None
+#     None            = this story does not need a changed contract
+#     <upstream-repo> = upstream repo name (for example: dx_mpa_responsive) if this
+#                       story needs a changed contract (API, store, event, schema,
+#                       config). When a repo is named, attach its contract file
+#                       (contract-<repo>.md) in stories/<feature_id>/.
+dependency_gate: true
+
+# When this story's change touches contract files, the documentation phase writes
+# contract-<repo>.md (+ sample-<repo>.json) for the next story. It is PII-scanned
+# and published to harness-metrics only (audit folder + contracts/<feature_id>/),
+# never into the PR. Built-in contract files: backend controllers, *Request /
+# *Response / *Dto, OpenAPI; Angular *.actions / *.reducer / *.selectors /
+# *.effects / *.state / *.model.ts and *bridge*.ts.
+contract_handoff: true
+
+# Extra contract files for this repo's layout, if the built-in patterns miss them.
+contract_files: []

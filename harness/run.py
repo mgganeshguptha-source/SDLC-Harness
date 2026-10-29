@@ -421,6 +421,24 @@ def cmd_collect_audit(args):
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)
 
+    # Contract hand-off (handoff.py): the contract this run produced for the
+    # next story. Kept in the run's audit folder AND at a fixed place,
+    # contracts/<feature_id>/, so the downstream developer finds the latest one
+    # without knowing the run label. Both live on harness-metrics only.
+    try:
+        _cd = hd / "contract"
+        _out = getattr(run, "contract_output", None) or {}
+        if _cd.is_dir() and _out.get("status") == "published":
+            _fixed = repo / "contracts" / feature
+            _fixed.mkdir(parents=True, exist_ok=True)
+            for _f in sorted(_cd.iterdir()):
+                if _f.is_file() and (_f.name.startswith("contract-") or _f.name.startswith("sample-")):
+                    shutil.copy2(_f, audit_dir / _f.name)
+                    shutil.copy2(_f, _fixed / _f.name)
+                    copied.append(_f.name)
+    except Exception as _e:
+        print(f"  (contract not kept: {type(_e).__name__}: {_e})")
+
     # Story attachments: the guard's manifest (what was sent, by name/kind/size/
     # sha256 — runner paths dropped). The files themselves stay on the story
     # branch; the audit records exactly which versions the models saw.
@@ -510,6 +528,83 @@ def cmd_collect_audit(args):
     print(f"Collected audit trail into audit/{feature}/{label}/:")
     for c in copied:
         print(f"  - {c}")
+
+
+def cmd_contract(args):
+    """CONTRACT-ONLY MODE: write the hand-off contract for a change that is
+    already on the checked-out branch (e.g. an approved harness PR branch),
+    without writing code or raising a PR. One read-only model session, then the
+    same stamp + PII scan + publish as a normal run (handoff.py).
+
+    Exit 0 when a contract was published or nothing needed one; 1 otherwise."""
+    import os
+    import handoff as HO
+    from phases import Phase, PhaseKind
+    from config import HarnessConfig
+    from contracts import ExitCode
+
+    repo = Path(args.repo).resolve()
+    cmd_init(args)                       # story + fresh run-state (+ .gitignore, not pushed)
+    hd = _harness_dir(repo)
+    run = _load(repo)
+    cfg = HarnessConfig.load(hd, repo_root=repo)
+    run.current_phase = "contract"
+
+    base_ref = f"origin/{args.base}" if args.base and "/" not in args.base else (args.base or "")
+    changed = HO.changed_since_base(repo, base_ref) if base_ref else []
+    run.changed_main_files = changed
+    boundary = HO.boundary_files(changed, cfg)
+    print(f"  [contract] {len(changed)} file(s) changed since {base_ref or '(no base)'}; "
+          f"contract files: {', '.join(boundary) or '(none)'}")
+
+    def _finish(status: str, gate=None, detail=None) -> None:
+        run.status = status
+        run.halt_gate = gate
+        run.halt_detail = detail
+        run.save(hd)
+        try:
+            import metrics as _metrics
+            _metrics.emit(run, repo, cfg)
+        except Exception:
+            pass
+
+    if not boundary:
+        HO.finalize(repo, cfg, run, [], log=print)
+        print("::notice title=No contract needed::The change on this branch touches no "
+              "contract files (built-in patterns + contract_files). Nothing published.")
+        _finish("done")
+        return
+
+    # The story and attachments go to the model: same input guard as a run.
+    import attachments as AT
+    guard = AT.prepare(repo, cfg, run.feature_id, run.story, log=print)
+    run.input_guard = guard.summary()
+    if not guard.ok:
+        print(AT.guard_message(guard, run.feature_id, "contract"))
+        import halt_gates as HG
+        _finish("halted", HG.INPUT_GUARD, "input guard")
+        sys.exit(1)
+
+    from sdk_runner import SdkAgentRunner, DEFAULT_MODEL
+    from executor import PhaseExecutor
+    phase = Phase(id="contract", title="Contract hand-off (contract-only run)",
+                  kind=PhaseKind.MODEL, allowed_writes=(".harness/**",),
+                  required_artifact=None, human_gate=False, max_iterations=4)
+    executor = PhaseExecutor(SdkAgentRunner(model=getattr(args, "model", None) or DEFAULT_MODEL),
+                             repo_root=repo, harness_dir=hd)
+    print(f"\n=== Phase 'contract' : {phase.title} ===")
+    code = executor.run_phase(phase, run)
+    if code != ExitCode.OK:
+        import halt_gates as HG
+        _finish("halted", HG.from_exit_code(code), f"contract phase: {code.name}")
+        print(f"::error title=Contract run failed::{code.name}")
+        sys.exit(1)
+    info = HO.finalize(repo, cfg, run, boundary, log=print)
+    if info.get("status") != "published":
+        _finish("halted", "other", f"contract {info.get('status')}")
+        print(f"::error title=Contract not published::status {info.get('status')}")
+        sys.exit(1)
+    _finish("done")
 
 
 def cmd_status(args):
@@ -628,6 +723,15 @@ def main():
     par = sub.add_parser("autorun"); par.add_argument("--repo", required=True)
     par.add_argument("--model", default=None, help="override the model string")
     par.set_defaults(func=cmd_autorun)
+
+    pct = sub.add_parser("contract", help="contract-only run on the checked-out branch")
+    pct.add_argument("--repo", required=True)
+    pct.add_argument("--feature", required=True)
+    pct.add_argument("--base", required=True,
+                     help="branch the change was made against (e.g. the story branch)")
+    pct.add_argument("--story", default=None)
+    pct.add_argument("--model", default=None)
+    pct.set_defaults(func=cmd_contract)
 
     pca = sub.add_parser("collect-audit"); pca.add_argument("--repo", required=True)
     pca.set_defaults(func=cmd_collect_audit)

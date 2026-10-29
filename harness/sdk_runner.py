@@ -1336,6 +1336,15 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
             f"above) {_repo_instr}."
         ),
+        # Contract-only mode (run.py contract): no code is written; the change is
+        # already on this branch. One read-only session writes the hand-off.
+        "contract": (
+            f"CONTRACT-ONLY RUN. The change for this story is ALREADY on this branch; "
+            f"do NOT change any source, test, config or doc file. Read the changed "
+            f"files and write the hand-off contract described below for:\n"
+            f"  STORY: {story}\n"
+            f"Write ONLY under {rr}/.harness/contract/."
+        ),
         "raise_pr": (
             f"Summarize the change for a pull request body and write it to "
             f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
@@ -1356,6 +1365,20 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"{sorted(base)}"
         )
     base = base[phase.id]
+
+    # Contract hand-off (handoff.py): when this change touches files that form
+    # a contract other repos rely on, the documentation phase (or the
+    # contract-only run) also writes the contract for the next story.
+    if phase.id in ("documentation", "contract"):
+        try:
+            import handoff as _HO
+            from config import HarnessConfig as _HCho
+            _cfgho = _HCho.load(repo_root / ".harness", repo_root=repo_root)
+            if getattr(_cfgho, "contract_handoff", True) or phase.id == "contract":
+                _bnd = _HO.boundary_files(getattr(run, "changed_main_files", None) or [], _cfgho)
+                base += _HO.prompt_block(repo_root, _bnd)
+        except Exception:
+            pass
 
     out = base
     if run.last_feedback and run.approvals.get(phase.id) == "rejected":

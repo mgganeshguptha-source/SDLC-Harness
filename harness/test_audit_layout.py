@@ -72,7 +72,7 @@ def test_documentation_phase_creates_decisions_dir(tmp_path):
 
     doc = next(p for p in phases.PHASES if p.id == "documentation")
     ex = executor.PhaseExecutor(Runner(), tmp_path, tmp_path / ".harness", log=lambda *_: None)
-    run = RunState(feature_id="F-1", story="s", current_phase="documentation")
+    run = RunState(feature_id="F-1", story="s\n**Requires a new or changed contract from:** None", current_phase="documentation")
     try:
         ex.run_phase(doc, run)
     except Stop:

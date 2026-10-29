@@ -135,6 +135,23 @@ on:
         required: false
         default: false
         type: boolean
+      contract_only:
+        description: >-
+          CONTRACT-ONLY run (handoff.py): write the hand-off contract for a change
+          that is ALREADY on contract_branch (e.g. an approved harness PR branch),
+          then publish it to harness-metrics. No code is written, no PR is raised,
+          no working branch is pushed. base must name the branch that change was
+          made against (the story branch).
+        required: false
+        default: false
+        type: boolean
+      contract_branch:
+        description: >-
+          contract_only only: the branch holding the finished change (e.g.
+          harness/<feature>/<actor>-<date>-<run>).
+        required: false
+        default: ""
+        type: string
       confirm_no_phi:
         description: >-
           The developer's confirmation that the story and every attachment
@@ -228,7 +245,7 @@ jobs:
         with:
           path: service
           fetch-depth: 0
-          ref: ${{ inputs.resume && format('harness-wip/{0}', inputs.feature_id) || (inputs.base != '' && inputs.base) || github.ref }}
+          ref: ${{ (inputs.contract_only && inputs.contract_branch) || (inputs.resume && format('harness-wip/{0}', inputs.feature_id)) || (inputs.base != '' && inputs.base) || github.ref }}
 
       - name: Verify resume state
         if: inputs.resume
@@ -463,7 +480,7 @@ jobs:
       # `init` WIPES run-state.json, so it must not run when resuming — that was
       # the whole reason a halted run could only ever start over.
       - name: Initialize run (fresh runs only)
-        if: ${{ !inputs.resume }}
+        if: ${{ !inputs.resume && !inputs.contract_only }}
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -481,7 +498,7 @@ jobs:
       # clarifications: on a resume at context the edited story replaces the one
       # captured when the run started (otherwise the same questions come back).
       - name: Rewind state (resume only)
-        if: inputs.resume
+        if: ${{ inputs.resume && !inputs.contract_only }}
         working-directory: engine/harness
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
@@ -518,7 +535,30 @@ jobs:
             echo "No image attachments to scan (or OCR/scan off) — OCR not installed."
           fi
 
+      # Contract-only mode: one read-only session writes the hand-off contract
+      # for the change already on contract_branch; handoff.py stamps, scans and
+      # stages it, and the publish step puts it on harness-metrics.
+      - name: Contract only (contract_only)
+        if: inputs.contract_only
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
+          HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
+          HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
+          HARNESS_CONFIRM_NO_PHI: ${{ inputs.confirm_no_phi }}
+          HARNESS_BASE_BRANCH: ${{ inputs.base != '' && inputs.base || github.ref_name }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          if [ -z "${{ inputs.contract_branch }}" ] || [ -z "${{ inputs.base }}" ]; then
+            echo "::error title=Contract-only run::Set contract_branch (the branch with the finished change) and base (the branch it was made against)."
+            exit 1
+          fi
+          python run.py contract --repo ../../service \
+            --feature "${{ inputs.feature_id }}" --base "${{ inputs.base }}"
+
       - name: Autorun (all phases)
+        if: ${{ !inputs.contract_only }}
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -595,7 +635,7 @@ jobs:
       # with resume=true. Their commit and the harness's output then share one
       # lineage instead of racing on separate branches.
       - name: Push working branch (always)
-        if: always() && hashFiles('engine/harness/run.py') != ''
+        if: always() && hashFiles('engine/harness/run.py') != '' && !inputs.contract_only
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -619,7 +659,7 @@ jobs:
           # harness-metrics (step 8a). Build output is excluded by the repo's own
           # .gitignore; the mvnw shim is hidden by assume-unchanged (step 3c).
           git add -A
-          git reset -q -- .harness audit metrics \
+          git reset -q -- .harness audit metrics contracts \
             .github/skills .github/instructions .github/story-context-files 2>/dev/null || true
           # The WIP branch is the resume point and MUST carry run-state.json, or
           # `resume=true` fails with "no run-state.json". Each file is force-added
@@ -702,11 +742,14 @@ jobs:
 
           [ -d metrics ] && mkdir -p "$MDIR/metrics" && cp -r metrics/. "$MDIR/metrics/"
           [ -d audit ]   && mkdir -p "$MDIR/audit"   && cp -r audit/.   "$MDIR/audit/"
+          # Contract hand-off: the latest contract per feature, at a fixed path
+          # the downstream developer copies from (handoff.py).
+          [ -d contracts ] && mkdir -p "$MDIR/contracts" && cp -r contracts/. "$MDIR/contracts/"
 
           cd "$MDIR"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          git add metrics audit 2>/dev/null
+          git add metrics audit contracts 2>/dev/null
           if git diff --cached --quiet; then
             echo "No new metrics or audit to publish."
           else
@@ -738,7 +781,7 @@ jobs:
       # changed, against the branch it will merge into — nothing else.
       - name: Open pull request with the change (success only)
         id: raise_pr
-        if: success()
+        if: success() && !inputs.contract_only
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -782,7 +825,7 @@ jobs:
           # otherwise show up as a change here.
           ATT_DIR=$(PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 "$GITHUB_WORKSPACE/engine/harness/attachments.py" dir --repo . --feature "$FEATURE" 2>/dev/null || echo "stories/$FEATURE")
           ATT_DIR="${ATT_DIR:-stories/$FEATURE}"
-          EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics'
+          EXCL=(':(exclude).harness' ':(exclude)audit' ':(exclude)metrics' ':(exclude)contracts'
                 ':(exclude)docs' ':(exclude)artifacts'
                 ':(exclude).github/skills' ':(exclude).github/instructions'
                 ':(exclude).github/story-context-files' ":(exclude)$ATT_DIR")
@@ -808,7 +851,7 @@ jobs:
           fi
 
           # 4) Safety net: never let run workspace / audit / metrics be staged.
-          git reset -q -- .harness audit metrics docs artifacts 2>/dev/null || true
+          git reset -q -- .harness audit metrics contracts docs artifacts 2>/dev/null || true
           if [ -d "$DEC_DIR" ]; then git add -- "$DEC_DIR"; fi
 
           # 5) Nothing to commit means the run produced no code change — do not
@@ -853,7 +896,7 @@ jobs:
       # PR already touches the same files, the proposal is added to it as a
       # comment instead of opening another PR.
       - name: Propose toolkit change (optional)
-        if: success() && inputs.toolkit_proposals
+        if: success() && inputs.toolkit_proposals && !inputs.contract_only
         continue-on-error: true
         env:
           TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
