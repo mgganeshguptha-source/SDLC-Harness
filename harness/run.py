@@ -78,6 +78,20 @@ def cmd_init(args):
     run.started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     run.actor = os.environ.get("GITHUB_ACTOR")
     run.save(hd)
+
+    # Keep harness working files out of merged branches: add any missing
+    # .gitignore entries (fresh runs only; the change ships in the PR).
+    try:
+        from config import HarnessConfig as _HCg
+        if _HCg.load(hd).manage_gitignore:
+            from gitignore import ensure as _ensure_gitignore
+            _added = _ensure_gitignore(repo)
+            if _added:
+                print(f"::notice title=.gitignore updated::Added {', '.join(_added)} "
+                      f"to .gitignore — review it in the harness PR.")
+    except Exception as _e:
+        print(f"  [gitignore] skipped ({type(_e).__name__}: {_e})")
+
     print(f"Initialized run for '{args.feature}' at {hd}")
     print(f"First phase: {run.current_phase}")
 

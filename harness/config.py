@@ -493,6 +493,11 @@ class HarnessConfig:
     # repo_instructions phase), and let the documentation phase add the
     # service rules this story established to it.
     manage_copilot_instructions: bool = True
+    # Add the harness entries to the service repo's .gitignore on a fresh run
+    # when any are missing (.harness/*, !.harness/config.yaml, audit/,
+    # metrics/), and fix a whole-folder `.harness/` line. The change ships in
+    # the harness PR. false => leave .gitignore alone.
+    manage_gitignore: bool = True
     # Where the documentation phase records this story's answered questions.
     decisions_dir: str = "docs/decisions"
 
@@ -600,6 +605,7 @@ class HarnessConfig:
             knowledge_max_chars=int(data.get("knowledge_max_chars", cls.knowledge_max_chars)),
             manage_copilot_instructions=bool(data.get("manage_copilot_instructions",
                                                       cls.manage_copilot_instructions)),
+            manage_gitignore=bool(data.get("manage_gitignore", cls.manage_gitignore)),
             decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
                           or cls.decisions_dir,
             attachments_dir=(str(data.get("attachments_dir", cls.attachments_dir)).strip().strip("/")
