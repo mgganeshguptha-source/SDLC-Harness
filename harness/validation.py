@@ -35,6 +35,7 @@ class ValidationResult:
     # what a human should do about it. The state machine prints these in the halt
     # message so the operator is not told to chmod mvnw for a network problem.
     #   env_reason: "toolchain" | "dependency" | "network_auth" | "unattributable"
+    #               | "npm_peer_conflict" | "npm_install" | "browser"
     env_reason: str | None = None
     env_hint: str = ""
     # Coverage detail (populated when the coverage gate ran), for messaging.
@@ -305,9 +306,15 @@ _TOOLCHAIN_SIGNATURES = (
 # npm could not install packages (backlog B4): registry unreachable, a package or
 # version that does not exist there, or an unresolvable peer-dependency tree.
 # The code phases cannot fix any of these.
+# ERESOLVE is split out: it is not a missing package but a peer-dependency
+# conflict that npm 7+ refuses by default (observed at BCBSM, dx_mycoverage-ui:
+# primeng@17 declares Angular 17/18 peers in an Angular 19 app). The fix is a
+# flag or a dependency upgrade, not network access, so it gets its own hint.
+_NPM_PEER_SIGNATURES = (
+    "npm err! code eresolve", "npm error code eresolve",
+)
 _NPM_SIGNATURES = (
     "npm err! code e404", "npm error code e404",
-    "npm err! code eresolve", "npm error code eresolve",
     "npm err! code etarget", "npm error code etarget",
     "npm err! code enotfound", "npm error code enotfound",
     "npm err! code e401", "npm error code e401",
@@ -368,6 +375,34 @@ _HINTS = {
         "           jacoco:report'), then resume from unit_testing. Angular: run the\n"
         "           tests with --code-coverage and a json-summary reporter, or set\n"
         "           min_coverage: 0."),
+    "npm_peer_conflict": (
+        "npm refused to install: a package's declared peer dependencies do not\n"
+        "           match the versions in package.json (npm ERESOLVE). The code was\n"
+        "           never compiled, so no phase can fix this. The npm output above\n"
+        "           names the package and the peer range it expects. Fix one of:\n"
+        "             - install the way the developers do: add --legacy-peer-deps\n"
+        "               (or --force) to the npm install in test_command in\n"
+        "               .harness/config.yaml — on the harness-wip/<feature> branch\n"
+        "               for a resume, and on the base branch for later runs;\n"
+        "             - or upgrade the package to a version that supports this\n"
+        "               framework version (a team decision);\n"
+        "             - or commit a package-lock.json / an .npmrc with\n"
+        "               legacy-peer-deps=true so CI installs like a developer.\n"
+        "           Then resume."),
+    "npm_install": (
+        "npm could not install the packages (package or version not found, or\n"
+        "           the registry could not be reached or refused access). The code\n"
+        "           was never compiled, so no phase can fix this. Read the npm error\n"
+        "           code above: E404/ETARGET = the package or version is not on the\n"
+        "           registry in test_command (a private package needs that registry\n"
+        "           and a token, e.g. via .npmrc and a secret); ENOTFOUND = registry\n"
+        "           unreachable from the runner; E401/E403 = credentials missing or\n"
+        "           refused. Fix it, then resume."),
+    "browser": (
+        "The test browser (headless Chrome) could not start, so no spec ran.\n"
+        "           No phase can fix this. On a GitHub-hosted runner Chrome is\n"
+        "           installed; in a container running as root use\n"
+        "           --browsers=ChromeHeadlessNoSandbox in test_command. Then resume."),
     "unattributable": (
         "The build failed the same way again after a phase changed the code, and\n"
         "           the failure names no source file, no test and no compile error —\n"
@@ -452,10 +487,12 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
         return "dependency"
     if any(s in low for s in _FORK_START_SIGNATURES):
         return "toolchain"
+    if any(s in low for s in _NPM_PEER_SIGNATURES):
+        return "npm_peer_conflict"
     if any(s in low for s in _NPM_SIGNATURES):
-        return "dependency"
+        return "npm_install"
     if any(s in low for s in _BROWSER_START_SIGNATURES):
-        return "toolchain"
+        return "browser"
     if any(s in low for s in _NETWORK_AUTH_SIGNATURES) and not _lifecycle_started(low):
         return "network_auth"
     if any(s in low for s in _TOOLCHAIN_SIGNATURES) and not _lifecycle_started(low):
@@ -591,6 +628,9 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             "toolchain": "build tool could not start",
             "dependency": "a parent POM, dependency or plugin could not be resolved",
             "network_auth": "a repository could not be reached or refused access",
+            "npm_peer_conflict": "npm peer-dependency conflict (ERESOLVE) — packages were not installed",
+            "npm_install": "npm could not install the packages",
+            "browser": "the test browser (headless Chrome) could not start",
         }
         summary = (f"ENVIRONMENT FAILURE (exit {proc.returncode}) — "
                    f"{_labels.get(_env, 'build did not run')}")
