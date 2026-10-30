@@ -125,7 +125,7 @@ def _sm(ex, hd, validator=_pass_validator):
 
 def _new_run():
     return RunState(feature_id="PC-1",
-                    story="Add getFullName() to Owner",
+                    story="Add getFullName() to Owner\n**Requires a new or changed contract from:** None",
                     current_phase=PHASES[0].id)
 
 

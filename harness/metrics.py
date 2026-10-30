@@ -60,7 +60,9 @@ from pathlib import Path
 # decisions_available (approved decision files the run could reuse).
 # v5: confirm_no_phi (workflow checkbox), input_guard (PII scan summary, no
 # values), attachments (name/kind/size/sha256 of files sent to models).
-SCHEMA_VERSION = 5
+# v6: dependencies (the story's contract line + upstream contracts attached),
+# contract_output (contract produced for downstream stories: status, file).
+SCHEMA_VERSION = 6
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -159,6 +161,10 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
                            if _env("HARNESS_CONFIRM_NO_PHI") is not None else None),
         "input_guard": dict(getattr(run, "input_guard", None) or {}) or None,
         "attachments": list(getattr(run, "attachments", None) or []),
+
+        # --- contract hand-off (schema 6) ---
+        "dependencies": dict(getattr(run, "dependencies", None) or {}) or None,
+        "contract_output": dict(getattr(run, "contract_output", None) or {}) or None,
 
         # --- flow ---
         "phases_run": len(getattr(run, "completed_phases", None) or []),

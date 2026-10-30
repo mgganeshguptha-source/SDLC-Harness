@@ -48,6 +48,12 @@ MANUAL_CHANGE_REQUIRED = "manual_change_required"
 # or an attachment the harness cannot send (unsupported type, too large, a
 # scanned PDF, OCR unavailable). Nothing was sent to a model.
 INPUT_GUARD = "input_guard"
+# The story has no (or an unfilled) "**Requires a new or changed contract
+# from:**" line. Mandatory in every story; None is a valid value.
+DEPENDENCIES_MISSING = "dependencies_missing"
+# The story names an upstream repo but its contract file is not attached, or
+# the attached contract was produced by a different repo (handoff.py).
+CONTRACT_MISSING = "contract_missing"
 
 # --- gates that stopped the run because OUR PLUMBING failed ---
 SDK_ERROR = "sdk_error"              # auth, network, Copilot CLI
@@ -59,8 +65,8 @@ OTHER = "other"                      # unmapped; halt_detail carries the text
 HALT_GATES = frozenset({
     CLARIFICATION, FEASIBILITY, WRITE_BOUNDARY, SCOPE, CODE_REVIEW,
     COVERAGE, TEST_BUILD, AC_CONFORMANCE, ARTIFACT_MISSING, ITERATION_CAP,
-    PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, INPUT_GUARD, SDK_ERROR, CONFIG_ERROR,
-    OTHER,
+    PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, INPUT_GUARD, DEPENDENCIES_MISSING,
+    CONTRACT_MISSING, SDK_ERROR, CONFIG_ERROR, OTHER,
 })
 
 # Halts caused by our own plumbing rather than by the work being unacceptable.
@@ -82,6 +88,8 @@ LABELS = {
     PHASE_RUN_CAP: "Phase re-entered too many times",
     MANUAL_CHANGE_REQUIRED: "A human must make a change the harness cannot",
     INPUT_GUARD: "Story or attachment blocked by the input guard (PII/PHI, type, size)",
+    DEPENDENCIES_MISSING: "Story has no 'Requires a new or changed contract from' line",
+    CONTRACT_MISSING: "Upstream contract not attached (or wrong one attached)",
     SDK_ERROR: "Infrastructure or authentication failure",
     CONFIG_ERROR: "Configuration error",
     OTHER: "Unclassified halt",

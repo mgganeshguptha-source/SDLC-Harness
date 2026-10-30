@@ -438,6 +438,8 @@ class StateMachine:
         # its attachments, and the attachment type/size rules (attachments.py).
         # Deterministic; a failure halts here, so nothing reaches a model.
         if not _skip and phase.kind == PhaseKind.MODEL:
+            if self._dependency_gate(run, phase):
+                return run
             if self._input_guard(run, phase):
                 return run
 
@@ -448,6 +450,12 @@ class StateMachine:
         else:
             code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        # Contract hand-off: the documentation phase wrote the contract for the
+        # next story (when the change touched contract files). Stamp, PII-scan
+        # and stage it for harness-metrics; never fails the run.
+        if phase.id == "documentation" and code == ExitCode.OK:
+            self._finalize_contract(run)
 
         if _ri_before is not None:
             try:
@@ -1323,6 +1331,53 @@ class StateMachine:
         run.halt_detail = f"unmapped exit code {int(code)}"
         run.save(self.harness_dir)
         return run
+
+    def _dependency_gate(self, run: RunState, phase: Phase) -> bool:
+        """The story's mandatory contract line and its attached upstream
+        contracts (handoff.py). Returns True when it HALTED the run."""
+        import handoff as HO
+        try:
+            from config import HarnessConfig as _HCdg
+            cfg = _HCdg.load(self.harness_dir)
+            if not getattr(cfg, "dependency_gate", True):
+                return False
+            res = HO.check_dependencies(self.repo_root, cfg, run.feature_id, run.story)
+        except Exception as e:
+            res = HO.DepResult(ok=False, gate=HG.DEPENDENCIES_MISSING,
+                               problems=[f"the dependency check could not run ({e})"])
+        run.dependencies = res.summary()
+        if res.ok:
+            req = res.requirement
+            if req is not None and req.status == "repos":
+                self.log(f"  [dependencies] needs a changed contract from: "
+                         f"{', '.join(req.repos)} — attached: "
+                         f"{', '.join(c['file'] for c in res.contracts) or '(none)'}")
+            elif req is not None:
+                self.log("  [dependencies] Requires a new or changed contract from: None")
+            for w in res.warnings:
+                self.log(f"  [dependencies] warning: {w}")
+            return False
+        msg = HO.gate_message(res, run.feature_id)
+        self.log(msg)
+        run.status = "halted"
+        run.halt_gate = res.gate or HG.DEPENDENCIES_MISSING
+        run.halt_detail = (res.problems[0] if res.problems else "dependencies")[:200]
+        run.last_feedback = msg
+        run.save(self.harness_dir)
+        return True
+
+    def _finalize_contract(self, run: RunState) -> None:
+        import handoff as HO
+        try:
+            from config import HarnessConfig as _HCfc
+            cfg = _HCfc.load(self.harness_dir)
+            if not getattr(cfg, "contract_handoff", True):
+                return
+            boundary = HO.boundary_files(getattr(run, "changed_main_files", None) or [], cfg)
+            HO.finalize(self.repo_root, cfg, run, boundary, log=self.log)
+            run.save(self.harness_dir)
+        except Exception as e:
+            self.log(f"  [contract] skipped ({type(e).__name__}: {e})")
 
     def _input_guard(self, run: RunState, phase: Phase) -> bool:
         """Run the input guard for this phase. Returns True when it HALTED the run."""

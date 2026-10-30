@@ -159,7 +159,7 @@ def detect_generated_modules(repo_root: Path, application_module: str | None) ->
 
 
 # Phases added after repos began overriding phase_skills; see skills_for_phase.
-_PHASES_ADDED_LATER = frozenset({"repo_instructions"})
+_PHASES_ADDED_LATER = frozenset({"repo_instructions", "contract"})
 
 
 @dataclass
@@ -330,6 +330,8 @@ class HarnessConfig:
         "unit_testing": ["src/test/java/**"],
         "documentation": ["docs/**"],
         "raise_pr":     [],
+        # contract-only mode (handoff.py): reads the change's contract files
+        "contract":     ["src/**"],
     })
     # Which named skills (folder names under .github/skills) load in which phase.
     # Skills have no path scope, so this mapping is explicit.
@@ -350,8 +352,11 @@ class HarnessConfig:
         "code_review":  ["security-review", "review-angular-code"],
         "unit_testing": [],
         "validation":   ["build-validation"],
-        "documentation": [],
+        # build-contract: how to write the contract for the next story, used
+        # when the change touches contract files (handoff.py).
+        "documentation": ["build-contract"],
         "raise_pr":     [],
+        "contract":     ["build-contract"],
     })
     # Stack tags for skills, so phase_skills can be filtered by repo_stacks the
     # same way instruction subfolders already are. A skill listed here loads ONLY
@@ -498,6 +503,19 @@ class HarnessConfig:
     # metrics/), and fix a whole-folder `.harness/` line. The change ships in
     # the harness PR. false => leave .gitignore alone.
     manage_gitignore: bool = True
+
+    # ---- contract hand-off between stories in different repos (handoff.py) ----
+    # Require the story line "**Requires a new or changed contract from:** None |
+    # <upstream repo>" and, when a repo is named, its attached contract file.
+    # Checked before any model call. false => not checked.
+    dependency_gate: bool = True
+    # When the change touches contract files (built-in patterns per stack plus
+    # contract_files below), the documentation phase writes a contract for the
+    # next story; it is PII-scanned and published to harness-metrics only.
+    contract_handoff: bool = True
+    # Extra repo-relative globs that form a contract in THIS repo, for layouts
+    # the built-in patterns miss (e.g. "src/app/shared/bridge/**").
+    contract_files: list = field(default_factory=list)
     # Where the documentation phase records this story's answered questions.
     decisions_dir: str = "docs/decisions"
 
@@ -606,6 +624,9 @@ class HarnessConfig:
             manage_copilot_instructions=bool(data.get("manage_copilot_instructions",
                                                       cls.manage_copilot_instructions)),
             manage_gitignore=bool(data.get("manage_gitignore", cls.manage_gitignore)),
+            dependency_gate=bool(data.get("dependency_gate", cls.dependency_gate)),
+            contract_handoff=bool(data.get("contract_handoff", cls.contract_handoff)),
+            contract_files=[str(x) for x in (data.get("contract_files") or [])],
             decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
                           or cls.decisions_dir,
             attachments_dir=(str(data.get("attachments_dir", cls.attachments_dir)).strip().strip("/")

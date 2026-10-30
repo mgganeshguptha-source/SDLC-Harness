@@ -275,7 +275,7 @@ def test_machine_halts_before_any_model_call(tmp_path, monkeypatch):
     (_att(repo) / "log.txt").write_text("SSN 123-45-6789\n", encoding="utf-8")
     ex = _CountingExecutor()
     sm = StateMachine(ex, repo / ".harness", repo_root=repo, log=lambda *a: None)
-    run = RunState(feature_id="F-1", story="story", current_phase=PHASES[0].id)
+    run = RunState(feature_id="F-1", story="story\n**Requires a new or changed contract from:** None", current_phase=PHASES[0].id)
     # repo_instructions skips when the file exists; make it exist so the first
     # MODEL phase reached is context.
     (repo / ".github").mkdir()
@@ -295,7 +295,7 @@ def test_machine_records_attachments_when_clean(tmp_path, monkeypatch):
     (_att(repo) / "design.png").write_bytes(PNG_1PX)
     ex = _CountingExecutor()
     sm = StateMachine(ex, repo / ".harness", repo_root=repo, log=lambda *a: None)
-    run = RunState(feature_id="F-1", story="story", current_phase=PHASES[0].id)
+    run = RunState(feature_id="F-1", story="story\n**Requires a new or changed contract from:** None", current_phase=PHASES[0].id)
     run = sm.step(run)  # repo_instructions: guard runs, then the executor
     assert ex.calls == [PHASES[0].id]
     assert run.attachments and run.attachments[0]["name"] == "design.png"

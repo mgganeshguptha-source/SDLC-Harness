@@ -29,6 +29,12 @@ class RunState:
     # workflow checkbox), who confirmed, whether the PII scan ran, and how many
     # findings (types and locations only — never the values).
     input_guard: dict = field(default_factory=dict)
+    # Contract hand-off (handoff.py). dependencies: the story's "Requires a new
+    # or changed contract from" line and the upstream contracts attached.
+    # contract_output: the contract this run produced for downstream stories
+    # (status published | missing | blocked_pii | none).
+    dependencies: dict = field(default_factory=dict)
+    contract_output: dict = field(default_factory=dict)
     # Every set of questions the context gate halted on, oldest first:
     # {"run_id", "story_sha256", "questions": [...]}. Developers often answer
     # under their own heading without repeating the question, so later phases
