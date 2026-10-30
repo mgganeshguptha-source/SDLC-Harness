@@ -288,17 +288,15 @@ test_failure_loopback_phase: "unit_testing"
 # Angular rubric — it would nitpick reactive Java). A frontend repo would add it
 # to code_review.
 # STACK-SPECIFIC: Angular skills. analyze-service is written for microservices
-# and is left out. review-angular-code is the engine's default Angular review
-# rubric — add it to code_review ONLY if the toolkit has a skills/review-angular-
-# code folder (it is not in copilot-toolkit today; check dx_copilot-standards-
-# workspace).
+# and is left out. review-angular-code is the Angular review checklist
+# (skills/review-angular-code in the toolkit; it loads only on Angular repos).
 phase_skills:
   repo_instructions: ["build-copilot-instructions-angular-frontend"]
   context:       ["build-context"]
   prompt_steps:  ["build-prompt-steps"]
   design:        ["build-design"]
   coding:        ["security-review"]
-  code_review:   ["security-review"]   # + "review-angular-code" once it exists
+  code_review:   ["security-review", "review-angular-code"]
   unit_testing:  []
   validation:    ["build-validation"]
   documentation: ["build-contract"]   # contract hand-off for the next story
