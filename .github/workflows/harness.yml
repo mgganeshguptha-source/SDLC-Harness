@@ -137,11 +137,12 @@ on:
         type: boolean
       contract_only:
         description: >-
-          CONTRACT-ONLY run (handoff.py): write the hand-off contract for a change
-          that is ALREADY on contract_branch (e.g. an approved harness PR branch),
-          then publish it to harness-metrics. No code is written, no PR is raised,
-          no working branch is pushed. base must name the branch that change was
-          made against (the story branch).
+          CONTRACT-ONLY run (handoff.py): publish this repo's contract files
+          (OpenAPI file for a backend repo, src/app/store/ for an Angular repo,
+          plus contract_files) from contract_branch — a change made by the harness
+          OR by hand — to harness-metrics contracts/<feature_id>/. No model call,
+          no code change, no PR, no working branch. base = the branch that change
+          was made against (the story branch).
         required: false
         default: false
         type: boolean
@@ -535,9 +536,9 @@ jobs:
             echo "No image attachments to scan (or OCR/scan off) — OCR not installed."
           fi
 
-      # Contract-only mode: one read-only session writes the hand-off contract
-      # for the change already on contract_branch; handoff.py stamps, scans and
-      # stages it, and the publish step puts it on harness-metrics.
+      # Contract-only mode: copy the repo's contract files from contract_branch,
+      # PII-scan them and stage them (handoff.py) — no model call; collect-audit
+      # and the publish step put them on harness-metrics.
       - name: Contract only (contract_only)
         if: inputs.contract_only
         working-directory: engine/harness
@@ -744,7 +745,11 @@ jobs:
           [ -d audit ]   && mkdir -p "$MDIR/audit"   && cp -r audit/.   "$MDIR/audit/"
           # Contract hand-off: the latest contract per feature, at a fixed path
           # the downstream developer copies from (handoff.py).
-          [ -d contracts ] && mkdir -p "$MDIR/contracts" && cp -r contracts/. "$MDIR/contracts/"
+          # The feature's folder is REPLACED, so files removed upstream disappear.
+          if [ -d contracts ]; then
+            for CF in contracts/*/; do rm -rf "$MDIR/$CF"; done
+            mkdir -p "$MDIR/contracts" && cp -r contracts/. "$MDIR/contracts/"
+          fi
 
           cd "$MDIR"
           git config user.name "harness-bot"

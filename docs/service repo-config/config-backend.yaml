@@ -356,18 +356,24 @@ attachment_max_images: 10
 #   **Requires a new or changed contract from:** None
 #     None            = this story does not need a changed contract
 #     <upstream-repo> = upstream repo name (for example: dx_mpa_responsive) if this
-#                       story needs a changed contract (API, store, event, schema,
-#                       config). When a repo is named, attach its contract file
-#                       (contract-<repo>.md) in stories/<feature_id>/.
+#                       story needs a changed contract. Attach in stories/<feature_id>/:
+#                         backend upstream story -> its OpenAPI file
+#                         Angular upstream story  -> its src/app/store/ folder
 dependency_gate: true
 
-# When this story's change touches contract files, the documentation phase writes
-# contract-<repo>.md (+ sample-<repo>.json) for the next story. It is PII-scanned
-# and published to harness-metrics only (audit folder + contracts/<feature_id>/),
-# never into the PR. Built-in contract files: backend controllers, *Request /
-# *Response / *Dto, OpenAPI; Angular *.actions / *.reducer / *.selectors /
-# *.effects / *.state / *.model.ts and *bridge*.ts.
+# When this story changes contract files, publish this repo's contract files to
+# harness-metrics (contracts/<feature_id>/files/ + manifest.json), PII-scanned,
+# never into the PR: backend -> the OpenAPI file(s); Angular -> src/app/store/**.
+# Contract files: backend controllers, *Request / *Response / *Dto, the OpenAPI
+# file; Angular src/app/store/**, *.actions / *.reducer / *.selectors /
+# *.effects / *.state.ts, *bridge*.ts.
 contract_handoff: true
 
-# Extra contract files for this repo's layout, if the built-in patterns miss them.
+# Extra contract files for this repo (also published), if the built-in ones miss them.
 contract_files: []
+
+# The repo's OpenAPI file(s). Not set = auto-detect (a .yml/.yaml/.json outside
+# test/build folders that starts an OpenAPI document, e.g.
+# <service>-openapi-code/src/main/resources/<service>.yml). The coding phase may
+# edit these files even inside the excluded -openapi-code module. [] = none.
+# api_spec_files: ["mex-coverage-service-openapi-code/src/main/resources/mex-coverage-service.yml"]

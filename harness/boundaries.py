@@ -107,7 +107,12 @@ def is_excluded(path: str, exclude_globs, repo_root: str | None = None) -> bool:
     if not exclude_globs:
         return False
     rel = _to_repo_relative(path, repo_root)
-    return any(_matches(rel, g) for g in exclude_globs)
+    # "!glob" re-includes a path an exclude glob would deny — used to let the
+    # coding phase edit the OpenAPI file inside the otherwise-excluded
+    # -openapi-code module (config.api_spec_files), and nothing else there.
+    if any(_matches(rel, g[1:]) for g in exclude_globs if str(g).startswith("!")):
+        return False
+    return any(_matches(rel, g) for g in exclude_globs if not str(g).startswith("!"))
 
 
 def is_write_allowed(path: str, allowed_globs, repo_root: str | None = None,

@@ -1373,8 +1373,9 @@ class StateMachine:
             cfg = _HCfc.load(self.harness_dir)
             if not getattr(cfg, "contract_handoff", True):
                 return
-            boundary = HO.boundary_files(getattr(run, "changed_main_files", None) or [], cfg)
-            HO.finalize(self.repo_root, cfg, run, boundary, log=self.log)
+            changed = (HO.changed_files(self.repo_root, HO.base_ref_from_env())
+                       or list(getattr(run, "changed_main_files", None) or []))
+            HO.finalize(self.repo_root, cfg, run, changed, log=self.log)
             run.save(self.harness_dir)
         except Exception as e:
             self.log(f"  [contract] skipped ({type(e).__name__}: {e})")
