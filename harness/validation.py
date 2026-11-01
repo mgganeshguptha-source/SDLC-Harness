@@ -204,6 +204,53 @@ def _parse_coverage(csv_path: Path, metric: str) -> float | None:
         return None
 
 
+def _condense_report(text: str, frames_per_trace: int = 6) -> str:
+    """Shorten a surefire report's stack traces WITHOUT losing the root cause.
+
+    A Spring context failure is ~150 frames, and the real reason ("row column
+    count mismatch") sits in the LAST 'Caused by:' block. Cutting the report at a
+    character cap kept only the top frames, so the cause never reached the log or
+    the fixing phase (petclinic-rest-api PC-101, 2026-11-01). Keep every
+    exception and 'Caused by:' line with its first few frames; drop the rest of
+    each frame run and say how many were dropped."""
+    out, kept, dropped = [], 0, 0
+    for ln in text.splitlines():
+        if ln.lstrip().startswith("at "):
+            if kept < frames_per_trace:
+                out.append(ln)
+                kept += 1
+            else:
+                dropped += 1
+            continue
+        if dropped:
+            out.append(f"\t... {dropped} more frame(s) omitted by harness")
+            dropped = 0
+        if re.match(r"^\s*\.\.\. \d+ more\s*$", ln):
+            continue
+        out.append(ln)
+        kept = 0
+    if dropped:
+        out.append(f"\t... {dropped} more frame(s) omitted by harness")
+    return "\n".join(out)
+
+
+def _root_causes(text: str) -> list:
+    """The last 'Caused by:' line of each stack trace in a report."""
+    causes, last = [], None
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("Caused by:"):
+            last = s
+        elif "<<< ERROR!" in s or "<<< FAILURE!" in s:
+            # The next failing test starts: the previous trace's cause is final.
+            if last:
+                causes.append(last)
+            last = None
+    if last:
+        causes.append(last)
+    return list(dict.fromkeys(causes))
+
+
 def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str:
     """Extract the failing-test detail from surefire .txt reports.
 
@@ -228,7 +275,9 @@ def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str
             continue
         if "Tests run:" not in text:
             continue
-        chunks.append(f"### {rp.name}\n{text.strip()}")
+        causes = _root_causes(text)
+        head = ("ROOT CAUSE: " + " | ".join(causes) + "\n") if causes else ""
+        chunks.append(f"### {rp.name}\n{head}{_condense_report(text.strip())}")
     if not chunks:
         return ""
     joined = "\n\n".join(chunks)

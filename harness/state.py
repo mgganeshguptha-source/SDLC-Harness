@@ -80,6 +80,10 @@ class RunState:
     # it to the same phase again is unlikely to help, and no classifier is
     # reliable enough to be trusted twice in a row.
     last_validation_loopback: str = ""
+    # API spec file hashes (repo-relative path -> sha256) taken when a red build
+    # is routed to 'coding'. While set, the coding phase may not change those
+    # files (contract freeze in a fix loop). Cleared when the build goes green.
+    contract_snapshot: dict = field(default_factory=dict)
 
     # how many times the AC-conformance gate has failed and looped back
     # (independent of the review, validation and coverage budgets).

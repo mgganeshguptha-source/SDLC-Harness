@@ -96,6 +96,136 @@ _MAIN_PATH = re.compile(r"[/\\]src[/\\]main[/\\]", re.IGNORECASE)
 # Angular / TypeScript (backlog B4): "src/app/x.component.spec.ts:12:5 - error TS2345"
 _TS_ERROR = re.compile(r"([\w./\\-]+\.ts):\d+:\d+\s*-\s*error\s+TS\d+", re.IGNORECASE)
 
+# Mockito misuse, by SHORT class name as well as package: surefire's summary
+# line prints only the simple name ("» WrongTypeOfReturnValue"), so a package-
+# only match missed it (petclinic-rest-api PC-101, 2026-11-01). Every one of
+# these is the test's own fault — production code cannot cause them.
+_MOCKITO_MISUSE = (
+    "org.mockito.exceptions.misusing",
+    "wrongtypeofreturnvalue", "unfinishedstubbing", "unnecessarystubbing",
+    "invalidusewiththematchers", "invaliduseofmatchers", "missingmethodinvocation",
+    "potentialstubbingproblem", "cannotstubvoidmethodwithreturnvalue",
+    "unfinishedverification", "notamockexception", "nullinsteadofmockexception",
+)
+
+# A surefire report: "<exception>: msg" followed by "\tat <frame>" lines.
+_FRAME = re.compile(r"^\s*at\s+([\w$.]+)\.([\w$<>]+)\(", re.MULTILINE)
+# Exception line that opens a test's stack trace in a surefire report.
+_EXC_LINE = re.compile(r"^([\w$.]+(?:Exception|Error|Throwable|Failure|Problem|Value))"
+                       r"(?::|$)", re.MULTILINE)
+# Assertion types: a failing assertion is the normal "production is wrong"
+# signal and is NEVER classified test-side by the frame rule below.
+_ASSERTION_TYPES = ("assertionerror", "assertionfailederror", "comparisonfailure",
+                    "multipleFailuresError".lower(), "opentest4j")
+# Failing test classes named by surefire/maven:
+#   "Tests run: 4, ... <<< FAILURE! -- in org.x.FooTest"
+#   "[ERROR] org.x.FooTest.method -- Time elapsed ... <<< ERROR!"
+#   "[ERROR]   FooTest.method:28 ..." (summary)
+_FAILING_IN = re.compile(r"<<<\s*(?:FAILURE|ERROR)!\s*--\s*in\s+([\w$.]+)")
+_FAILING_METHOD = re.compile(r"^\[ERROR\]\s+([\w$.]+)\.([\w$]+)\s+--\s+Time elapsed",
+                             re.MULTILINE)
+_FAILING_SUMMARY = re.compile(r"^\[ERROR\]\s+([A-Z][\w$]*)\.([\w$]+):\d+", re.MULTILINE)
+
+
+def _test_class_names(repo_root) -> tuple[set, set]:
+    """Simple class names of every Java/Kotlin file under src/test and src/main
+    (any module). Used to decide whether a stack frame is test or production
+    code without guessing from package names."""
+    tests, mains = set(), set()
+    if not repo_root:
+        return tests, mains
+    try:
+        root = Path(repo_root)
+        for ext in ("*.java", "*.kt"):
+            for p in root.rglob(ext):
+                parts = p.parts
+                if "target" in parts or "build" in parts or "node_modules" in parts:
+                    continue
+                s = p.as_posix()
+                if "/src/test/" in s:
+                    tests.add(p.stem)
+                elif "/src/main/" in s:
+                    mains.add(p.stem)
+    except Exception:
+        pass
+    return tests, mains
+
+
+def _thrown_from_test_code(text: str, repo_root) -> bool:
+    """True when at least one failing test's exception was THROWN by test code
+    (its first frame that is either test or production code belongs to a test
+    class), none was thrown by production code, and none is an assertion.
+
+    Example (PC-101): IllegalArgumentException from Enum.valueOf called in a
+    test helper -> first own-code frame is the test class -> test-side."""
+    tests, mains = _test_class_names(repo_root)
+    if not tests:
+        return False
+    saw_test, saw_main = False, False
+    lines = text.splitlines()
+    for i, ln in enumerate(lines):
+        m = _EXC_LINE.match(ln.strip())
+        if not m or ln.lstrip().startswith("at "):
+            continue
+        exc = m.group(1).lower()
+        if any(a in exc for a in _ASSERTION_TYPES):
+            return False
+        for nxt in lines[i + 1:i + 40]:
+            fm = _FRAME.match(nxt)
+            if not fm:
+                if nxt.strip().startswith(("Caused by", "...")) or not nxt.strip():
+                    break
+                continue
+            simple = fm.group(1).rsplit(".", 1)[-1].split("$", 1)[0]
+            if simple in tests:
+                saw_test = True
+                break
+            if simple in mains:
+                saw_main = True
+                break
+    return saw_test and not saw_main
+
+
+def _failing_test_classes(output: str) -> list:
+    """Simple names of the test classes the build reports as failing."""
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(output or ""))
+    names = set()
+    for m in _FAILING_IN.finditer(text):
+        names.add(m.group(1).rsplit(".", 1)[-1])
+    for m in _FAILING_METHOD.finditer(text):
+        names.add(m.group(1).rsplit(".", 1)[-1])
+    for m in _FAILING_SUMMARY.finditer(text):
+        names.add(m.group(1))
+    return sorted(n for n in names if n and n[0].isupper())
+
+
+def _failing_test_methods(output: str) -> list:
+    """'Class.method' for each failing test, for the loopback instruction."""
+    text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", str(output or ""))
+    out = []
+    for m in _FAILING_METHOD.finditer(text):
+        out.append(f"{m.group(1).rsplit('.', 1)[-1]}.{m.group(2)}")
+    if not out:
+        for m in _FAILING_SUMMARY.finditer(text):
+            out.append(f"{m.group(1)}.{m.group(2)}")
+    return sorted(dict.fromkeys(out))
+
+
+def _tests_written_this_run(repo_root) -> set:
+    """Simple names of test classes this run added or changed (vs the story
+    branch), including uncommitted work. Empty when it cannot be determined."""
+    try:
+        import handoff as _HO
+        changed = _HO.changed_files(Path(repo_root), _HO.base_ref_from_env())
+    except Exception:
+        return set()
+    out = set()
+    for f in changed:
+        if "/src/test/" in f"/{f}" and f.endswith((".java", ".kt", ".spec.ts")):
+            name = Path(f).name
+            out.add(name[:-8] if name.endswith(".spec.ts") else Path(f).stem)
+    return out
+
 
 def _scope_detail(repo_root, run) -> str:
     """Name the unplanned files and the approved list.
@@ -130,7 +260,7 @@ def _scope_detail(repo_root, run) -> str:
     return out
 
 
-def _failure_is_in_tests(output: str) -> bool:
+def _failure_is_in_tests(output: str, repo_root=None) -> bool:
     """True when a red build is the TEST code's fault rather than production code's.
 
     Deliberately CONSERVATIVE: it returns True only when there is positive evidence
@@ -159,16 +289,22 @@ def _failure_is_in_tests(output: str) -> bool:
     # forbidden from touching.
     low = text.lower()
     test_only = (
-        # Mockito misuse: unnecessary stubbing, wrong argument matchers, etc.
-        "org.mockito.exceptions.misusing" in low
-        or "unnecessarystubbing" in low
-        or "invalidusewiththematchers" in low
+        # Mockito misuse: unnecessary stubbing, wrong argument matchers, wrong
+        # return type, etc. — by package OR short name (see _MOCKITO_MISUSE).
+        any(sig in low for sig in _MOCKITO_MISUSE)
         # An unstubbed mock returns null; the NPE then names the mocked method.
         or ("nullpointerexception" in low
             and "because the return value of" in low
             and "mock" not in low.split("nullpointerexception")[0][-200:])
     )
     if test_only:
+        return True
+
+    # A runtime error (not an assertion) whose first own-code frame is in a test
+    # class was thrown by the test itself — e.g. a test helper calling
+    # Enum.valueOf("DONE") on a generated enum. Needs the repo to tell test
+    # classes from production ones; skipped when repo_root is not given.
+    if repo_root is not None and _thrown_from_test_code(text, repo_root):
         return True
 
     # TypeScript compile errors name the file: a spec file => the test's fault,
@@ -570,6 +706,46 @@ class StateMachine:
             run.halt_gate = HG.SCOPE
             run.save(self.harness_dir)
             return run
+
+        # ---- CONTRACT FREEZE (fix loop) ----
+        # A red build sent back to 'coding' must be fixed WITHOUT changing the API
+        # contract: the contract was set by the first coding pass against the
+        # story and plan, and a fix loop that edits it is fitting the contract to
+        # the tests. Snapshot taken when the failure was routed here.
+        if code == ExitCode.OK and getattr(run, "contract_snapshot", None):
+            try:
+                from config import HarnessConfig as _HCf
+                _cfgf = _HCf.load(self.harness_dir, repo_root=self.repo_root)
+                if phase.id == _cfgf.validation_loopback_phase:
+                    _now = self._contract_hashes(_cfgf)
+                    _changed = sorted(p for p in set(_now) | set(run.contract_snapshot)
+                                      if _now.get(p) != run.contract_snapshot.get(p))
+                    if _changed:
+                        _m = (
+                            "\n  ============ CONTRACT CHANGED IN A FIX LOOP: HALTED ============\n"
+                            f"  The '{phase.id}' phase was sent back to fix a red build and\n"
+                            "  changed the API contract file(s) to do it:\n"
+                            + "".join(f"    - {p}\n" for p in _changed) +
+                            "  A fix must not reshape the contract to make tests pass — that\n"
+                            "  is the tests (or the fix) being wrong, and a human must decide.\n"
+                            "  Ways forward:\n"
+                            f"    1. On harness-wip/{run.feature_id}, restore the contract file(s)\n"
+                            "       (git diff shows the change), fix whichever side is wrong —\n"
+                            "       usually a test that asks for behaviour the story does not —\n"
+                            "       push, then resume.\n"
+                            "    2. If the story really needs a different contract, correct the\n"
+                            "       story on its branch and start a fresh run.\n"
+                            "  ===============================================================\n"
+                        )
+                        self.log(_m)
+                        run.last_feedback = _m
+                        run.status = "halted"
+                        run.halt_gate = HG.SCOPE
+                        run.halt_detail = "contract changed during a build-fix loop"
+                        run.save(self.harness_dir)
+                        return run
+            except Exception as _e:
+                self.log(f"  [harness] contract freeze check skipped ({type(_e).__name__})")
 
         # ---- PLAN PATH CHECK ----
         # Runs after prompt_steps, before any code is written. The planning phase
@@ -1039,6 +1215,9 @@ class StateMachine:
                     vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
                                         changed_files=run.changed_main_files)
                 self.log(f"  [harness] validation: {vr.summary} (exit {vr.exit_code})")
+                if vr.passed:
+                    # The fix loop is over: lift the contract freeze.
+                    run.contract_snapshot = {}
                 if not vr.passed:
                     from config import HarnessConfig
                     cfg = HarnessConfig.load(self.harness_dir)
@@ -1239,7 +1418,14 @@ class StateMachine:
                     # retry budget spent and the actual defect untouched.
                     # ============================================================
                     run.validation_attempts += 1
-                    test_side = _failure_is_in_tests(vr.output_tail)
+                    test_side = _failure_is_in_tests(vr.output_tail, self.repo_root)
+                    _failing = _failing_test_classes(vr.output_tail)
+                    _written = _tests_written_this_run(self.repo_root)
+                    # Every failing test is one THIS run wrote: no existing test
+                    # broke. Used below to stop production code being bent to fit
+                    # tests the harness itself may have got wrong.
+                    _only_new_tests = bool(_failing) and bool(_written) and \
+                        set(_failing) <= _written
 
                     # ALTERNATE ON REPEAT. A failing test can be the fault of
                     # either side, and no heuristic reads a stack trace reliably
@@ -1252,23 +1438,60 @@ class StateMachine:
                     _would_be = (cfg.test_failure_loopback_phase if test_side
                                  else cfg.validation_loopback_phase)
                     if _prev and _prev == _would_be and run.validation_attempts > 1:
+                        # NEVER flip from the test side to production when every
+                        # failing test is one this run wrote. The test author has
+                        # already had a go; sending the failure to 'coding' tells
+                        # it to "fix the production code so tests pass", and it
+                        # will bend the code — and the API contract — to fit tests
+                        # that may simply be wrong. Observed on petclinic-rest-api
+                        # PC-101 (2026-11-01): tests forced an impossible enum value
+                        # into a typed DTO; 'coding' then loosened openapi.yml to
+                        # `type: object` and mapped every IllegalArgumentException
+                        # to 400 API-wide. A human must decide which side is wrong.
+                        if test_side and _only_new_tests:
+                            self._halt_new_tests_red(run, cfg, vr, _failing)
+                            return run
                         test_side = not test_side
                         self.log(f"  [harness] '{_prev}' already had this failure and the "
                                  f"build is still red — routing to the other side instead")
+                    _methods = _failing_test_methods(vr.output_tail)
+                    _names = ", ".join(_methods or _failing) or "(see output below)"
                     if test_side:
                         loopback = cfg.test_failure_loopback_phase
                         fix_instruction = (
                             "The build FAILED while compiling or running the TESTS. "
-                            "The defect is in the TEST code, not the production code. "
-                            "Fix the test source so it compiles and passes. Do NOT ask "
-                            "for production code changes. Failure output:\n"
+                            "The defect is in the TEST code, not the production code.\n"
+                            f"Failing tests: {_names}\n"
+                            "Fix THESE tests (edit them in place), or delete a test that "
+                            "checks something the production code cannot do. Do NOT add "
+                            "new test files or new test classes to work around them, and "
+                            "do NOT ask for production code changes.\n"
+                            "A test must reach the code the way real callers do: for a "
+                            "request-validation rule (an invalid enum value, a malformed "
+                            "body) send the raw request through the HTTP layer (e.g. "
+                            "MockMvc) and assert the status — never force an impossible "
+                            "value into a typed DTO with reflection, mocks or "
+                            "Enum.valueOf. Check a YAML/JSON file by parsing it, not with "
+                            "a layout-dependent regex. Failure output:\n"
                         )
                     else:
                         loopback = cfg.validation_loopback_phase
                         fix_instruction = (
                             "The test build FAILED. Fix the production code so tests pass. "
-                            "Do not edit tests. Failure output:\n"
+                            "Do not edit tests.\n"
+                            f"Failing tests: {_names}\n"
+                            "Make the smallest production change that satisfies the story. "
+                            "Do NOT change the API contract file (OpenAPI) or widen types "
+                            "(Object, a raw type, `type: object`) to make a test compile or "
+                            "pass, and do NOT add API-wide exception mappings for a case "
+                            "the story limits to one field. If a failing test asks for "
+                            "behaviour the story does not require, say so in one line "
+                            "starting 'TEST DEFECT:' and leave the production code as it "
+                            "is. Failure output:\n"
                         )
+                        # Contract freeze for this fix loop: snapshot the API spec
+                        # files now; the post-coding check halts if they change.
+                        run.contract_snapshot = self._contract_hashes(cfg)
                     if loopback in (cfg.skip_phases or []):
                         # e.g. existing specs are broken and unit_testing is skipped:
                         # sending work to a skipped phase would only repeat the gate.
@@ -1331,6 +1554,55 @@ class StateMachine:
         run.halt_detail = f"unmapped exit code {int(code)}"
         run.save(self.harness_dir)
         return run
+
+    def _contract_hashes(self, cfg) -> dict:
+        """sha256 of each API spec file (repo-relative path -> hex, '' if absent)."""
+        import hashlib
+        out = {}
+        try:
+            if getattr(cfg, "api_spec_files", None) is None and \
+                    not getattr(cfg, "_repo_root", None):
+                # Auto-detection needs the repo root; reload with it.
+                from config import HarnessConfig as _HCh
+                cfg = _HCh.load(self.harness_dir, repo_root=self.repo_root)
+            specs = list(cfg._api_specs())
+        except Exception:
+            specs = []
+        for rel in specs:
+            p = Path(self.repo_root) / rel
+            try:
+                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else ""
+            except Exception:
+                out[rel] = ""
+        return out
+
+    def _halt_new_tests_red(self, run: RunState, cfg, vr, failing: list) -> None:
+        """Halt when tests written by this run are still red after the test side
+        had its attempt: never bend production code to fit them."""
+        names = ", ".join(_failing_test_methods(vr.output_tail) or failing)
+        msg = (
+            "\n  ============ NEW TESTS STILL FAILING: HALTED ============\n"
+            "  Every failing test was written by this run, and they are still red\n"
+            f"  after '{cfg.test_failure_loopback_phase}' tried to fix them:\n"
+            f"    {names}\n"
+            "  No existing test is failing. The harness does NOT send this to\n"
+            f"  '{cfg.validation_loopback_phase}': changing production code to fit tests\n"
+            "  that may be wrong is how a contract gets bent.\n"
+            "  Ways forward:\n"
+            f"    1. On harness-wip/{run.feature_id}, read the failing tests against the\n"
+            "       story. If a test is wrong (asks for behaviour the story does not,\n"
+            "       or forces an impossible value), fix or delete it; if the production\n"
+            "       code is wrong, fix that. Push, then resume.\n"
+            "    2. Resume as is for one more automatic attempt — weakest option.\n"
+            "  ========================================================\n"
+        )
+        self.log("  --- build/test failure tail ---\n" + vr.output_tail)
+        self.log(msg)
+        run.last_feedback = msg
+        run.status = "halted"
+        run.halt_gate = HG.TEST_BUILD
+        run.halt_detail = "test_build: tests written by this run still failing"
+        run.save(self.harness_dir)
 
     def _dependency_gate(self, run: RunState, phase: Phase) -> bool:
         """The story's mandatory contract line and its attached upstream

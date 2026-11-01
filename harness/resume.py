@@ -85,12 +85,21 @@ def rewind(run: RunState, start_phase: str, log=print) -> RunState:
     run.coverage_attempts = 0
     run.scope_attempts = 0
 
-    # Per-phase iteration budgets and the global per-phase run cap, for the target
-    # phase and everything after it. Phases before it keep their history.
+    # Per-phase iteration budgets for the target phase and everything after it;
+    # phases before it keep their history.
+    # The global per-phase RUN cap (__runs__:<phase>) is reset for EVERY phase:
+    # a loopback from a later phase can re-enter an earlier one (a red build
+    # after unit_testing goes back to coding), and a count carried over from the
+    # halted run made that re-entry hit the cap at once, so the resume never got
+    # its fresh attempt (petclinic-rest-api PC-101, 2026-11-01).
     for key in list(run.iterations.keys()):
-        pid = key.split(":", 1)[1] if key.startswith("__runs__:") else key
-        if pid not in keep:
+        if key.startswith("__runs__:"):
             run.iterations[key] = 0
+        elif key not in keep:
+            run.iterations[key] = 0
+
+    # A contract freeze belongs to the halted fix loop, not to the new attempt.
+    run.contract_snapshot = {}
 
     # Approvals for re-run phases are stale — the artifact they approved is about
     # to be regenerated.
