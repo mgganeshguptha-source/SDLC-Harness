@@ -69,7 +69,11 @@ target_module: ""
 #   && npx ng test --watch=false --browsers=ChromeHeadless --no-progress
 # Mode A command (for later):
 #   npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng test --watch=false --browsers=ChromeHeadless --no-progress --code-coverage --karma-config="$HARNESS_KARMA_CONFIG"
-test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund && npx ng build --configuration development"
+# --legacy-peer-deps: a repo whose libraries declare older Angular peers (e.g.
+# primeng@17 in an Angular 19 app) fails a plain npm install with ERESOLVE.
+# Remove it once the repo's peer dependencies match, or a lock file / .npmrc is
+# committed.
+test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund --legacy-peer-deps && npx ng build --configuration development"
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.

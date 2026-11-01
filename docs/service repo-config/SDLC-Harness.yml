@@ -1,5 +1,5 @@
 # BCBSM caller workflow — the same file for backend (Maven) and frontend
-# (Angular) service repos. Copy to .github/workflows/SDLC-Harness.yml on the
+# (Angular) service repos. Inputs marked * on the form are mandatory. Copy to .github/workflows/SDLC-Harness.yml on the
 # service repo's default branch (master).
 name: SDLC-Harness
 
@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       feature_id:
-        description: "Story / feature id (e.g. OP018-1234)"
+        description: "Story / feature id (e.g. OP018-1234) *"
         required: true
         type: string
       base:
-        description: "Story branch: the harness reads the story, config and code from it and opens its PR into it"
+        description: "Story branch: the harness reads the story, config and code from it and opens its PR into it *"
         required: true
         type: string
       resume:
@@ -22,18 +22,21 @@ on:
         required: false
         default: false
         type: boolean
-      contract_only:
-        description: "Contract only: publish this repo's contract files (OpenAPI file / src/app/store/) from contract_branch to harness-metrics. No AI, no code, no PR. base = the branch that change was made against."
-        required: false
-        default: false
-        type: boolean
-      contract_branch:
-        description: "Contract only: branch holding the finished change (e.g. the approved harness PR branch)."
-        required: false
-        default: ""
-        type: string
+      # Contract-only mode — hidden from the form for now (under review). To
+      # show it again, uncomment these two inputs AND the two matching lines
+      # under `with:` below. The engine keeps the feature; nothing else changes.
+#      contract_only:
+#        description: "Contract only: publish this repo's contract files (OpenAPI file / src/app/store/) from contract_branch to harness-metrics. No AI, no code, no PR. base = the branch that change was made against."
+#        required: false
+#        default: false
+#        type: boolean
+#      contract_branch:
+#        description: "Contract only: branch holding the finished change (e.g. the approved harness PR branch)."
+#        required: false
+#        default: ""
+#        type: string
       confirm_no_phi:
-        description: "I confirm the story and all attachments contain no real PII or PHI (mocked test data only). Required — the harness will not start without it."
+        description: "I confirm the story and all attachments contain no real PII or PHI (mocked test data only). Required — the harness will not start without it. *"
         # Shown as a checkbox, unticked by default. Must be ticked on EVERY run,
         # including resumes. Recorded with your GitHub login in the run's
         # metrics and audit. The engine also scans the story and attachments
@@ -98,8 +101,8 @@ jobs:
       node-version: "22"   # Node 20 is deprecated on GitHub runners
       resume: ${{ inputs.resume }}
       confirm_no_phi: ${{ inputs.confirm_no_phi }}
-      contract_only: ${{ inputs.contract_only }}
-      contract_branch: ${{ inputs.contract_branch }}
+#      contract_only: ${{ inputs.contract_only }}      # hidden — see the inputs above
+#      contract_branch: ${{ inputs.contract_branch }}
 #      start_phase: ${{ inputs.start_phase }}
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the
       # repo and @ref in `uses:` above — they are the engine code the job checks
