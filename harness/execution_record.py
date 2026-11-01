@@ -38,12 +38,35 @@ def _approved_paths_from_plan(plan_text: str) -> set[str]:
                 # need at least ID | path | role ; skip header/separator rows
                 if len(cells) >= 2 and cells[1] and not set(cells[1]) <= {"-", " "} \
                         and cells[0].upper() not in ("ID",):
-                    paths.add(_norm(cells[1]))
+                    paths.add(_plan_cell_path(cells[1]))
             elif line.strip() and not line.strip().startswith(">"):
                 # left the table block
                 if line.startswith("#"):
                     in_table = False
     return {p for p in paths if p and "/" in p}
+
+
+def _plan_cell_path(cell: str) -> str:
+    """The file path in a plan table cell, without Markdown decoration.
+
+    Planners write paths as `code` (backticks), sometimes bold, and sometimes
+    with a note after them ("... VisitStatus.java (new)"). The raw cell kept the
+    backticks, so no written file ever matched an approved one: every edit was
+    an "unplanned" scope addition and every NEW file a SCOPE_VIOLATION, even
+    when the plan listed it (petclinic-rest-api PC-101, 2026-11-01: VisitStatus.java
+    was approved and still bounced, costing a whole coding run)."""
+    c = cell.strip()
+    m = re.search(r"`([^`]+)`", c)            # prefer the first `code` span
+    if m:
+        c = m.group(1)
+    c = c.strip().strip("*_\"'").strip()
+    # Drop a trailing note: keep the first whitespace-free token that looks
+    # like a path (contains '/').
+    for tok in c.split():
+        tok = tok.strip("*_\"'`,;")
+        if "/" in tok:
+            return _norm(tok)
+    return _norm(c)
 
 
 def _norm(p: str) -> str:
