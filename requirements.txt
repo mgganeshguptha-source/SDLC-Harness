@@ -8,7 +8,11 @@
 
 # The Copilot SDK the harness drives (imports as `copilot`).
 # Pin to the version the engine was built/tested against to avoid schema drift.
-github-copilot-sdk==1.0.4
+# The SDK downloads and runs ITS OWN Copilot CLI (1.0.28 -> CLI 1.0.105;
+# 1.0.4 -> CLI 1.0.65), not the one the workflow installs with npm. CLI 1.0.65
+# sent `thinking.type.enabled`, which newer models reject (claude-haiku-5.5:
+# 'Use thinking.type.adaptive'). Roll back to 1.0.4 if 1.0.28 misbehaves.
+github-copilot-sdk==1.0.28
 
 # YAML config parsing (config.yaml).
 pyyaml>=6.0
