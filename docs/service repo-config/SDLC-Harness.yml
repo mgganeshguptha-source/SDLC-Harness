@@ -23,7 +23,7 @@ on:
         default: false
         type: boolean
       contract_only:
-        description: "Contract only: write the hand-off contract for a change already on contract_branch (no code, no PR). base = the branch that change was made against."
+        description: "Contract only: publish this repo's contract files (OpenAPI file / src/app/store/) from contract_branch to harness-metrics. No AI, no code, no PR. base = the branch that change was made against."
         required: false
         default: false
         type: boolean

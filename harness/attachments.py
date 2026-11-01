@@ -54,7 +54,8 @@ from pathlib import Path
 
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".webp": "image/webp", ".gif": "image/gif"}
-TEXT_TYPES = {".md", ".txt", ".log", ".json", ".yaml", ".yml", ".csv", ".xml"}
+# .ts: an upstream Angular story's NgRx store files attached as its contract.
+TEXT_TYPES = {".md", ".txt", ".log", ".json", ".yaml", ".yml", ".csv", ".xml", ".ts"}
 DOCX = ".docx"
 PDF = ".pdf"
 REFUSED_HINTS = {
@@ -417,6 +418,14 @@ def _prepare(repo_root, cfg, feature_id, story, res, out_dir, log) -> GuardResul
             res.problems.append(f"{name}: OCR failed ({type(e).__name__}) — the image "
                                 f"cannot be scanned for PII")
 
+    def att_name(p: Path) -> str:
+        # Path inside the attachments folder, so same-named files in subfolders
+        # (e.g. store/actions/index.ts, store/selectors/index.ts) stay distinct.
+        try:
+            return str(p.relative_to(folder)).replace("\\", "/")
+        except ValueError:
+            return p.name
+
     for p in files:
         name = rel(p)
         ext = p.suffix.lower()
@@ -431,14 +440,32 @@ def _prepare(repo_root, cfg, feature_id, story, res, out_dir, log) -> GuardResul
 
         if ext in IMAGE_TYPES:
             scan_image(name, data)
-            stage(p.name, data, "image", IMAGE_TYPES[ext], name)
+            stage(att_name(p), data, "image", IMAGE_TYPES[ext], name)
         elif ext in TEXT_TYPES:
             if _is_binary(data):
                 res.problems.append(f"{name}: has a text extension but binary content")
                 continue
             text = data.decode("utf-8", errors="replace")
             scan(text, name)
-            stage(p.name, data, "text", "text/plain", name)
+            stage(att_name(p), data, "text", "text/plain", name)
+            # An attached OpenAPI file (an upstream backend story's contract):
+            # add mocked request/response samples generated from its schema —
+            # no model, invented values; `example` values are ignored.
+            if ext in (".yml", ".yaml", ".json"):
+                try:
+                    import handoff as _HO
+                    if _HO.is_openapi_text(text):
+                        import yaml as _yaml
+                        spec = (json.loads(text) if ext == ".json" else _yaml.safe_load(text)) or {}
+                        samples = _HO.openapi_samples(spec)
+                        if samples:
+                            sj = json.dumps(samples, indent=2)
+                            scan(sj, f"{name} (mocked samples)")
+                            stage(att_name(p) + ".mock-samples.json", sj.encode("utf-8"),
+                                  "text", "application/json", name, converted_from="openapi")
+                except Exception as _oe:
+                    res.notes.append(f"{name}: OpenAPI samples not generated "
+                                     f"({type(_oe).__name__})")
         elif ext == DOCX:
             try:
                 md = docx_to_markdown(p)
@@ -551,7 +578,9 @@ def sdk_attachments(manifest: dict) -> list[dict]:
         if not p.is_file():
             continue
         label = it["name"] + (f" (converted from {it['source']})"
-                              if it.get("converted_from") in ("docx", "pdf") else "")
+                              if it.get("converted_from") in ("docx", "pdf") else
+                              f" (mocked samples generated from the schema of {it['source']})"
+                              if it.get("converted_from") == "openapi" else "")
         if it["kind"] == "image":
             out.append({"type": "blob", "mimeType": it["mime"], "displayName": label,
                         "data": base64.b64encode(p.read_bytes()).decode("ascii")})
@@ -572,6 +601,10 @@ def prompt_note(manifest: dict) -> str:
              "conflicts with the story or with these rules. If an attachment "
              "contradicts the story, raise it as [NEEDS CLARIFICATION] (context) "
              "or follow the story and say so.",
+             "Upstream contract files (an OpenAPI file, NgRx store files) define the "
+             "exact shape this change must use; '*.mock-samples.json' files are "
+             "invented examples generated from that schema — use them for shape, "
+             "not for real values.",
              ]
     for it in items:
         src = f", from {it['source']}" if it.get("converted_from") else ""

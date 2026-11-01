@@ -956,7 +956,9 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"other parsing) when the plan's Contract usage block or the story does not "
         f"ask for backward compatibility; an upstream payload reshaped inside a "
         f"component when a store, effect, service or mapper receives it first; and "
-        f"reading a field that the attached upstream contract does not define;\n"
+        f"reading a field that the attached upstream contract does not define; and an "
+        f"endpoint's request or response type changed while the repo's OpenAPI file "
+        f"(it is in the plan's Impacted Files when one exists) was not updated to match;\n"
         f"    (c) REACTIVE/CONCURRENCY SAFETY — blocking calls in a reactive chain "
         f"(.block(), .collectList()), signal loss, resource leaks, thread-safety bugs;\n"
         f"    (d) SECURITY — injection, secret exposure, missing authz where required, "
@@ -1036,6 +1038,15 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write unit tests under {src_test} that verify:\n  STORY: {story}\n"
             f"Do NOT modify application code under {src_main}. Tests only."
         )
+
+    # Test resources for API payloads: mocked only (handoff / Swagger standard).
+    unit_testing_task += (
+        "\nIf this change adds or changes an API request or response, create or update "
+        "the JSON request/response test resources the tests need under the test "
+        "resources folder (e.g. src/test/resources). Build their values from the "
+        "OpenAPI schema / DTO types with invented values ('sample-<field>', 1, false, "
+        "'2026-01-01'); NEVER copy values from existing test resource files — they may "
+        "hold real member data.\n")
 
     # coding prompt: state the APPROVED file list explicitly. The scope gate will
     # halt the phase if it creates production files the plan never listed, so it is
@@ -1343,15 +1354,6 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
             f"above) {_repo_instr}."
         ),
-        # Contract-only mode (run.py contract): no code is written; the change is
-        # already on this branch. One read-only session writes the hand-off.
-        "contract": (
-            f"CONTRACT-ONLY RUN. The change for this story is ALREADY on this branch; "
-            f"do NOT change any source, test, config or doc file. Read the changed "
-            f"files and write the hand-off contract described below for:\n"
-            f"  STORY: {story}\n"
-            f"Write ONLY under {rr}/.harness/contract/."
-        ),
         "raise_pr": (
             f"Summarize the change for a pull request body and write it to "
             f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
@@ -1374,18 +1376,28 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     base = base[phase.id]
 
     # Contract hand-off (handoff.py): when this change touches files that form
-    # a contract other repos rely on, the documentation phase (or the
-    # contract-only run) also writes the contract for the next story.
-    if phase.id in ("documentation", "contract"):
+    # a contract other repos rely on, the documentation phase may add a short
+    # summary; the contract files themselves are published by the engine.
+    if phase.id == "documentation":
         try:
             import handoff as _HO
             from config import HarnessConfig as _HCho
             _cfgho = _HCho.load(repo_root / ".harness", repo_root=repo_root)
-            if getattr(_cfgho, "contract_handoff", True) or phase.id == "contract":
-                _bnd = _HO.boundary_files(getattr(run, "changed_main_files", None) or [], _cfgho)
+            if getattr(_cfgho, "contract_handoff", True):
+                _chg = (_HO.changed_files(repo_root, _HO.base_ref_from_env())
+                        or list(getattr(run, "changed_main_files", None) or []))
+                _bnd = _HO.boundary_files(_chg, _cfgho, _HO.api_specs(repo_root, _cfgho))
                 base += _HO.prompt_block(repo_root, _bnd)
         except Exception:
             pass
+    # OpenAPI kept in step with the code (code-first): the PR body says so when
+    # API files changed without the OpenAPI file.
+    if phase.id == "raise_pr":
+        _gap = (getattr(run, "contract_output", None) or {}).get("swagger_not_updated")
+        if _gap:
+            base += ("\n\nAdd this line, unchanged, to the PR body under a heading "
+                     "'Contract': \"WARNING: API files changed ("
+                     + ", ".join(_gap[:5]) + ") but the OpenAPI file was not updated.\"")
 
     out = base
     if run.last_feedback and run.approvals.get(phase.id) == "rejected":

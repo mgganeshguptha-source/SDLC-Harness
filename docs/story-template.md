@@ -47,31 +47,38 @@ filled in.
 | `None` | This story does not need a changed contract. Two repos may be connected — if the contract between them does not change for this story, the value is `None`. |
 | `<upstream-repo>` (e.g. `dx_mex-coverage-service`) | This story needs a contract (API, store, event, schema, config) that another story is adding or changing in that repo. |
 
-When a repo is named:
+Write only the repo name.
 
-1. Open that repo's `harness-metrics` branch and go to
-   `contracts/<upstream feature_id>/`.
-2. Check the contract is the one you expect (its header shows the feature id,
-   run id and commit it was produced from).
-3. Copy `contract-<repo>.md` (and `sample-<repo>.json`, if present) into
-   `stories/<feature_id>/` on this story's branch.
+## What to attach when a repo is named — rule of thumb
 
-The harness halts if the contract is not attached, or if the attached contract's
-header names a different repo. A contract without the harness header (written or
-edited by hand) is accepted with a warning.
+| The upstream story was… | Attach in `stories/<feature_id>/` |
+|---|---|
+| a **backend** story | that repo's **OpenAPI file** (e.g. `mex-coverage-service.yml`) |
+| an **Angular frontend** story | that repo's **NgRx store folder** (`src/app/store/`, with all its subfolders) |
 
-Write only the repo name — the story id comes from the contract file's header.
+- Take the files from the upstream branch that holds the change (e.g. the
+  approved PR branch). A subfolder is optional.
+- If the upstream story ran through the harness, the same files are already on
+  that repo's `harness-metrics` branch under `contracts/<upstream feature_id>/files/`
+  (with `manifest.json` showing the commit they came from).
+- If the upstream story was done by hand, run the workflow on the upstream repo
+  with `contract_only: true`, `contract_branch: <branch with the change>` and
+  `base: <the branch it was made against>`. It copies the same files to
+  `harness-metrics` — no AI, no code change, no PR.
 
-## Where contracts come from
+The harness halts if no contract file is attached (`.yml`, `.yaml`, `.json`,
+`.ts`, or a `## Upstream contract: <repo>` section in the story). It warns when the
+attached files cannot be tied to the named repo by name.
 
-A story whose change touches contract files (controllers, request/response DTOs,
-OpenAPI files; NgRx actions, reducer, selectors, effects, state; host-bridge
-services; plus any `contract_files` in `.harness/config.yaml`) gets a contract
-written by the documentation phase. The harness stamps a header, scans it for
-PII, and publishes it to `harness-metrics` only — the run's audit folder and
-`contracts/<feature_id>/`. It never enters the code PR.
+For an attached OpenAPI file the harness generates mocked request/response
+samples from the schema (no AI, invented values). Postman collections or test
+JSON may be attached as extra input; the schema wins when they disagree, and
+their values are never copied.
 
-For a change that is already finished (for example an approved PR from before
-this feature), run the workflow with `contract_only: true`, `contract_branch:
-<the PR branch>` and `base: <the story branch>`. One read-only run writes and
-publishes the contract; no code is written and no PR is raised.
+## API changes (backend, code-first)
+
+When a story changes an API request or response, the harness updates the repo's
+OpenAPI file in the same change (it may edit that file even inside the
+`-openapi-code` module). If API files change without the OpenAPI file, the run
+log and the PR body show a warning, and code review reports it. New or changed
+JSON test resources use invented values only.

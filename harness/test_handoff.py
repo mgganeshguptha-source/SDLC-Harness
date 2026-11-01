@@ -5,26 +5,68 @@ Run:  python -m pytest test_handoff.py -v
 """
 import json
 import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
+import attachments as AT
 import halt_gates as HG
 import handoff as HO
+from boundaries import is_write_allowed
 from config import HarnessConfig
 from contracts import ExitCode
-from phases import PHASES
+from phases import PHASES, phase_by_id
 from state import RunState
 from state_machine import StateMachine
 
 LINE = "**Requires a new or changed contract from:**"
+SPEC = """openapi: 3.0.3
+info:
+  title: MEX Coverage Service
+paths:
+  /v1/personId/{personId}/visitSummary:
+    get:
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VisitSummaryResponse'
+        '400':
+          description: Bad Request
+components:
+  schemas:
+    ApiErrorResponse:
+      type: object
+      properties:
+        status: {type: string, enum: [SUCCESS, FAILED]}
+        timestamp: {type: string, format: date-time}
+    VisitSummaryResponse:
+      type: object
+      allOf:
+        - $ref: '#/components/schemas/ApiErrorResponse'
+        - description: SystemMessage
+      properties:
+        payload:
+          type: object
+          properties:
+            contract:
+              type: array
+              items:
+                type: object
+                properties:
+                  coverageKey: {type: string, example: 'REAL-VALUE-123'}
+                  maximum: {type: integer, format: int64}
+                  paid: {type: float}
+                  unlimited: {type: boolean}
+"""
 
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
-    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
-    monkeypatch.delenv("HARNESS_CONFIRM_NO_PHI", raising=False)
+    for v in ("GITHUB_ACTIONS", "HARNESS_CONFIRM_NO_PHI", "HARNESS_BASE_BRANCH"):
+        monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/dx_this-repo")
     monkeypatch.setenv("GITHUB_RUN_ID", "777")
 
@@ -37,7 +79,7 @@ def _repo(tmp: Path, config: str = "") -> Path:
 
 
 def _cfg(repo):
-    return HarnessConfig.load(repo / ".harness")
+    return HarnessConfig.load(repo / ".harness", repo_root=repo)
 
 
 def _att(repo, feature="F-2"):
@@ -46,9 +88,14 @@ def _att(repo, feature="F-2"):
     return d
 
 
-def _contract(repo_name="dx_up", feature="F-1"):
-    return HO.make_header({"repo": repo_name, "feature_id": feature, "run_id": "1",
-                           "commit": "abc", "boundary_files": ["src/x.ts"]}) + "\n# Contract\n"
+def _git(repo, *a):
+    subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+
+
+def _gitrepo(repo):
+    _git(repo, "init", "-q", "-b", "story")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
 
 
 # ------------------------------------------------------------------ the line
@@ -77,114 +124,231 @@ def test_gate_missing_line_halts(tmp_path):
 
 def test_gate_none_passes(tmp_path):
     repo = _repo(tmp_path)
-    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} None")
-    assert res.ok and res.requirement.status == "none"
+    assert HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} None").ok
 
 
-def test_gate_named_repo_without_contract_halts(tmp_path):
+def test_gate_named_repo_without_files_halts(tmp_path):
     repo = _repo(tmp_path)
-    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_up")
+    (_att(repo) / "design.png").write_bytes(b"x")       # not a contract file
+    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_mex-coverage-service")
     assert not res.ok and res.gate == HG.CONTRACT_MISSING
-    assert "harness-metrics" in res.problems[0]
+    assert "OpenAPI file" in res.problems[0] and "src/app/store/" in res.problems[0]
 
 
-def test_gate_matching_contract_passes_and_reads_header(tmp_path):
+def test_gate_openapi_file_tied_by_title(tmp_path):
     repo = _repo(tmp_path)
-    (_att(repo) / "contract-dx_up.md").write_text(_contract(), encoding="utf-8")
-    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_up")
+    (_att(repo) / "spec.yml").write_text(SPEC, encoding="utf-8")
+    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_mex-coverage-service")
     assert res.ok and res.warnings == []
-    assert res.contracts[0]["feature_id"] == "F-1" and res.contracts[0]["commit"] == "abc"
+    assert res.contracts[0]["repo"] == "dx_mex-coverage-service"
 
 
-def test_gate_wrong_contract_halts(tmp_path):
+def test_gate_openapi_file_tied_by_name_no_subfolder(tmp_path):
     repo = _repo(tmp_path)
-    (_att(repo) / "contract-dx_up.md").write_text(_contract(repo_name="dx_other"), encoding="utf-8")
+    (_att(repo) / "mex-coverage-service.yml").write_text("openapi: 3.0.3\n", encoding="utf-8")
+    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_mex-coverage-service")
+    assert res.ok and res.warnings == []
+
+
+def test_gate_store_folder_untied_warns_only(tmp_path):
+    repo = _repo(tmp_path)
+    d = _att(repo) / "store" / "selectors"
+    d.mkdir(parents=True)
+    (d / "visitsummary.selectors.ts").write_text("export const x = 1;", encoding="utf-8")
+    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_mpa_responsive")
+    assert res.ok and "could be tied" in res.warnings[0]
+
+
+def test_gate_harness_summary_wrong_repo_halts(tmp_path):
+    repo = _repo(tmp_path)
+    hdr = HO.make_header({"repo": "dx_other", "feature_id": "F-1"})
+    (_att(repo) / "contract-dx_other.md").write_text(hdr + "# Contract\n", encoding="utf-8")
     res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_up")
     assert not res.ok and "wrong contract attached" in res.problems[0]
 
 
-def test_gate_misspelt_repo_halts(tmp_path):
-    repo = _repo(tmp_path)
-    (_att(repo) / "contract-dx_up.md").write_text(_contract(), encoding="utf-8")
-    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_upp")
-    assert not res.ok and res.gate == HG.CONTRACT_MISSING
-
-
-def test_gate_handwritten_contract_warns(tmp_path):
-    repo = _repo(tmp_path)
-    (_att(repo) / "contract-dx_up.md").write_text("# my notes\n", encoding="utf-8")
-    res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_up")
-    assert res.ok and "no engine header" in res.warnings[0]
-
-
-def test_gate_story_section_accepted_with_warning(tmp_path):
+def test_gate_story_section_accepted(tmp_path):
     repo = _repo(tmp_path)
     story = f"{LINE} dx_up\n\n## Upstream contract: dx_up\nGET /x returns {{}}\n"
     res = HO.check_dependencies(repo, _cfg(repo), "F-2", story)
-    assert res.ok and "pasted into the story" in res.warnings[0]
+    assert res.ok and res.warnings == []
 
 
-# ------------------------------------------------------------------ boundary
-def test_boundary_patterns_per_stack(tmp_path):
-    be = SimpleNamespace(repo_stacks=["backend"], contract_files=[])
-    fe = SimpleNamespace(repo_stacks=["angular-frontend"], contract_files=["src/app/shared/hub/**"])
-    changed_be = ["src/main/java/a/VisitSummaryController.java",
-                  "src/main/java/a/dto/VisitSummaryResponse.java",
-                  "src/main/java/a/service/VisitService.java", "openapi.yaml"]
-    assert HO.boundary_files(changed_be, be) == changed_be[:2] + ["openapi.yaml"]
-    changed_fe = ["src/app/store/visitsummary.reducer.ts", "src/app/x/x.component.ts",
-                  "src/app/shared/hub/feed.ts", "src/app/core/host-bridge.service.ts"]
-    assert HO.boundary_files(changed_fe, fe) == [
-        "src/app/store/visitsummary.reducer.ts", "src/app/shared/hub/feed.ts",
-        "src/app/core/host-bridge.service.ts"]
-    assert HO.boundary_files(["src/app/x/x.component.ts"], fe) == []
+# ------------------------------------------------------------------ samples
+def test_openapi_samples_from_schema_only():
+    import yaml
+    s = HO.openapi_samples(yaml.safe_load(SPEC))
+    op = s["GET /v1/personId/{personId}/visitSummary"]
+    ok = op["responses"]["200"]
+    assert ok["status"] == "SUCCESS" and ok["timestamp"] == "2026-01-01T00:00:00Z"
+    item = ok["payload"]["contract"][0]
+    assert item == {"coverageKey": "sample-coverageKey", "maximum": 1, "paid": 1.0,
+                    "unlimited": False}
+    assert "REAL-VALUE-123" not in json.dumps(s)            # examples ignored
+    assert op["responses"]["400"].startswith("(no body schema")
 
 
-# ------------------------------------------------------------------ finalize
-def test_finalize_stamps_header(tmp_path):
+def test_attached_openapi_gets_mocked_samples(tmp_path):
     repo = _repo(tmp_path)
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    md, js = HO.contract_paths(repo)
-    md.parent.mkdir(parents=True)
-    md.write_text("# Contract: visit summary API\n", encoding="utf-8")
-    js.write_text(json.dumps({"success": {"status": "SUCCESS"}}), encoding="utf-8")
-    run = RunState(feature_id="F-1", story="s", current_phase="documentation")
-    info = HO.finalize(repo, _cfg(repo), run, ["src/a/VisitResponse.java"], log=lambda *a: None)
-    assert info["status"] == "published" and run.contract_output["status"] == "published"
-    assert md.name == "contract-dx_this-repo.md"
-    hdr = HO.parse_header(md.read_text())
-    assert hdr["repo"] == "dx_this-repo" and hdr["feature_id"] == "F-1" and hdr["run_id"] == "777"
-    assert hdr["boundary_files"] == ["src/a/VisitResponse.java"]
-    # re-finalizing does not stack headers
-    HO.finalize(repo, _cfg(repo), run, ["src/a/VisitResponse.java"], log=lambda *a: None)
-    assert md.read_text().count(HO.HEADER_START) == 1
+    (_att(repo, "F-2") / "mex-coverage-service.yml").write_text(SPEC, encoding="utf-8")
+    res = AT.prepare(repo, _cfg(repo), "F-2", f"{LINE} dx_mex-coverage-service")
+    assert res.ok, res.problems
+    names = [i["name"] for i in res.items]
+    assert names == ["mex-coverage-service.yml", "mex-coverage-service.yml.mock-samples.json"]
+    sample = next(i for i in res.items if i["converted_from"] == "openapi")
+    assert "sample-coverageKey" in Path(sample["path"]).read_text()
+    att = AT.sdk_attachments(AT.load_manifest(repo))
+    assert "mocked samples generated from the schema" in att[1]["displayName"]
 
 
-def test_finalize_pii_blocks_publishing(tmp_path):
+def test_store_files_with_same_names_stay_distinct(tmp_path):
     repo = _repo(tmp_path)
-    md, js = HO.contract_paths(repo)
-    md.parent.mkdir(parents=True)
-    md.write_text("# Contract\nexample member ssn 123-45-6789\n", encoding="utf-8")
+    for sub in ("actions", "selectors"):
+        d = _att(repo) / "store" / sub
+        d.mkdir(parents=True)
+        (d / "index.ts").write_text(f"// {sub}", encoding="utf-8")
+    res = AT.prepare(repo, _cfg(repo), "F-2", "s")
+    assert sorted(i["name"] for i in res.items) == ["store/actions/index.ts", "store/selectors/index.ts"]
+
+
+# ------------------------------------------------------------------ OpenAPI write
+def _multimodule(repo):
+    (repo / "pom.xml").write_text("<project><modules><module>svc-app</module>"
+                                  "<module>svc-openapi-code</module></modules></project>")
+    r = repo / "svc-openapi-code/src/main/resources"
+    r.mkdir(parents=True)
+    (r / "svc.yml").write_text(SPEC, encoding="utf-8")
+    (repo / "svc-app/src/main/java/a").mkdir(parents=True)
+    (repo / "svc-app/src/test/resources").mkdir(parents=True)
+    (repo / "svc-app/src/test/resources/old.yml").write_text("openapi: 3.0.0\n")  # ignored
+
+
+def test_detect_api_specs_skips_tests(tmp_path):
+    repo = _repo(tmp_path)
+    _multimodule(repo)
+    assert HO.detect_api_specs(repo) == ["svc-openapi-code/src/main/resources/svc.yml"]
+
+
+def test_coding_may_edit_openapi_file_only(tmp_path):
+    repo = _repo(tmp_path)
+    _multimodule(repo)
+    cfg = _cfg(repo)
+    ph = phase_by_id("coding")
+    a, e = cfg.phase_writes(ph), cfg.phase_exclude(ph)
+    ok = lambda p: is_write_allowed(p, a, str(repo), e)  # noqa: E731
+    assert ok("svc-openapi-code/src/main/resources/svc.yml")
+    assert not ok("svc-openapi-code/src/main/java/Generated.java")
+    assert ok("svc-app/src/main/java/a/X.java")
+    ut = phase_by_id("unit_testing")
+    assert not is_write_allowed("svc-openapi-code/src/main/resources/svc.yml",
+                                cfg.phase_writes(ut), str(repo), cfg.phase_exclude(ut))
+
+
+def test_api_spec_files_config_overrides(tmp_path):
+    repo = _repo(tmp_path, "api_spec_files: []\n")
+    _multimodule(repo)
+    cfg = _cfg(repo)
+    assert not is_write_allowed("svc-openapi-code/src/main/resources/svc.yml",
+                                cfg.phase_writes(phase_by_id("coding")), str(repo),
+                                cfg.phase_exclude(phase_by_id("coding")))
+
+
+def test_swagger_gap():
+    specs = ["m/src/main/resources/svc.yml"]
+    assert HO.swagger_gap(["a/VisitSummaryResponse.java"], specs) == ["a/VisitSummaryResponse.java"]
+    assert HO.swagger_gap(["a/VisitSummaryResponse.java", specs[0]], specs) == []
+    assert HO.swagger_gap(["a/Service.java"], specs) == []
+    assert HO.swagger_gap(["a/VisitSummaryResponse.java"], []) == []
+
+
+# ------------------------------------------------------------------ publishing
+def test_finalize_backend_publishes_openapi(tmp_path):
+    repo = _repo(tmp_path)
+    _multimodule(repo)
+    _gitrepo(repo)
     run = RunState(feature_id="F-1", story="s", current_phase="documentation")
     logs = []
-    info = HO.finalize(repo, _cfg(repo), run, ["src/a/X.java"], log=logs.append)
-    assert info["status"] == "blocked_pii" and not md.exists()
-    assert "123-45" not in json.dumps(info) and "123-45" not in " ".join(logs)
+    info = HO.finalize(repo, _cfg(repo), run, ["svc-app/src/main/java/a/VisitSummaryResponse.java"],
+                       log=logs.append)
+    assert info["status"] == "published"
+    assert info["files"] == ["svc-openapi-code/src/main/resources/svc.yml"]
+    assert info["swagger_not_updated"] == ["svc-app/src/main/java/a/VisitSummaryResponse.java"]
+    m = json.loads((repo / ".harness/contract/manifest.json").read_text())
+    assert m["repo"] == "dx_this-repo" and m["feature_id"] == "F-1" and m["run_id"] == "777"
+    assert (repo / ".harness/contract/files/svc-openapi-code/src/main/resources/svc.yml").is_file()
 
 
-def test_finalize_missing_and_none(tmp_path):
+def test_finalize_angular_publishes_store_folder(tmp_path):
+    repo = _repo(tmp_path, 'repo_stacks: ["angular-frontend"]\napi_spec_files: []\n')
+    for f in ("state/visit.state.ts", "selectors/index.ts", "actions/index.ts",
+              "selectors/index.spec.ts"):
+        p = repo / "src/app/store" / f
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("export {}", encoding="utf-8")
+    (repo / "src/app/x").mkdir(parents=True)
+    (repo / "src/app/x/x.component.ts").write_text("x")
+    run = RunState(feature_id="F-2", story="s", current_phase="documentation")
+    info = HO.finalize(repo, _cfg(repo), run, ["src/app/store/selectors/index.ts"], log=lambda *a: None)
+    assert info["status"] == "published"
+    assert info["files"] == ["src/app/store/actions/index.ts", "src/app/store/selectors/index.ts",
+                             "src/app/store/state/visit.state.ts"]
+    # no contract file changed -> nothing published
+    run2 = RunState(feature_id="F-2", story="s", current_phase="documentation")
+    assert HO.finalize(repo, _cfg(repo), run2, ["src/app/x/x.component.ts"],
+                       log=lambda *a: None)["status"] == "none"
+
+
+def test_finalize_skips_file_with_pii(tmp_path):
+    repo = _repo(tmp_path, 'repo_stacks: ["angular-frontend"]\napi_spec_files: []\n')
+    p = repo / "src/app/store/state/a.ts"
+    p.parent.mkdir(parents=True)
+    p.write_text("// call 313-555-0142", encoding="utf-8")
+    run = RunState(feature_id="F-2", story="s", current_phase="documentation")
+    info = HO.finalize(repo, _cfg(repo), run, [], log=lambda *a: None, force=True)
+    assert info["status"] == "missing" and info["skipped"][0]["file"] == "src/app/store/state/a.ts"
+    assert "555-0142" not in json.dumps(info)
+
+
+def test_summary_is_stamped(tmp_path):
+    repo = _repo(tmp_path, 'repo_stacks: ["angular-frontend"]\napi_spec_files: []\n')
+    p = repo / "src/app/store/a.ts"
+    p.parent.mkdir(parents=True)
+    p.write_text("export {}")
+    md = HO.summary_path(repo)
+    md.parent.mkdir(parents=True)
+    md.write_text("# Contract: store\n")
+    run = RunState(feature_id="F-2", story="s", current_phase="documentation")
+    info = HO.finalize(repo, _cfg(repo), run, ["src/app/store/a.ts"], log=lambda *a: None)
+    assert info["summary"] == md.name
+    assert HO.parse_header(md.read_text())["repo"] == "dx_this-repo"
+
+
+def test_contract_only_mode_end_to_end(tmp_path, monkeypatch):
+    """No model: the contract command copies the OpenAPI file and collect-audit
+    places it under contracts/<feature>/."""
+    import run as R
     repo = _repo(tmp_path)
-    run = RunState(feature_id="F-1", story="s", current_phase="documentation")
-    assert HO.finalize(repo, _cfg(repo), run, [], log=lambda *a: None)["status"] == "none"
-    assert HO.finalize(repo, _cfg(repo), run, ["src/a/X.java"], log=lambda *a: None)["status"] == "missing"
-
-
-def test_prompt_block_names_paths_and_mocked_rule(tmp_path):
-    repo = _repo(tmp_path)
-    blk = HO.prompt_block(repo, ["src/app/visitsummary.reducer.ts"])
-    assert "contract-dx_this-repo.md" in blk and "MOCKED VALUES ONLY" in blk
-    assert "visitsummary.reducer.ts" in blk
-    assert HO.prompt_block(repo, []) == ""
+    _multimodule(repo)
+    (repo / "stories").mkdir()
+    (repo / "stories/F-1.md").write_text(f"Title\n{LINE} None\n")
+    _gitrepo(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "update-ref", "refs/remotes/origin/story", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "pr")
+    (repo / "svc-app/src/main/java/a/VisitSummaryResponse.java").write_text("class V{}")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "change")
+    monkeypatch.setattr(sys, "argv", ["run.py", "contract", "--repo", str(repo),
+                                      "--feature", "F-1", "--base", "story"])
+    R.main()
+    monkeypatch.setattr(sys, "argv", ["run.py", "collect-audit", "--repo", str(repo)])
+    R.main()
+    out = repo / "contracts/F-1"
+    assert (out / "files/svc-openapi-code/src/main/resources/svc.yml").is_file()
+    assert json.loads((out / "manifest.json").read_text())["files"] == [
+        "svc-openapi-code/src/main/resources/svc.yml"]
+    assert list((repo / "audit/F-1").glob("*/contract/manifest.json"))
 
 
 # ------------------------------------------------------------------ machine
@@ -201,8 +365,8 @@ def test_machine_halts_on_missing_line_before_model_call(tmp_path):
     repo = _repo(tmp_path)
     ex = _Ex()
     sm = StateMachine(ex, repo / ".harness", repo_root=repo, log=lambda *a: None)
-    run = RunState(feature_id="F-2", story="Title: no contract line", current_phase=PHASES[0].id)
-    run = sm.run_until_pause(run)
+    run = sm.run_until_pause(RunState(feature_id="F-2", story="Title: no line",
+                                      current_phase=PHASES[0].id))
     assert run.status == "halted" and run.halt_gate == HG.DEPENDENCIES_MISSING
     assert ex.calls == []
 
@@ -211,8 +375,8 @@ def test_machine_passes_with_none(tmp_path):
     repo = _repo(tmp_path)
     ex = _Ex()
     sm = StateMachine(ex, repo / ".harness", repo_root=repo, log=lambda *a: None)
-    run = RunState(feature_id="F-2", story=f"Title\n{LINE} None", current_phase=PHASES[0].id)
-    run = sm.step(run)
+    run = sm.step(RunState(feature_id="F-2", story=f"Title\n{LINE} None",
+                           current_phase=PHASES[0].id))
     assert ex.calls == [PHASES[0].id] and run.dependencies["line"] == "none"
 
 
@@ -220,6 +384,12 @@ def test_gate_can_be_switched_off(tmp_path):
     repo = _repo(tmp_path, "dependency_gate: false\n")
     ex = _Ex()
     sm = StateMachine(ex, repo / ".harness", repo_root=repo, log=lambda *a: None)
-    run = RunState(feature_id="F-2", story="no line", current_phase=PHASES[0].id)
-    sm.step(run)
+    sm.step(RunState(feature_id="F-2", story="no line", current_phase=PHASES[0].id))
     assert ex.calls == [PHASES[0].id]
+
+
+def test_is_excluded_negation():
+    from boundaries import is_excluded
+    ex = ["mod/**", "!mod/src/main/resources/a.yml"]
+    assert not is_excluded("mod/src/main/resources/a.yml", ex)
+    assert is_excluded("mod/src/main/java/A.java", ex)

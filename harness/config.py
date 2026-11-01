@@ -159,7 +159,7 @@ def detect_generated_modules(repo_root: Path, application_module: str | None) ->
 
 
 # Phases added after repos began overriding phase_skills; see skills_for_phase.
-_PHASES_ADDED_LATER = frozenset({"repo_instructions", "contract"})
+_PHASES_ADDED_LATER = frozenset({"repo_instructions"})
 
 
 @dataclass
@@ -330,8 +330,6 @@ class HarnessConfig:
         "unit_testing": ["src/test/java/**"],
         "documentation": ["docs/**"],
         "raise_pr":     [],
-        # contract-only mode (handoff.py): reads the change's contract files
-        "contract":     ["src/**"],
     })
     # Which named skills (folder names under .github/skills) load in which phase.
     # Skills have no path scope, so this mapping is explicit.
@@ -352,11 +350,10 @@ class HarnessConfig:
         "code_review":  ["security-review", "review-angular-code"],
         "unit_testing": [],
         "validation":   ["build-validation"],
-        # build-contract: how to write the contract for the next story, used
-        # when the change touches contract files (handoff.py).
+        # build-contract: the optional contract summary for the next story,
+        # used when the change touches contract files (handoff.py).
         "documentation": ["build-contract"],
         "raise_pr":     [],
-        "contract":     ["build-contract"],
     })
     # Stack tags for skills, so phase_skills can be filtered by repo_stacks the
     # same way instruction subfolders already are. A skill listed here loads ONLY
@@ -514,8 +511,16 @@ class HarnessConfig:
     # next story; it is PII-scanned and published to harness-metrics only.
     contract_handoff: bool = True
     # Extra repo-relative globs that form a contract in THIS repo, for layouts
-    # the built-in patterns miss (e.g. "src/app/shared/bridge/**").
+    # the built-in patterns miss (e.g. "src/app/shared/bridge/**"). They are
+    # also published with the contract.
     contract_files: list = field(default_factory=list)
+    # The repo's OpenAPI / Swagger file(s), repo-relative. None (not set) =
+    # auto-detect: any .yml/.yaml/.json outside build/test folders whose content
+    # starts an OpenAPI document. [] = this repo has none. The coding phase may
+    # edit these files even inside an excluded (generated) module, so an API
+    # change and its OpenAPI update ship together (code-first). They are the
+    # contract published for a backend story.
+    api_spec_files: list | None = None
     # Where the documentation phase records this story's answered questions.
     decisions_dir: str = "docs/decisions"
 
@@ -627,6 +632,8 @@ class HarnessConfig:
             dependency_gate=bool(data.get("dependency_gate", cls.dependency_gate)),
             contract_handoff=bool(data.get("contract_handoff", cls.contract_handoff)),
             contract_files=[str(x) for x in (data.get("contract_files") or [])],
+            api_spec_files=([str(x) for x in data.get("api_spec_files")]
+                            if data.get("api_spec_files") is not None else None),
             decisions_dir=str(data.get("decisions_dir", cls.decisions_dir)).strip().strip("/")
                           or cls.decisions_dir,
             attachments_dir=(str(data.get("attachments_dir", cls.attachments_dir)).strip().strip("/")
@@ -678,6 +685,8 @@ class HarnessConfig:
             if glob not in cfg.write_exclude:
                 cfg.write_exclude.append(glob)
 
+        # Repo root for OpenAPI auto-detection (api_spec_files not set).
+        cfg._repo_root = repo_root
         return cfg
 
     # ---------------------------------------------------------------- B4: paths
@@ -739,7 +748,24 @@ class HarnessConfig:
                 out += list(self.test_globs or self._preset_paths()[1])
             else:
                 out.append(g)
-        return self.module_writes(tuple(dict.fromkeys(out)))
+        res = self.module_writes(tuple(dict.fromkeys(out)))
+        if "src/main/**" in phase.allowed_writes:
+            res = tuple(dict.fromkeys(list(res) + self._api_specs()))
+        return res
+
+    def _api_specs(self) -> list:
+        """OpenAPI files the coding phase may edit (see api_spec_files)."""
+        if self.api_spec_files is not None:
+            return list(self.api_spec_files)
+        cached = getattr(self, "_api_specs_cache", None)
+        if cached is None:
+            try:
+                from handoff import detect_api_specs
+                cached = detect_api_specs(self._repo_root) if getattr(self, "_repo_root", None) else []
+            except Exception:
+                cached = []
+            self._api_specs_cache = cached
+        return list(cached)
 
     def phase_exclude(self, phase) -> list:
         """Always-deny globs for a phase: write_exclude, plus the test globs for a
@@ -750,6 +776,11 @@ class HarnessConfig:
             for g in self.test_paths():
                 if g not in out:
                     out.append(g)
+            # The OpenAPI file may sit in an excluded (generated) module:
+            # re-include exactly that file for the code-writing phase.
+            for spec in self._api_specs():
+                if f"!{spec}" not in out:
+                    out.append(f"!{spec}")
         return out
 
     def resolved_coverage_format(self) -> str:
