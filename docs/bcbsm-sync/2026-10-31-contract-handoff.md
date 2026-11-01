@@ -46,7 +46,7 @@ Copy the whole `harness/` folder in one go — `state_machine.py` imports
   `contract_branch` and pass them through (see `docs/service repo-config/SDLC-Harness.yml`).
 - `.harness/config.yaml`: nothing required. Optional: `api_spec_files` (when
   auto-detection picks the wrong file), `contract_files`. Frontend:
-  `phase_skills.code_review: ["security-review", "review-angular-code"]`;
+  `phase_skills.code_review: ["security-review-backend", "security-review-angular", "review-angular-code"]`;
   both: `phase_skills.documentation: ["build-contract"]`.
 
 ## 4. Toolkit (dx_copilot-standards-workspace)
@@ -56,10 +56,20 @@ From mgganeshguptha-source/copilot-toolkit (PRs #18, #19, and the follow-up):
 - `skills/build-context/SKILL.md`, `skills/build-context/assets/context-template.md`.
 - `skills/build-prompt-steps/SKILL.md`.
 - `skills/generate-unit-tests/SKILL.md` — mocked test resources rule.
-- **Check first:** BCBSM's `skills/security-review/` — is it the real security
-  review (with `assets/security-review-template.md`) or the Angular checklist?
-  The personal copy held the Angular checklist; it was renamed to
-  `skills/review-angular-code/`. Do the same only if BCBSM's copy is the checklist.
+- **Security review split (confirmed 1 Nov: BCBSM's `skills/security-review/` is the
+  Angular security review):**
+  1. `git mv skills/security-review skills/security-review-angular`
+  2. In `skills/security-review-angular/SKILL.md` set the frontmatter
+     `name: security-review-angular` and add to its description "Angular / Ionic
+     only; backend code uses security-review-backend".
+  3. If its `assets/security-review-template.md` is referenced by name in the
+     SKILL.md, keep the reference; the folder move keeps the path relative.
+  4. Copy `skills/security-review-backend/` (new) from the personal toolkit.
+  5. Engine `config.py` (this sync) loads `security-review-backend` on backend
+     repos and `security-review-angular` on Angular/Ionic repos. Repos whose
+     `.harness/config.yaml` still says `security-review` keep working: the old
+     name expands to both new names and is filtered by stack. Update the configs
+     to the new names when convenient.
 
 ## 5. Check after the sync
 

@@ -295,8 +295,8 @@ phase_skills:
   context:       ["build-context"]
   prompt_steps:  ["build-prompt-steps"]
   design:        ["build-design"]
-  coding:        ["security-review"]
-  code_review:   ["security-review", "review-angular-code"]
+  coding:        ["security-review-backend", "security-review-angular"]   # per-stack; skill_stacks keeps this repo\'s
+  code_review:   ["security-review-backend", "security-review-angular", "review-angular-code"]
   unit_testing:  []
   validation:    ["build-validation"]
   documentation: ["build-contract"]   # contract hand-off for the next story
