@@ -158,6 +158,15 @@ def detect_generated_modules(repo_root: Path, application_module: str | None) ->
         return []
 
 
+# Old skill names that repos' phase_skills may still use. "security-review" was
+# one folder holding the Angular security checklist; it was split per stack.
+# The old name expands to itself (a toolkit not yet renamed still loads) plus
+# the per-stack skills, which skill_stacks then filters to this repo's stack.
+SKILL_ALIASES = {
+    "security-review": ["security-review", "security-review-backend",
+                        "security-review-angular"],
+}
+
 # Phases added after repos began overriding phase_skills; see skills_for_phase.
 _PHASES_ADDED_LATER = frozenset({"repo_instructions"})
 
@@ -346,8 +355,13 @@ class HarnessConfig:
         # phase ran out of turns without ever writing design.md. build-design does
         # its own bounded read of the code.
         "design":       ["build-design"],
-        "coding":       ["security-review"],
-        "code_review":  ["security-review", "review-angular-code"],
+        # Security review per stack (skill_stacks keeps the repo's own):
+        # security-review-backend (Java / Spring), security-review-angular
+        # (Angular / Ionic). The old name "security-review" still works — see
+        # SKILL_ALIASES.
+        "coding":       ["security-review-backend", "security-review-angular"],
+        "code_review":  ["security-review-backend", "security-review-angular",
+                         "review-angular-code"],
         "unit_testing": [],
         "validation":   ["build-validation"],
         # build-contract: the optional contract summary for the next story,
@@ -368,6 +382,8 @@ class HarnessConfig:
     # reviewer then did.
     skill_stacks: dict = field(default_factory=lambda: {
         "review-angular-code": ["angular-frontend", "ionic", "frontend"],
+        "security-review-backend": ["backend", "kotlin"],
+        "security-review-angular": ["angular-frontend", "frontend", "mobile-frontend", "ionic"],
         "build-copilot-instructions-backend": ["backend"],
         "build-copilot-instructions-angular-frontend": ["angular-frontend", "frontend"],
         "build-copilot-instructions-mobile-frontend": ["mobile-frontend", "ionic"],
@@ -939,7 +955,11 @@ class HarnessConfig:
             # overrides written before this phase existed cannot name it. Fall
             # back to the engine default for it rather than load nothing.
             skills = type(self)().phase_skills
-        wanted = list(skills.get(phase_id, []))
+        wanted = []
+        for name in skills.get(phase_id, []):
+            for n in SKILL_ALIASES.get(name, [name]):
+                if n not in wanted:
+                    wanted.append(n)
         stacks = list(self.repo_stacks or [])
         if not stacks or "*" in stacks:
             return wanted
