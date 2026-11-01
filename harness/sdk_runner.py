@@ -873,6 +873,50 @@ def _build_unittest_dossier(repo_root: Path, log=print,
     return dossier
 
 
+def _generated_naming_block(repo_root: Path) -> str:
+    """Naming rules of the openapi-generator configured in the repo's pom(s), as
+    a prompt block. '' when the repo does not generate code from a spec."""
+    import re as _re
+    try:
+        poms = [p for p in Path(repo_root).rglob("pom.xml")
+                if "target" not in p.parts and "node_modules" not in p.parts][:10]
+    except Exception:
+        return ""
+    lines = []
+    for pom in poms:
+        try:
+            t = pom.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        if "openapi-generator" not in t and "swagger-codegen" not in t:
+            continue
+
+        def _tag(name):
+            m = _re.search(rf"<{name}>\s*([^<]*?)\s*</{name}>", t)
+            return m.group(1) if m else ""
+
+        spec = _tag("inputSpec").replace("${project.basedir}/", "")
+        prefix, suffix = _tag("modelNamePrefix"), _tag("modelNameSuffix")
+        model_pkg, api_pkg = _tag("modelPackage"), _tag("apiPackage")
+        if not (prefix or suffix or model_pkg or api_pkg):
+            continue
+        ex = f"{prefix}Owner{suffix}" if (prefix or suffix) else "Owner"
+        lines.append(
+            f"  - {spec or 'the OpenAPI file'} -> model classes named "
+            f"<{prefix}SchemaName{suffix}> in package {model_pkg or '(generator default)'}"
+            + (f"; API interfaces in {api_pkg}" if api_pkg else "")
+            + f". Example: schema `Owner` -> class `{ex}`."
+        )
+    if not lines:
+        return ""
+    return ("\n\nGENERATED CODE (contract-first): this repo generates Java classes from "
+            "its OpenAPI file at build time. They are NOT in the source tree, so do not "
+            "look for them there and do not guess their names:\n" + "\n".join(lines) +
+            "\nA new schema you add to the OpenAPI file produces a new class with the "
+            "same naming rule. Reference generated classes only by these names, and "
+            "never hand-write a class that the generator produces.")
+
+
 def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
                        review_dossier: str | None = None,
                        unittest_dossier: str | None = None) -> str:
@@ -1407,6 +1451,13 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             base += ("\n\nAdd this line, unchanged, to the PR body under a heading "
                      "'Contract': \"WARNING: API files changed ("
                      + ", ".join(_gap[:5]) + ") but the OpenAPI file was not updated.\"")
+
+    # Contract-first repos: classes generated from the OpenAPI file at build time
+    # are not in the source tree, so the model guesses their names. It guessed
+    # `rest.dto.VisitStatus` for a generator configured with modelNameSuffix=Dto
+    # (petclinic-rest-api PC-101, 2026-11-01) and the build failed on it.
+    if phase.id in ("prompt_steps", "coding", "unit_testing"):
+        base += _generated_naming_block(repo_root)
 
     out = base
     if run.last_feedback and run.approvals.get(phase.id) == "rejected":
