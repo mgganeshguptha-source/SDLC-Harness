@@ -465,6 +465,22 @@ jobs:
       - name: Install GitHub Copilot CLI
         run: npm install -g @github/copilot
 
+      # Print every model this run's MODEL credential can call, with image
+      # (vision) support and limits, then check each model .harness/config.yaml
+      # pins for a phase against that list. Warnings only — never stops the run
+      # (continue-on-error). Same credential as the phases below (see step 6),
+      # because the list differs per credential / organisation. No credits spent.
+      - name: List available models
+        if: ${{ !inputs.contract_only }}
+        continue-on-error: true
+        working-directory: engine/harness
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
+        run: |
+          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
+          python list_models.py --repo ../../service
+
       # --- 6. run the harness (from inside engine/harness for flat imports) ---
       #
       # MODEL CREDENTIAL — WHY COPILOT_MODEL_TOKEN IS SET HERE.
