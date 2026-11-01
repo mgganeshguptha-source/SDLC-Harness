@@ -793,6 +793,52 @@ class StateMachine:
         except Exception:
             _decl, _detected, BLOCKED_FILE = None, None, ".harness/blocked.md"
 
+        # A declaration that names a file this phase IS allowed to write is not a
+        # manual change — the phase misread its scope. Observed on PC-101
+        # (2026-11-01): the reviewer asked for a fix in JdbcOwnerRepositoryImpl
+        # (an existing src/main file the plan did not list), and coding declared
+        # MANUAL_CHANGE_REQUIRED instead of editing it, halting the run. Send it
+        # back ONCE with the permission spelled out; a second false declaration
+        # halts as before.
+        if _decl is not None and _decl.declared and not _detected and _decl.file:
+            try:
+                from boundaries import is_write_allowed as _iwa
+                from config import HarnessConfig as _HCd
+                _cfgd = _HCd.load(self.harness_dir, repo_root=self.repo_root)
+                _target = _decl.file.strip().strip("`").strip()
+                _writable = _iwa(_target, _cfgd.phase_writes(phase),
+                                 repo_root=str(self.repo_root),
+                                 exclude_globs=_cfgd.phase_exclude(phase))
+                _key = f"__false_block__:{phase.id}"
+                if _writable and int(run.iterations.get(_key, 0)) < 1:
+                    run.iterations[_key] = int(run.iterations.get(_key, 0)) + 1
+                    self.log(f"  ! '{phase.id}' declared MANUAL_CHANGE_REQUIRED for "
+                             f"{_target}, which this phase IS allowed to write — "
+                             f"sending it back to make the change itself.")
+                    try:
+                        (self.repo_root / BLOCKED_FILE).unlink()
+                    except Exception:
+                        pass
+                    run.last_feedback = (
+                        f"You declared MANUAL_CHANGE_REQUIRED for {_target}, but you ARE "
+                        f"allowed to edit that file: it is existing application source "
+                        f"inside your write area. Editing an existing file that the plan "
+                        f"did not list is permitted when the change needs it — it is "
+                        f"recorded as a scope addition for the human reviewer. Make the "
+                        f"change yourself now. What you asked for was:\n"
+                        f"  NEEDS: {_decl.needs}\n  SUGGESTED: {getattr(_decl, 'suggested', '')}\n"
+                        + (f"\nThe earlier feedback for this phase was:\n{run.last_feedback}\n"
+                           if run.last_feedback else "")
+                    )
+                    run.iterations[phase.id] = 0
+                    run.approvals[phase.id] = "rejected"
+                    run.current_phase = phase.id
+                    run.status = "running"
+                    run.save(self.harness_dir)
+                    return run
+            except Exception as _e:
+                self.log(f"  [harness] blocked-file check skipped ({type(_e).__name__})")
+
         if _decl is not None and (_decl.declared or _detected):
             msg = halt_message(run.feature_id, phase.id, _decl, _detected)
             if _detected and not _decl.declared:
