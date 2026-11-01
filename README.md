@@ -235,7 +235,7 @@ Flat package under `harness/`.
 | `ai_credits.py` | Reads actual AI-credit consumption from GitHub's billing API |
 | `harness_report.py` | Aggregates the per-run metrics records |
 | `audit_summary.py` | Prints a human-readable audit summary for the most recent run |
-| `list_models.py` | Lists the models available to the Copilot login (spends no credits) |
+| `list_models.py` | Lists the models available to the Copilot login, with image (vision) support and limits; with `--repo`, checks each model `.harness/config.yaml` pins against that list. Runs automatically in every run ("List available models" step). Spends no credits |
 | `test_boundaries.py` | Proves the write-boundary interlock before any SDK or credit spend (14 tests) |
 | `test_learning.py` | Clarification fixes: context-file guard, story refresh on resume, knowledge loading, repeat-question report |
 
