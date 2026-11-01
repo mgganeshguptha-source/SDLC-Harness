@@ -40,6 +40,13 @@ from config import harness_runs_build
 # availability differs by org/subscription.
 DEFAULT_MODEL = "gpt-4.1"
 
+# session.error texts that mean a service limit cut the session off: the phase
+# did not finish, whatever it had written so far (see the FATAL SESSION ERROR
+# block in _run_async). Lower-case substrings.
+# (No bare "429": a request id such as "C80A:11E6D5:...:6AE754E5" can contain it.)
+_INTERRUPTING_ERRORS = ("exceeded your monthly quota", "quota", "rate limit",
+                        "rate-limit", "ratelimit", "too many requests")
+
 
 # GitHub credential prefixes, and whether Copilot accepts that kind for MODEL
 # calls. Repo access and model access are different questions: a classic PAT is
@@ -2011,6 +2018,31 @@ class SdkAgentRunner:
         # writes) is left to the normal gates, which judge what was produced.
         try:
             _sess_err = [e for e in errors if e.startswith("session.error")]
+            # ...EXCEPT when the error is an account / service limit that cut the
+            # session off mid-work (quota, rate limit). The output is then
+            # incomplete by definition, and handing it to the gates passed half a
+            # coding change on to review (petclinic-rest-api PC-101, 2026-11-01:
+            # "You have exceeded your monthly quota" ended the coding session
+            # after its writes; coding was reported exit 0 and the halt came one
+            # phase later, so a resume would have skipped the unfinished coding).
+            _interrupt = [e for e in _sess_err
+                          if any(k in e.lower() for k in _INTERRUPTING_ERRORS)]
+            if _interrupt and (attempted_writes
+                               or (last_message.get("text") or "").strip()
+                               or seen_events.get("assistant.message")):
+                _msg = _interrupt[0][len("session.error: "):] or _interrupt[0]
+                self.log(f"  ! session in phase '{phase.id}' was cut off by a service "
+                         f"limit after doing part of its work — its output is "
+                         f"incomplete; reporting as SDK_ERROR so a resume re-runs "
+                         f"this phase")
+                try:
+                    run.halt_detail = f"sdk: {_msg}"[:300]
+                except Exception:
+                    pass
+                return AgentResult(errored=True, error_msg=_msg,
+                                   attempted_writes=attempted_writes,
+                                   tokens=getattr(self, "_last_usage", {}),
+                                   usage_metrics=getattr(self, "_last_usage_metrics", {}) or {})
             if (_sess_err and not attempted_writes
                     and not (last_message.get("text") or "").strip()
                     and not seen_events.get("assistant.message")):
