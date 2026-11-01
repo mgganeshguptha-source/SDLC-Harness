@@ -56,20 +56,30 @@ From mgganeshguptha-source/copilot-toolkit (PRs #18, #19, and the follow-up):
 - `skills/build-context/SKILL.md`, `skills/build-context/assets/context-template.md`.
 - `skills/build-prompt-steps/SKILL.md`.
 - `skills/generate-unit-tests/SKILL.md` — mocked test resources rule.
-- **Security review split (confirmed 1 Nov: BCBSM's `skills/security-review/` is the
-  Angular security review):**
-  1. `git mv skills/security-review skills/security-review-angular`
-  2. In `skills/security-review-angular/SKILL.md` set the frontmatter
-     `name: security-review-angular` and add to its description "Angular / Ionic
-     only; backend code uses security-review-backend".
-  3. If its `assets/security-review-template.md` is referenced by name in the
-     SKILL.md, keep the reference; the folder move keeps the path relative.
-  4. Copy `skills/security-review-backend/` (new) from the personal toolkit.
-  5. Engine `config.py` (this sync) loads `security-review-backend` on backend
-     repos and `security-review-angular` on Angular/Ionic repos. Repos whose
-     `.harness/config.yaml` still says `security-review` keep working: the old
-     name expands to both new names and is filtered by stack. Update the configs
-     to the new names when convenient.
+- **Security review split:** the personal toolkit is now the source for both
+  security skills: `skills/security-review-angular/` and
+  `skills/security-review-backend/` (and `skills/review-angular-code/`).
+
+### Replacing the BCBSM toolkit with the personal one (zip and copy)
+
+Unzipping over the existing folder ADDS and OVERWRITES files but does not
+DELETE files the personal copy no longer has. A stale `skills/security-review/`
+left behind would load on EVERY repo, backend included (the engine treats the
+old name as stack-neutral). So:
+
+1. Before replacing, list what only BCBSM has, and keep anything still needed:
+       diff -rq <bcbsm-clone> <personal-folder> | grep "Only in <bcbsm-clone>"
+   Expected: `skills/security-review/` (replaced by `security-review-angular`).
+   Anything else listed is BCBSM-only content — copy it into the personal repo
+   first, or it is lost.
+2. In the BCBSM clone, delete everything except `.git/`, then unzip the
+   personal copy into it (or `rsync -a --delete --exclude .git <personal>/ <bcbsm>/`).
+3. `git status` should show `skills/security-review/` deleted and
+   `skills/security-review-angular/`, `skills/security-review-backend/` added.
+4. Commit to `master` and push.
+
+The same applies to the engine repo (dx_SDLC-Harness): keep BCBSM-only files
+(the list-models workflow step) by checking the diff first.
 
 ## 5. Check after the sync
 
