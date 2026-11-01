@@ -1114,12 +1114,18 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             _ap = sorted(_approved_paths_from_plan(_pf.read_text(encoding="utf-8")))
             if _ap:
                 _approved_block = (
-                    "\nThe approved plan authorises changes to EXACTLY these files:\n"
+                    "\nThe approved plan lists these files:\n"
                     + "\n".join(f"  - {p}" for p in _ap)
                     + "\nDo NOT create new production classes that are not on this list. "
                       "If the build fails, fix the files on this list — do NOT invent new "
-                      "classes to route around the failure. If the change genuinely cannot "
-                      "be made within this scope, say so explicitly instead of expanding it.\n"
+                      "classes to route around the failure. You MAY edit an EXISTING "
+                      "application source file that is not on the list when the change "
+                      "or a reviewer's finding genuinely needs it (e.g. a query in a "
+                      "sibling repository class): it is recorded as a scope addition for "
+                      "the human reviewer, and it is NOT a reason to declare "
+                      "MANUAL_CHANGE_REQUIRED. That declaration is only for files you "
+                      "cannot write at all (pom.xml, build or plugin configuration, "
+                      "anything outside the application source).\n"
                 )
     except Exception:
         pass
