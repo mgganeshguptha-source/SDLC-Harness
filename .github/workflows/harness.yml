@@ -770,7 +770,14 @@ jobs:
           cd "$MDIR"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
-          git add metrics audit contracts 2>/dev/null
+          # Stage only the folders that exist. `git add` with ANY unmatched
+          # pathspec stages NOTHING ("pathspec 'contracts' did not match any
+          # files") — and with 2>/dev/null that was silent: every run without a
+          # contract (most runs) logged "No new metrics or audit to publish" and
+          # harness-metrics was never created (petclinic-rest-api, 2026-11-01).
+          ADD=()
+          for d in metrics audit contracts; do [ -d "$d" ] && ADD+=("$d"); done
+          [ ${#ADD[@]} -gt 0 ] && git add -- "${ADD[@]}"
           if git diff --cached --quiet; then
             echo "No new metrics or audit to publish."
           else
