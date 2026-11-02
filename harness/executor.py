@@ -98,6 +98,69 @@ class PhaseExecutor:
         self.harness_dir = harness_dir
         self.log = log
 
+    def _check_planned_files(self, phase, run, plan_file, allowed, exclude):
+        """None when every planned file exists or is explained in plan-skips.md.
+        Otherwise REJECTED (first time: send coding back with the list) or
+        ARTIFACT_MISSING (second time: halt for a human)."""
+        from execution_record import (missing_planned_files, read_plan_skips,
+                                      PLAN_SKIPS_FILE)
+        plan_text = plan_file.read_text(encoding="utf-8") if plan_file.exists() else ""
+        missing = missing_planned_files(
+            plan_text, self.repo_root,
+            lambda p: is_write_allowed(p, allowed, repo_root=str(self.repo_root),
+                                       exclude_globs=exclude))
+        if not missing:
+            return None
+        skips = read_plan_skips(self.repo_root)
+        explained = [p for p in missing if p in skips]
+        unexplained = [p for p in missing if p not in skips]
+        for p in explained:
+            self.log(f"  [harness] planned file left out on purpose: {p} — {skips[p]}")
+        if not unexplained:
+            return None
+
+        key = f"__missing_planned__:{phase.id}"
+        tries = int(run.iterations.get(key, 0))
+        self.log(f"  ! PLANNED FILES MISSING — the approved plan lists "
+                 f"{len(unexplained)} file(s) that '{phase.id}' did not create:")
+        for p in unexplained:
+            self.log(f"      - {p}")
+        if tries < 1:
+            run.iterations[key] = tries + 1
+            run.iterations[phase.id] = 0
+            self.log(f"  [harness] sending '{phase.id}' back once to create them")
+            run.last_feedback = (
+                "PLANNED FILES MISSING. The approved plan lists these files, and they "
+                "do not exist:\n"
+                + "\n".join(f"  - {p}" for p in unexplained)
+                + "\n\nCreate each one now; its folder already exists. If a file is "
+                  "genuinely no longer needed (for example a review finding made it "
+                  f"unnecessary), do not create it: add one line to {PLAN_SKIPS_FILE} "
+                  "instead, in the form\n"
+                  "  SKIPPED: <path> — <why it is not needed>\n"
+                  "The reason is shown to the human reviewer.\n"
+                + (f"\nThe earlier feedback for this phase was:\n{run.last_feedback}\n"
+                   if run.last_feedback else "")
+            )
+            return ExitCode.REJECTED
+
+        msg = (
+            "\n  ============ PLANNED FILES MISSING: HALTED ============\n"
+            f"  The '{phase.id}' phase was told once and still did not create:\n"
+            + "".join(f"    - {p}\n" for p in unexplained) +
+            f"  It also did not explain them in {PLAN_SKIPS_FILE}.\n"
+            "  Read the coding output above for what stopped it (a refused write,\n"
+            "  a missing dependency, a plan the code cannot follow). Then either\n"
+            f"  add the files by hand on harness-wip/{run.feature_id} and resume\n"
+            "  from 'code_review', or correct the story and start a fresh run.\n"
+            "  The change has NOT advanced to review.\n"
+            "  =======================================================\n"
+        )
+        self.log(msg)
+        run.last_feedback = msg
+        run.halt_detail = f"{phase.id}: planned file(s) not created"
+        return ExitCode.ARTIFACT_MISSING
+
     def _source_roots(self) -> tuple:
         """Directory prefixes of this repo's production source (from the config's
         source globs, e.g. 'src/main/', '<module>/src/main/', 'src/app/'). Used by
@@ -411,6 +474,18 @@ class PhaseExecutor:
                           "hierarchy to work around a build failure."
                     )
                     return ExitCode.SCOPE_VIOLATION
+
+                # THIRD CHECK — planned files never created. petclinic-angular-demo
+                # PC-103 (2026-11-02): coding changed two existing files, could not
+                # create the five new ones the plan listed, and still reported
+                # "scope matches plan"; three review loops were spent finding it.
+                # Leaving a planned file out is allowed when the phase says why in
+                # .harness/plan-skips.md (a review finding can make a file
+                # unnecessary). An unexplained gap is sent back once, then halts.
+                code = self._check_planned_files(phase, run, plan_file,
+                                                 _allowed, _exclude)
+                if code is not None:
+                    return code
             except Exception as e:
                 self.log(f"  [harness] execution record error: {e}")
 
