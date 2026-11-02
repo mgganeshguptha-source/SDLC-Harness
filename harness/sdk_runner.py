@@ -711,24 +711,30 @@ def _test_files(repo_root: Path) -> list:
     return sorted({p.strip() for p in listed if p.strip() and cfg.is_test_file(p.strip())})
 
 
-def _committed_changes(repo_root: Path, changed_hint: list | None, log=print) -> list:
+def _committed_changes(repo_root: Path, changed_hint: list | None, log=print,
+                       already: list | None = None) -> list:
     """Production files this run changed that are ALREADY COMMITTED.
 
     The dossiers find changed files with `git diff HEAD` + untracked files, which
     is right on a fresh run (the coding phase's edits are uncommitted). On a
-    RESUME the run continues from harness-wip/<feature>, where those edits are
-    committed, so the diff is empty and the dossier used to come back empty
-    ("dossier unavailable"), leaving the phase to rediscover the code by reading.
-    Fall back to the run's recorded changed_main_files, keeping those that exist.
+    RESUME the run continues from harness-wip/<feature>, where earlier edits are
+    committed, so `git diff` misses them. Add the run's recorded
+    changed_main_files that exist and are not already listed.
+
+    This used to apply only when the working tree had NO changes. A resume whose
+    coding pass added new files then showed the reviewer only the new files:
+    petclinic-angular-demo PC-103 (2026-11-02) halted on "visits.module.ts and
+    app.component.ts are not wired up" while both were committed and correct.
     """
+    seen = set(already or [])
     out = []
     for rel in changed_hint or []:
         rel = str(rel).replace("\\", "/")
-        if (repo_root / rel).is_file() and rel not in out:
+        if (repo_root / rel).is_file() and rel not in out and rel not in seen:
             out.append(rel)
     if out:
-        log(f"  [dossier] no uncommitted changes (resume) — using the {len(out)} "
-            f"production file(s) this run recorded")
+        log(f"  [dossier] adding {len(out)} committed production file(s) this run "
+            f"changed earlier: {', '.join(out)}")
     return out
 
 
@@ -745,8 +751,7 @@ def _build_review_dossier(repo_root: Path, log=print,
     ).splitlines() if ln.strip()])
     diff = _run_git(repo_root, "diff", "HEAD", "--", *tracked) if tracked else ""
     changed = list(dict.fromkeys(tracked + untracked))  # de-dupe, keep order
-    if not changed:
-        changed = _committed_changes(repo_root, changed_hint, log)
+    changed += _committed_changes(repo_root, changed_hint, log, already=changed)
     if not changed:
         return None
 
@@ -811,8 +816,7 @@ def _build_unittest_dossier(repo_root: Path, log=print,
         repo_root, "ls-files", "--others", "--exclude-standard", "--", *specs
     ).splitlines() if ln.strip()])
     changed = list(dict.fromkeys(tracked + untracked))
-    if not changed:
-        changed = _committed_changes(repo_root, changed_hint, log)
+    changed += _committed_changes(repo_root, changed_hint, log, already=changed)
     if not changed:
         return None
 
