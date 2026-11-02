@@ -1141,7 +1141,18 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     # run, so validation judges by reading code and the PR must not claim green.
     # On (default): the harness gate already built and tested — add nothing.
     if harness_runs_build():
-        build_status_validation = build_status_pr = ""
+        # Validation runs AFTER the harness's build/test gate, so reaching it
+        # means that gate passed on this exact code. Say so: without it the
+        # validator (which may not run shell commands) marked "the build passes"
+        # criteria UNVERIFIABLE (PC-102, 2026-11-02).
+        build_status_validation = (
+            "BUILD STATUS: the harness itself built this code and ran its test "
+            "command at the build gate just before this phase, and it PASSED on "
+            "the current tree (the gate stops the run otherwise; its output is in "
+            ".harness/validation-report.txt). A criterion that only requires the "
+            "build or the existing test command to pass is MET on that evidence. "
+            "Do not try to run it yourself.\n")
+        build_status_pr = ""
     else:
         build_status_validation = (
             "BUILD STATUS: the harness has NOT compiled this code or run any test "

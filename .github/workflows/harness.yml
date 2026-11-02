@@ -749,6 +749,18 @@ jobs:
           for f in .harness/run-state.json .harness/blocked.md; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
+          # The phase artifacts later phases read — the context file(s), the
+          # approved plan and the design — ride on WIP too, or a resume runs
+          # coding without its plan (scope gate: "approved: (none parsed)") and
+          # validation without the context's acceptance criteria (PC-102,
+          # 2026-11-02: "Context file not found"). The PR step excludes .harness/
+          # and .github/story-context-files/, so none of this reaches the PR.
+          for f in .harness/prompt-steps.md .harness/design.md; do
+            if [ -f "$f" ]; then git add -f "$f"; fi
+          done
+          if [ -d .github/story-context-files ]; then
+            git add -f .github/story-context-files
+          fi
           STATUS=$(python3 -c "import json;print(json.load(open('.harness/run-state.json'))['current_phase'])" 2>/dev/null || echo unknown)
           if git diff --cached --quiet; then
             echo "Nothing new to commit on $WIP_BRANCH."

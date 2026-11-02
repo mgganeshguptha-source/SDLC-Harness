@@ -40,17 +40,27 @@ _VERDICT = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Per-criterion heading: "### AC-4 — NOT_MET"  /  "### AC-2.1 - MET"
+# Per-criterion heading: "### AC-4 — NOT_MET"  /  "### AC-2.1 - MET" / "### AC4 — MET".
+# The hyphen is optional: when validation works from a story numbered AC1, AC2
+# (no context file), it writes "### AC1 — MET", and those verdicts were not
+# counted at all (PC-102, 2026-11-02: 6 met / 1 unverifiable read as 0 / 0 / 0).
+# Ids are normalised to "AC-n" (see _ac_id) so both spellings compare equal.
 _AC_VERDICT = re.compile(
-    r"^#{1,6}\s*(AC-[0-9]+(?:\.[0-9]+)?)\s*[\u2014\u2013:\-]+\s*"
+    r"^#{1,6}\s*(AC-?[0-9]+(?:\.[0-9]+)?)\s*[\u2014\u2013:\-]+\s*"
     r"(MET|NOT[_\- ]?MET|UNVERIFIABLE)\b",
     re.IGNORECASE | re.MULTILINE,
 )
 
 # AC ids as they appear in context.md: "- AC-3: ..." or "AC-2.1 —"
-_AC_IN_CONTEXT = re.compile(r"^[\s\-\*>\u2022]*\**\s*(AC-[0-9]+(?:\.[0-9]+)?)\s*:",
+_AC_IN_CONTEXT = re.compile(r"^[\s\-\*>\u2022]*\**\s*(AC-?[0-9]+(?:\.[0-9]+)?)\s*:",
                             re.MULTILINE)
-_WITHDRAWN = re.compile(r"(AC-[0-9]+(?:\.[0-9]+)?)\s*:?\s*\[WITHDRAWN\]", re.IGNORECASE)
+_WITHDRAWN = re.compile(r"(AC-?[0-9]+(?:\.[0-9]+)?)\s*:?\s*\[WITHDRAWN\]", re.IGNORECASE)
+
+
+def _ac_id(raw: str) -> str:
+    """'AC4' / 'ac-4' / 'AC-4' -> 'AC-4'."""
+    u = raw.upper()
+    return u if u.startswith("AC-") else "AC-" + u[2:]
 
 
 @dataclass
@@ -83,10 +93,10 @@ def _context_ac_ids(repo_root: Path, search_dir: str) -> list:
     if f is None:
         return []
     text = f.read_text(encoding="utf-8", errors="replace")
-    withdrawn = {m.upper() for m in _WITHDRAWN.findall(text)}
+    withdrawn = {_ac_id(m) for m in _WITHDRAWN.findall(text)}
     seen, out = set(), []
     for m in _AC_IN_CONTEXT.findall(text):
-        u = m.upper()
+        u = _ac_id(m)
         if u in withdrawn or u in seen:
             continue
         seen.add(u)
@@ -111,7 +121,7 @@ def scan_validation(repo_root: Path,
 
     met, not_met, unver = [], [], []
     for ac, v in _AC_VERDICT.findall(text):
-        acu, vn = ac.upper(), _norm(v)
+        acu, vn = _ac_id(ac), _norm(v)
         if vn == "MET":
             met.append(acu)
         elif vn == "NOT_MET":
