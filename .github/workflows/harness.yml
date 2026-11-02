@@ -314,6 +314,19 @@ jobs:
       # cannot read another private repo, so without an explicit token checkout
       # fails with "could not read Username for 'https://github.com'". The same
       # COPILOT_GITHUB_TOKEN that reads the toolkit reads the engine.
+      # A missing secret otherwise surfaces as actions/checkout's bare
+      # "Input required and not supplied: token" (petclinic-angular-demo,
+      # 2026-11-02) — say which secret and where to add it.
+      - name: Check COPILOT_GITHUB_TOKEN is set
+        env:
+          TOKEN_SET: ${{ secrets.COPILOT_GITHUB_TOKEN != '' }}
+        run: |
+          if [ "$TOKEN_SET" != "true" ]; then
+            echo "::error title=COPILOT_GITHUB_TOKEN not set::The secret COPILOT_GITHUB_TOKEN is not set on ${{ github.repository }}. Add it under Settings > Secrets and variables > Actions > New repository secret (a token that can read ${{ inputs.engine_repo }} and ${{ inputs.toolkit_repo }} and push to this repo), then run again. The harness has not started."
+            exit 1
+          fi
+          echo "COPILOT_GITHUB_TOKEN is set."
+
       - name: Checkout SDLC-Harness
         uses: actions/checkout@v5
         with:
@@ -439,8 +452,11 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
-          # No Maven cache with a library store: the store IS the local repo.
-          cache: ${{ inputs.maven_libs_repo == '' && 'maven' || '' }}
+          # Maven cache only for a Maven repo without a library store (the store
+          # IS the local repo). setup-java@v5 FAILS the step when cache: maven
+          # finds no pom.xml, which stopped every Angular run here
+          # (petclinic-angular-demo, 2026-11-02).
+          cache: ${{ inputs.maven_libs_repo == '' && hashFiles('service/**/pom.xml') != '' && 'maven' || '' }}
 
       # --- 4a. BUILD FROM A GIT LIBRARY STORE (maven_libs_repo set) ---
       # The runner cannot reach the company artifact repository, so internal
