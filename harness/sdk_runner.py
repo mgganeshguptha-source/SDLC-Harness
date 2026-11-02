@@ -1183,6 +1183,12 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
                       "MANUAL_CHANGE_REQUIRED. That declaration is only for files you "
                       "cannot write at all (pom.xml, build or plugin configuration, "
                       "anything outside the application source).\n"
+                      "Create every file on this list; the folders already exist. If a "
+                      "listed file turns out not to be needed (for example a reviewer's "
+                      "finding removes the need), do not create it: add one line to "
+                      ".harness/plan-skips.md as `SKIPPED: <path> — <why>`. A listed "
+                      "file that is neither created nor explained there sends this "
+                      "phase back.\n"
                 )
     except Exception:
         pass

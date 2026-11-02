@@ -86,6 +86,57 @@ def _rel_to_repo(path: str, repo_root: Path) -> str:
     return p.lstrip("/")
 
 
+PLAN_SKIPS_FILE = ".harness/plan-skips.md"
+_SKIP_LINE = re.compile(r"^\s*[-*]?\s*SKIPPED:\s*`?([^`\s]+)`?\s*(?:[-—–:]+\s*(.*))?$",
+                        re.IGNORECASE)
+_DELETE_ROW = re.compile(r"\b(delete|deleted|remove|removed|retire)\b", re.IGNORECASE)
+
+
+def read_plan_skips(repo_root: Path) -> dict:
+    """Planned files the coding phase chose not to create, with its reason.
+
+    One line per file in .harness/plan-skips.md:
+        SKIPPED: src/app/store/visits/visits.selectors.ts — selectors folded into the reducer
+    A line with no reason does not count: the reason is what the reviewer reads."""
+    f = Path(repo_root) / PLAN_SKIPS_FILE
+    if not f.is_file():
+        return {}
+    out = {}
+    for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = _SKIP_LINE.match(line)
+        if m and (m.group(2) or "").strip():
+            out[_norm(m.group(1))] = m.group(2).strip()
+    return out
+
+
+def missing_planned_files(plan_text: str, repo_root: Path, writable) -> list[str]:
+    """Files in the plan's Impacted Files that do not exist after coding.
+
+    Only files the coding phase may write count (`writable(path) -> bool`), and
+    rows the plan marks as a delete/remove are ignored. A planned edit to an
+    existing file that was left unchanged is not reported here: the file exists,
+    and whether the edit was needed is the reviewer's call."""
+    root = Path(repo_root)
+    rows = {}
+    for line in plan_text.splitlines():
+        if line.strip().startswith("|"):
+            for p in _approved_paths_from_plan("Impacted Files\n" + line):
+                rows.setdefault(p, line)
+    missing = []
+    for p in sorted(_approved_paths_from_plan(plan_text)):
+        if (root / p).exists():
+            continue
+        if _DELETE_ROW.search(rows.get(p, "")):
+            continue
+        try:
+            if not writable(p):
+                continue
+        except Exception:
+            continue
+        missing.append(p)
+    return missing
+
+
 def append_execution_record(plan_file: Path, repo_root: Path,
                             attempted_writes: list, phase_id: str) -> dict:
     """Append a factual execution record. Returns a summary dict (incl. scope_additions)."""
