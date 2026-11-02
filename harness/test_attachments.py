@@ -348,3 +348,31 @@ def test_real_pdf_text(tmp_path):
     assert res.ok, res.problems
     md = Path(res.items[0]["path"]).read_text()
     assert "OUTAGE when status is FAILED" in md and res.items[0]["converted_from"] == "pdf"
+
+
+def test_mock_samples_are_not_pii_scanned(tmp_path):
+    """Invented sample values (e.g. birthDate 2026-01-01) must not halt the run;
+    the attached OpenAPI file itself is still scanned."""
+    import attachments as A
+    from config import HarnessConfig
+    (tmp_path / ".harness").mkdir()
+    (tmp_path / ".harness" / "config.yaml").write_text("attachment_ocr: false\n")
+    d = tmp_path / "stories" / "PC-9"
+    d.mkdir(parents=True)
+    (d / "openapi.yml").write_text(
+        "openapi: 3.0.1\ninfo:\n  title: T\n  version: '1'\npaths:\n"
+        "  /pets:\n    get:\n      responses:\n        '200':\n          description: ok\n"
+        "          content:\n            application/json:\n              schema:\n"
+        "                $ref: '#/components/schemas/Pet'\n"
+        "components:\n  schemas:\n    Pet:\n      type: object\n      properties:\n"
+        "        birthDate:\n          type: string\n          format: date\n")
+    cfg = HarnessConfig.load(tmp_path / ".harness", repo_root=tmp_path)
+    import os
+    os.environ["HARNESS_CONFIRM_NO_PHI"] = "true"
+    try:
+        res = A.prepare(tmp_path, cfg, "PC-9", "story text")
+    finally:
+        os.environ.pop("HARNESS_CONFIRM_NO_PHI", None)
+    assert not res.findings
+    assert res.ok, res.problems
+    assert any(str(i.get("name", "")).endswith(".mock-samples.json") for i in res.items), res.items
