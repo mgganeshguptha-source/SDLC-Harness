@@ -423,6 +423,16 @@ def check_dependencies(repo_root: Path, cfg, feature_id: str, story: str) -> Dep
             for r in match:
                 tied[r].append(rel)
             res.contracts.append({"file": rel, "repo": match[0] if match else None})
+        # One upstream repo named: every attached contract file is its contract.
+        # Developers copy the upstream file as it is (e.g. openapi.yml), so its
+        # name need not mention the repo. The name check only matters when a
+        # story names several repos and the files must be told apart.
+        if len(req.repos) == 1:
+            r0 = req.repos[0]
+            for c in res.contracts:
+                if c.get("repo") is None and c.get("file") != "story section":
+                    c["repo"] = r0
+                    tied[r0].append(c["file"])
         for r in req.repos:
             if not tied[r] and not sections[r]:
                 res.warnings.append(

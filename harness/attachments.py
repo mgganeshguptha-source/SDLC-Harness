@@ -297,6 +297,10 @@ def resolve_dir(repo_root: Path, cfg, feature_id: str) -> Path:
 def discover(folder: Path) -> list[Path]:
     if not folder.is_dir():
         return []
+    # The story itself may live in its attachments folder
+    # (stories/<id>/<id>.md next to stories/<id>/openapi.yml): it is the story,
+    # not an attachment. The folder is named after the feature id.
+    story_names = {f"{folder.name}.md".lower(), f"{folder.name}-story.md".lower()}
     files = []
     for p in sorted(folder.rglob("*")):
         if not p.is_file():
@@ -304,6 +308,8 @@ def discover(folder: Path) -> list[Path]:
         # Hidden files/folders and OS clutter are not attachments.
         if (any(part.startswith(".") for part in p.relative_to(folder).parts)
                 or p.name.lower() in IGNORED_NAMES):
+            continue
+        if p.parent == folder and p.name.lower() in story_names:
             continue
         files.append(p)
     return files
