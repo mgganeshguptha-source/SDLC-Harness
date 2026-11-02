@@ -248,6 +248,51 @@ jobs:
           fetch-depth: 0
           ref: ${{ (inputs.contract_only && inputs.contract_branch) || (inputs.resume && format('harness-wip/{0}', inputs.feature_id)) || (inputs.base != '' && inputs.base) || github.ref }}
 
+      # A FRESH run force-pushes harness-wip/<feature> at its end, replacing
+      # whatever was there. That is harmless when the branch holds only the
+      # harness's own commits (a fresh run redoes that work), but the documented
+      # way to fix a halted run by hand is to commit ON that branch and resume —
+      # so a fresh run started by mistake would silently throw those fixes away.
+      # Halt before anything else runs (no engine checkout, no model call, and
+      # the always-run push/publish steps are skipped) when the branch has a
+      # commit not made by harness-bot.
+      - name: Guard manual changes on the working branch (fresh runs only)
+        id: wip_guard
+        if: ${{ !inputs.resume && !inputs.contract_only }}
+        working-directory: service
+        run: |
+          FEATURE="${{ inputs.feature_id }}"
+          WIP="harness-wip/${FEATURE}"
+          BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
+          REPO="${{ github.repository }}"
+          if ! git rev-parse -q --verify "refs/remotes/origin/${WIP}" >/dev/null; then
+            echo "No ${WIP} on ${REPO} — nothing to protect."
+            exit 0
+          fi
+          # Commits on the working branch that the story branch does not have.
+          NOT_BASE="origin/${BASE}"
+          git rev-parse -q --verify "refs/remotes/${NOT_BASE}" >/dev/null || NOT_BASE=""
+          MANUAL=$(git log --format='%h %an <%ae> %s' "origin/${WIP}" ${NOT_BASE:+--not "$NOT_BASE"} \
+                   | grep -v ' harness-bot <harness-bot@users.noreply.github.com> ' || true)
+          if [ -z "$MANUAL" ]; then
+            echo "${WIP} holds only harness-bot commits — this fresh run will replace it."
+            exit 0
+          fi
+          echo "Commits on ${WIP} not made by the harness:"
+          echo "$MANUAL" | sed 's/^/  /'
+          MSG="Your earlier WIP branch had manual changes saved: branch '${WIP}' in ${REPO} (https://github.com/${REPO}/tree/${WIP}). If you meant to continue, run again and resume the earlier run by ticking the 'resume' checkbox when starting the workflow. Else, delete the WIP branch '${WIP}' manually before starting a fresh run."
+          echo "::error title=Manual changes on ${WIP}::${MSG}"
+          {
+            echo "### Fresh run stopped — manual changes on \`${WIP}\`"
+            echo ""
+            echo "${MSG}"
+            echo ""
+            echo '```'
+            echo "$MANUAL"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       - name: Verify resume state
         if: inputs.resume
         working-directory: service
@@ -652,7 +697,9 @@ jobs:
       # with resume=true. Their commit and the harness's output then share one
       # lineage instead of racing on separate branches.
       - name: Push working branch (always)
-        if: always() && hashFiles('engine/harness/run.py') != '' && !inputs.contract_only
+        # Never after the manual-changes guard stopped the run: pushing would
+        # overwrite the very commits it protected.
+        if: always() && hashFiles('engine/harness/run.py') != '' && !inputs.contract_only && steps.wip_guard.outcome != 'failure'
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
