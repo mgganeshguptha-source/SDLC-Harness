@@ -40,23 +40,36 @@ def resolve_story_file(repo: Path, feature_id: str, configured: str) -> tuple[Pa
     """Pick the story file for a run.
 
     One file per story lets several stories sit side by side instead of each
-    run overwriting a shared file. Looks in the folder of the configured
-    story_file (default stories/) for, in order:
-      <feature_id>-story.md, <feature_id>.md   (case-insensitive)
-    and falls back to the configured file itself (stories/current-story.md).
+    run overwriting a shared file. Looks, case-insensitively, for:
+      <folder>/<feature_id>/<feature_id>-story.md, <folder>/<feature_id>/<feature_id>.md
+        (the story inside its own folder, next to its attachments — e.g.
+         stories/PC-102/PC-102.md with stories/PC-102/openapi.yml)
+      <folder>/<feature_id>-story.md, <folder>/<feature_id>.md
+    where <folder> is the folder of the configured story_file (default
+    stories/), and falls back to the configured file itself
+    (stories/current-story.md).
 
     Returns (path, per_story) - per_story is False when the fallback was used,
     so the caller can warn that the story may belong to a different feature.
     """
     configured_path = Path(repo) / configured
     folder = configured_path.parent
-    wanted = [f"{feature_id}-story.md".lower(), f"{feature_id}.md".lower()]
+    wanted = story_file_names(feature_id)
     if feature_id and folder.is_dir():
-        by_name = {f.name.lower(): f for f in folder.iterdir() if f.is_file()}
-        for name in wanted:
-            if name in by_name:
-                return by_name[name], True
+        # The story's own folder first (stories/<id>/), then the shared folder.
+        sub = next((d for d in folder.iterdir()
+                    if d.is_dir() and d.name.lower() == feature_id.lower()), None)
+        for where in ([sub] if sub else []) + [folder]:
+            by_name = {f.name.lower(): f for f in where.iterdir() if f.is_file()}
+            for name in wanted:
+                if name in by_name:
+                    return by_name[name], True
     return configured_path, False
+
+
+def story_file_names(feature_id: str) -> list:
+    """File names (lower-case) a story for `feature_id` may have."""
+    return [f"{feature_id}-story.md".lower(), f"{feature_id}.md".lower()]
 
 
 def story_hash(text: str) -> str:
@@ -88,11 +101,24 @@ def read_story_from_ref(repo: Path, ref: str, feature_id: str,
     if listing.returncode != 0:
         raise FileNotFoundError(f"cannot list {folder or '.'} on {ref}: "
                                 f"{listing.stderr.strip()}")
-    by_name = {Path(n).name.lower(): n for n in listing.stdout.splitlines() if n}
+    entries = [n for n in listing.stdout.splitlines() if n]
     path = None
-    for name in (f"{feature_id}-story.md".lower(), f"{feature_id}.md".lower()):
-        if feature_id and name in by_name:
-            path = by_name[name]
+    # Same precedence as resolve_story_file: the story's own folder first.
+    sub = next((n for n in entries
+                if feature_id and Path(n).name.lower() == feature_id.lower()), None)
+    places = []
+    if sub:
+        sl = _git("ls-tree", "--name-only", ref, "--", sub.rstrip("/") + "/")
+        if sl.returncode == 0:
+            places.append([n for n in sl.stdout.splitlines() if n])
+    places.append(entries)
+    for names in places:
+        by_name = {Path(n).name.lower(): n for n in names}
+        for name in story_file_names(feature_id):
+            if feature_id and name in by_name:
+                path = by_name[name]
+                break
+        if path:
             break
     path = path or configured.replace("\\", "/")
     shown = _git("show", f"{ref}:{path}")

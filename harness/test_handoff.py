@@ -150,13 +150,26 @@ def test_gate_openapi_file_tied_by_name_no_subfolder(tmp_path):
     assert res.ok and res.warnings == []
 
 
-def test_gate_store_folder_untied_warns_only(tmp_path):
+def test_gate_single_repo_takes_untied_files(tmp_path):
+    # One upstream repo named: files copied as they are (no repo in the name)
+    # are that repo's contract — no warning.
     repo = _repo(tmp_path)
     d = _att(repo) / "store" / "selectors"
     d.mkdir(parents=True)
     (d / "visitsummary.selectors.ts").write_text("export const x = 1;", encoding="utf-8")
     res = HO.check_dependencies(repo, _cfg(repo), "F-2", f"{LINE} dx_mpa_responsive")
-    assert res.ok and "could be tied" in res.warnings[0]
+    assert res.ok and not res.warnings
+    assert all(c["repo"] == "dx_mpa_responsive" for c in res.contracts)
+
+
+def test_gate_several_repos_untied_warns_only(tmp_path):
+    repo = _repo(tmp_path)
+    d = _att(repo) / "store" / "selectors"
+    d.mkdir(parents=True)
+    (d / "visitsummary.selectors.ts").write_text("export const x = 1;", encoding="utf-8")
+    res = HO.check_dependencies(repo, _cfg(repo), "F-2",
+                                f"{LINE} dx_mpa_responsive, dx_other_repo")
+    assert res.ok and any("could be tied" in w for w in res.warnings)
 
 
 def test_gate_harness_summary_wrong_repo_halts(tmp_path):
