@@ -75,9 +75,12 @@ HEADER_END = "-->"
 
 # Attached files that count as a contract.
 CONTRACT_EXTS = (".yml", ".yaml", ".json", ".ts")
-# Folders never searched for OpenAPI files.
+# Folders never searched for OpenAPI files. `stories` holds story inputs, such
+# as an UPSTREAM repo's OpenAPI file attached for a hand-off; publishing those
+# as this repo's contract passed petclinic-rest-api's spec on to PC-104 as if
+# petclinic-angular-demo owned it (PC-103, 2026-11-02).
 _SKIP_DIRS = {"node_modules", "target", "dist", "build", ".git", ".harness", ".angular",
-              "audit", "metrics", "contracts", "coverage", ".idea", ".vscode"}
+              "audit", "metrics", "contracts", "coverage", ".idea", ".vscode", "stories"}
 _OPENAPI_RX = re.compile(r"^(openapi|swagger)\s*:", re.MULTILINE)
 
 # Changed files that mean the change probably alters a contract other repos
