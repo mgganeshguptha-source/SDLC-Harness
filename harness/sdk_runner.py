@@ -63,6 +63,56 @@ _TOKEN_KINDS = {
 }
 
 
+def ensure_planned_dirs(repo_root: Path, phase_id: str, allowed, exclude,
+                        log=print) -> list[str]:
+    """Create the missing parent folders of the files in the approved plan.
+
+    Every shell command is denied, and the SDK's create tool fails when the
+    parent folder is missing, so the model cannot add a file under a NEW folder.
+    petclinic-angular-demo PC-103 (2026-11-02): the plan put five new files under
+    src/app/store/visits/; coding could not create them, and the run burned all
+    review retries on "store files missing".
+
+    Only folders the phase may write into are made. unit_testing also gets the
+    src/test/... mirror of each planned src/main/... folder (Java packages).
+    Returns the folders created (repo-relative)."""
+    from execution_record import _approved_paths_from_plan
+    plan = Path(repo_root) / ".harness" / "prompt-steps.md"
+    if not plan.is_file():
+        return []
+    try:
+        paths = sorted(_approved_paths_from_plan(plan.read_text(encoding="utf-8")))
+    except Exception as e:
+        log(f"  [dirs] could not read the plan ({e!r}) — no folders made")
+        return []
+    if phase_id == "unit_testing":
+        paths += [p.replace("/src/main/", "/src/test/", 1) if "/src/main/" in p
+                  else p.replace("src/main/", "src/test/", 1)
+                  for p in paths if "src/main/" in p]
+    root = Path(repo_root).resolve()
+    made: list[str] = []
+    for rel in paths:
+        if not rel or rel.startswith("/") or ".." in Path(rel).parts:
+            continue
+        target = (root / rel).resolve()
+        if root not in target.parents:
+            continue
+        parent = target.parent
+        if parent.exists() or parent == root:
+            continue
+        if not is_write_allowed(rel, allowed, repo_root=str(root), exclude_globs=exclude):
+            continue
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log(f"  [dirs] could not create {parent.relative_to(root)}: {e}")
+            continue
+        made.append(str(parent.relative_to(root)))
+    if made:
+        log(f"  [dirs] created folder(s) for planned files: {', '.join(sorted(set(made)))}")
+    return sorted(set(made))
+
+
 def _describe_token(token: str | None) -> tuple[str, bool]:
     """Name the KIND of credential, and say whether Copilot accepts it.
 
@@ -1548,6 +1598,12 @@ class SdkAgentRunner:
             self.log("  [module] " + traceback.format_exc().replace(chr(10), " | "))
             eff_allowed = phase.allowed_writes
             eff_exclude = None
+
+        # Shell is denied in every phase, and the SDK's create tool fails when the
+        # parent folder is missing, so a NEW folder can never be made by the model.
+        # Make the folders the approved plan needs before the session starts.
+        if phase.id in ("coding", "unit_testing"):
+            ensure_planned_dirs(repo_root, phase.id, eff_allowed, eff_exclude, log=self.log)
 
         # PUSH-MODE REVIEW: build the dossier deterministically BEFORE the SDK
         # call (zero LLM tokens). If it builds, the reviewer gets everything
