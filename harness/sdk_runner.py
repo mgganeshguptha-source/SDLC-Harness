@@ -1212,7 +1212,16 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             ".harness/validation-report.txt). A criterion that only requires the "
             "build or the existing test command to pass is MET on that evidence. "
             "Do not try to run it yourself.\n")
-        build_status_pr = ""
+        # Documentation and the PR body said "build not run, run it before
+        # merging" because those phases cannot run shell (PC-103, 2026-11-02),
+        # while the harness gate had built the code and passed.
+        build_status_pr = (
+            "BUILD STATUS: the harness built this code and ran the repo's test "
+            "command at its build gate, and it PASSED on this exact tree (the run "
+            "stops otherwise; output in .harness/validation-report.txt). Say so. "
+            "Do NOT write that the build or tests were not run, and do not try to "
+            "run them yourself; shell being unavailable to you does not mean the "
+            "harness skipped them.\n")
     else:
         build_status_validation = (
             "BUILD STATUS: the harness has NOT compiled this code or run any test "
@@ -1488,6 +1497,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Document the change as a markdown file under {docs_dir}/ (the directory "
             f"ALREADY EXISTS, do not mkdir, shell is disallowed) for:\n  STORY: {story}\n"
             f"{_learning_block}"
+            f"{build_status_pr}"
             f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
             f"above) {_repo_instr}."
         ),
