@@ -36,6 +36,7 @@ class ValidationResult:
     # message so the operator is not told to chmod mvnw for a network problem.
     #   env_reason: "toolchain" | "dependency" | "network_auth" | "unattributable"
     #               | "npm_peer_conflict" | "npm_install" | "browser"
+    #               | "angular_config" | "angular_cli"
     env_reason: str | None = None
     env_hint: str = ""
     # Coverage detail (populated when the coverage gate ran), for messaging.
@@ -385,6 +386,21 @@ _FORK_START_SIGNATURES = (
 )
 
 _HINTS = {
+    "angular_config": (
+        "The Angular CLI rejected the build command: test_command names a\n"
+        "           configuration (e.g. --configuration development) that the repo's\n"
+        "           angular.json does not define for that target. No code phase can\n"
+        "           fix this. Change test_command in the service's\n"
+        "           .harness/config.yaml to a configuration angular.json has (or\n"
+        "           drop --configuration to use the defaults), on the story branch\n"
+        "           AND on harness-wip/<feature> (a resume reads config from there),\n"
+        "           then resume."),
+    "angular_cli": (
+        "The Angular CLI stopped with an unhandled exception before building\n"
+        "           (see the output tail). This is the CLI or workspace setup —\n"
+        "           angular.json, the builder packages, or the command in\n"
+        "           test_command — not the code the phases wrote. Fix it in the\n"
+        "           repo or in .harness/config.yaml, then resume."),
     "toolchain": (
         "The build tool could not start. Check that the Maven wrapper is complete\n"
         "           (mvnw plus .mvn/wrapper/), executable, and uses LF line endings,\n"
@@ -527,11 +543,20 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
     Order matters: dependency and network/auth signatures are specific and win;
     generic toolchain strings only count when the lifecycle never started.
     """
+    low = (output or "").lower()
+    # Angular CLI exits 127 on its own "An unhandled exception occurred", which
+    # is NOT "command not found": the CLI started and rejected the command or the
+    # workspace. Checked before the 126/127 rule, which would blame the Maven
+    # wrapper (petclinic-angular-demo PC-102, 2026-11-02: --configuration
+    # development on an angular.json that defines only 'production').
+    if "an unhandled exception occurred" in low:
+        if "is not set in the workspace" in low:
+            return "angular_config"
+        return "angular_cli"
     # 126 = found but not executable (e.g. ./mvnw without the +x bit).
     # 127 = command not found (missing wrapper / mvn not on PATH).
     if exit_code in (126, 127):
         return "toolchain"
-    low = (output or "").lower()
     if any(s in low for s in _DEPENDENCY_SIGNATURES):
         return "dependency"
     if any(s in low for s in _FORK_START_SIGNATURES):
@@ -680,6 +705,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             "npm_peer_conflict": "npm peer-dependency conflict (ERESOLVE) — packages were not installed",
             "npm_install": "npm could not install the packages",
             "browser": "the test browser (headless Chrome) could not start",
+            "angular_config": "the Angular build configuration in test_command is not defined in angular.json",
+            "angular_cli": "the Angular CLI stopped with an unhandled exception",
         }
         summary = (f"ENVIRONMENT FAILURE (exit {proc.returncode}) — "
                    f"{_labels.get(_env, 'build did not run')}")
