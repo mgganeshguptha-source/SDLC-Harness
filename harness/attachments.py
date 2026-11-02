@@ -466,7 +466,13 @@ def _prepare(repo_root, cfg, feature_id, story, res, out_dir, log) -> GuardResul
                         samples = _HO.openapi_samples(spec)
                         if samples:
                             sj = json.dumps(samples, indent=2)
-                            scan(sj, f"{name} (mocked samples)")
+                            # NOT PII-scanned: every value is invented by
+                            # openapi_samples from the field name and type, never
+                            # copied from the input (the OpenAPI file itself was
+                            # scanned above). Scanning them flagged the harness's
+                            # own placeholders — "birthDate": "2026-01-01" read as
+                            # a date of birth and halted every story that attached
+                            # petclinic-rest-api's OpenAPI file (PC-102, 2026-11-02).
                             stage(att_name(p) + ".mock-samples.json", sj.encode("utf-8"),
                                   "text", "application/json", name, converted_from="openapi")
                 except Exception as _oe:
