@@ -33,6 +33,11 @@ finding this out there costs a full phase (OP018-6434, 2026-11-04). The table is
 written by the planning model, so this check is only as good as that table. A
 plan with no such section is not halted.
 
+PLACEHOLDER PATHS (third check, same point in the run)
+A planned file such as webservice/<MPA-totals-SOAP-interface>.java is not a file
+coding can create. It means the planner lacked a name it needed, so the run halts
+here, whatever the External Classes table says (OP018-6434, 2026-11-04).
+
 INTERFACE (consumed by state_machine.py)
     check_plan(repo_root, plan_file, target_module, log=print) -> PlanCheckResult
         .missing_dirs : list[MissingDir]  (truthy => halt)
@@ -40,6 +45,8 @@ INTERFACE (consumed by state_machine.py)
     halt_message(result, plan_file) -> str
     check_external(plan_file, log=print) -> list[ExternalClass]  (truthy => halt)
     external_declaration(flagged, repo_root, target_module) -> BlockedDeclaration
+    check_placeholders(plan_file, log=print) -> list[str]  (truthy => halt)
+    placeholder_message(paths, plan_file) -> str
 """
 from __future__ import annotations
 
@@ -351,6 +358,45 @@ def external_declaration(flagged: List[ExternalClass], repo_root, target_module)
         why="no phase may change a build file, and coding cannot work without "
             "these classes",
     )
+
+
+# =============================================================================
+# Placeholder paths
+# =============================================================================
+_PLACEHOLDER = re.compile(r"<[^<>/]+>")
+
+
+def check_placeholders(plan_file, log=print) -> List[str]:
+    """Impacted Files paths that still contain a <placeholder>."""
+    from execution_record import _approved_paths_from_plan
+    try:
+        plan_text = Path(plan_file).read_text(encoding="utf-8")
+    except Exception as e:
+        log(f"  [harness] placeholder check: cannot read {plan_file} ({e})")
+        return []
+    return sorted(p for p in _approved_paths_from_plan(plan_text)
+                  if _PLACEHOLDER.search(p))
+
+
+def placeholder_message(paths: List[str], plan_file) -> str:
+    lines = ["  ================ PLAN PLACEHOLDERS: HALTED ================",
+             "  The plan uses placeholder names instead of real file names, so the",
+             "  coding phase cannot follow it. This usually means the story or its",
+             "  attachments leave out something the plan needs, such as a contract,",
+             "  an operation or a class name.",
+             "",
+             "  Placeholder path(s):"]
+    lines += [f"    - {p}" for p in paths]
+    lines += ["",
+              "  To continue:",
+              "    1. add the missing detail to the story on the base branch, and",
+              "       attach any contract file",
+              "    2. start a fresh run (resume unticked). A resume at this phase",
+              "       keeps the original story, so it would not see this.",
+              "",
+              f"  Plan file : {plan_file}",
+              "  ==========================================================="]
+    return "\n".join(lines)
 
 
 def halt_message(result: PlanCheckResult, plan_file) -> str:

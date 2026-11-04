@@ -756,6 +756,7 @@ class StateMachine:
         if phase.id == "prompt_steps" and code == ExitCode.OK:
             try:
                 from plan_check import (check_plan, check_external, external_declaration,
+                                        check_placeholders, placeholder_message,
                                         halt_message as _plan_msg)
                 from config import HarnessConfig as _HCp
                 _cfgp = _HCp.load(self.harness_dir, repo_root=self.repo_root)
@@ -783,6 +784,18 @@ class StateMachine:
                     run.status = "halted"
                     run.halt_gate = HG.MANUAL_CHANGE_REQUIRED
                     run.halt_detail = f"plan needs external classes: {_d.missing}"[:200]
+                    run.last_feedback = _m
+                    run.save(self.harness_dir)
+                    return run
+                # A planned path that still holds a <placeholder> cannot be coded,
+                # even when the table above raised nothing (OP018-6434).
+                _ph = check_placeholders(_pf, log=self.log)
+                if _ph:
+                    _m = placeholder_message(_ph, _pf)
+                    self.log(_m)
+                    run.status = "halted"
+                    run.halt_gate = HG.SCOPE
+                    run.halt_detail = "plan contains placeholder file paths"
                     run.last_feedback = _m
                     run.save(self.harness_dir)
                     return run

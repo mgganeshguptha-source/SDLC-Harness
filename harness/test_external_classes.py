@@ -2,7 +2,7 @@
 (OP018-6434, 2026-11-04)."""
 from pathlib import Path
 
-from plan_check import check_external, external_declaration
+from plan_check import check_external, check_placeholders, external_declaration
 from test_state_machine import _ARTIFACTS, ScriptedExecutor, _drive, _new_run, _sm
 
 PLAN = """# Plan
@@ -82,3 +82,35 @@ def test_known_sources_reach_coding(tmp_path: Path, monkeypatch):
     text = PLAN.replace("UNKNOWN", "DEPENDENCY").replace("**New dependency**", "STORY")
     ex, _run = _run_with_plan(tmp_path, monkeypatch, text)
     assert "coding" in ex.calls
+
+
+PLACEHOLDER_PLAN = """# Plan
+
+## External Classes
+None.
+
+## Impacted Files
+| ID | Path | Role |
+|----|------|------|
+| F1 | `app/src/main/java/com/x/webservice/<MPA-totals-SOAP-interface>.java` | new |
+| F2 | app/src/main/java/com/x/service/Accum.java | returns List<Accum> |
+"""
+
+
+def test_only_placeholder_paths_are_flagged(tmp_path: Path):
+    assert check_placeholders(_plan(tmp_path, PLACEHOLDER_PLAN)) == [
+        "app/src/main/java/com/x/webservice/<MPA-totals-SOAP-interface>.java"]
+
+
+def test_generics_outside_impacted_files_are_ignored(tmp_path: Path):
+    text = "## Steps\nReturn List<Accum> from src/main/Foo.java\n\n## Impacted Files\n" \
+           "| ID | Path | Role |\n|----|------|------|\n| F1 | src/main/Foo.java | edit |\n"
+    assert check_placeholders(_plan(tmp_path, text)) == []
+
+
+def test_placeholder_path_halts_before_coding(tmp_path: Path, monkeypatch):
+    ex, run = _run_with_plan(tmp_path, monkeypatch, PLACEHOLDER_PLAN)
+    assert run.status == "halted"
+    assert "coding" not in ex.calls
+    assert "<MPA-totals-SOAP-interface>" in run.last_feedback
+    assert "fresh run" in run.last_feedback
