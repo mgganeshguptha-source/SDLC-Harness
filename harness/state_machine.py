@@ -755,7 +755,8 @@ class StateMachine:
         # coding costs a full expensive phase. A directory listing costs nothing.
         if phase.id == "prompt_steps" and code == ExitCode.OK:
             try:
-                from plan_check import check_plan, halt_message as _plan_msg
+                from plan_check import (check_plan, check_external, external_declaration,
+                                        halt_message as _plan_msg)
                 from config import HarnessConfig as _HCp
                 _cfgp = _HCp.load(self.harness_dir, repo_root=self.repo_root)
                 _pf = self.repo_root / ".harness" / "prompt-steps.md"
@@ -771,6 +772,20 @@ class StateMachine:
                     return run
                 if _pr.checked:
                     self.log(f"  [harness] plan paths: {_pr.checked} checked, all resolve")
+                # External classes: same stage, same reason. Finding a missing
+                # dependency in coding costs a full phase (OP018-6434).
+                _ext = check_external(_pf, log=self.log)
+                if _ext:
+                    from blocked import halt_message as _blocked_msg
+                    _d = external_declaration(_ext, self.repo_root, _cfgp.target_module)
+                    _m = _blocked_msg(run.feature_id, phase.id, _d)
+                    self.log(_m)
+                    run.status = "halted"
+                    run.halt_gate = HG.MANUAL_CHANGE_REQUIRED
+                    run.halt_detail = f"plan needs external classes: {_d.missing}"[:200]
+                    run.last_feedback = _m
+                    run.save(self.harness_dir)
+                    return run
             except Exception as _e:
                 self.log(f"  [harness] plan path check skipped ({type(_e).__name__})")
 

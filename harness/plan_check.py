@@ -25,11 +25,21 @@ The check therefore verifies, for each planned path, that the longest existing
 ancestor directory reaches a meaningful package depth — not that the exact leaf
 directory already exists.
 
+EXTERNAL CLASSES (second check, same point in the run)
+The plan's "External Classes" table lists classes the planned code needs from
+outside this repo, and where each comes from. A row marked UNKNOWN or
+NEW_DEPENDENCY halts here, before coding: coding cannot change a build file, so
+finding this out there costs a full phase (OP018-6434, 2026-11-04). The table is
+written by the planning model, so this check is only as good as that table. A
+plan with no such section is not halted.
+
 INTERFACE (consumed by state_machine.py)
     check_plan(repo_root, plan_file, target_module, log=print) -> PlanCheckResult
         .missing_dirs : list[MissingDir]  (truthy => halt)
         .checked      : int               (paths whose root resolved)
     halt_message(result, plan_file) -> str
+    check_external(plan_file, log=print) -> list[ExternalClass]  (truthy => halt)
+    external_declaration(flagged, repo_root, target_module) -> BlockedDeclaration
 """
 from __future__ import annotations
 
@@ -258,6 +268,89 @@ def check_plan(repo_root, plan_file, target_module, log=print) -> PlanCheckResul
             f"not interpretable, skipped")
 
     return result
+
+
+# =============================================================================
+# External classes
+# =============================================================================
+_HALT_SOURCES = ("UNKNOWN", "NEW_DEPENDENCY")
+
+
+@dataclass
+class ExternalClass:
+    """One row of the plan's External Classes table that needs a human."""
+    name: str
+    source: str
+    evidence: str = ""
+
+
+def _external_section(plan_text: str) -> Optional[str]:
+    m = re.search(r"^#{1,6}\s*External Classes.*?$", plan_text,
+                  flags=re.IGNORECASE | re.MULTILINE)
+    if not m:
+        return None
+    start = m.end()
+    nxt = re.search(r"^#{1,6}\s", plan_text[start:], flags=re.MULTILINE)
+    return plan_text[start:start + nxt.start()] if nxt else plan_text[start:]
+
+
+def check_external(plan_file, log=print) -> List[ExternalClass]:
+    """Rows of the External Classes table marked UNKNOWN or NEW_DEPENDENCY."""
+    try:
+        plan_text = Path(plan_file).read_text(encoding="utf-8")
+    except Exception as e:
+        log(f"  [harness] external class check: cannot read {plan_file} ({e})")
+        return []
+    section = _external_section(plan_text)
+    if section is None:
+        log("  [harness] plan has no External Classes section; check skipped")
+        return []
+    flagged: List[ExternalClass] = []
+    rows = 0
+    for line in section.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[1].replace(" ", "")) <= set("-:"):
+            continue
+        if cells[1].lower() == "source":
+            continue
+        rows += 1
+        source = re.sub(r"[\s-]+", "_", cells[1].strip(" *`").upper())
+        for wanted in _HALT_SOURCES:
+            if source.startswith(wanted):
+                flagged.append(ExternalClass(
+                    name=cells[0].strip(" `"), source=wanted,
+                    evidence=cells[2].strip(" `") if len(cells) > 2 else ""))
+                break
+    log(f"  [harness] external classes: {rows} listed, {len(flagged)} need a person")
+    return flagged
+
+
+def external_declaration(flagged: List[ExternalClass], repo_root, target_module):
+    """The manual-change declaration for flagged classes, so the developer gets
+    the same message and the same steps as a coding-phase halt."""
+    from blocked import BlockedDeclaration
+    repo_root = Path(repo_root)
+    target = ""
+    prefix = _module_prefix(target_module)
+    for folder in ([prefix] if prefix else []) + [""]:
+        for name in ("pom.xml", "package.json", "build.gradle", "build.gradle.kts"):
+            if (repo_root / folder / name).is_file():
+                target = f"{folder}/{name}" if folder else name
+                break
+        if target:
+            break
+    evidence = [f"{c.name}: {c.evidence}" for c in flagged if c.evidence]
+    return BlockedDeclaration(
+        declared=True,
+        needs="classes the plan needs, with no confirmed source in this repo",
+        missing=", ".join(f"{c.name} ({c.source})" for c in flagged),
+        searched="; ".join(evidence),
+        file=target,
+        why="no phase may change a build file, and coding cannot work without "
+            "these classes",
+    )
 
 
 def halt_message(result: PlanCheckResult, plan_file) -> str:
