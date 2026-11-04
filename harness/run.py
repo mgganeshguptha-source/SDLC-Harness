@@ -47,6 +47,14 @@ def cmd_init(args):
     hd.mkdir(parents=True, exist_ok=True)
     from phases import PHASES
 
+    # Mandatory on a fresh run, like the story. A resume never comes through here.
+    from reference_repos import fresh_run_problem
+    _rl_problem = fresh_run_problem(repo)
+    if _rl_problem:
+        print(f"::error title=Repo list::{_rl_problem}")
+        print(f"  [harness] HALTED before any model call: {_rl_problem}")
+        sys.exit(1)
+
     # Story precedence: explicit --story flag, else the story's own file
     # (stories/<feature_id>-story.md or stories/<feature_id>.md), else the
     # configured shared file (stories/current-story.md).

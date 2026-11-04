@@ -62,7 +62,8 @@ from pathlib import Path
 # values), attachments (name/kind/size/sha256 of files sent to models).
 # v6: dependencies (the story's contract line + upstream contracts attached),
 # contract_output (contract produced for downstream stories: status, file).
-SCHEMA_VERSION = 6
+# v7: reference_repos (other repos the context phase read: repo, branch, commit).
+SCHEMA_VERSION = 7
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -165,6 +166,9 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         # --- contract hand-off (schema 6) ---
         "dependencies": dict(getattr(run, "dependencies", None) or {}) or None,
         "contract_output": dict(getattr(run, "contract_output", None) or {}) or None,
+
+        # --- reference repos (schema 7) ---
+        "reference_repos": list(getattr(run, "reference_repos", None) or []),
 
         # --- flow ---
         "phases_run": len(getattr(run, "completed_phases", None) or []),

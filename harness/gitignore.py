@@ -13,6 +13,7 @@ WHAT IT DOES (fresh runs, when manage_gitignore is on — the default)
   - adds any missing required line to the repo's .gitignore, in a marked block:
         .harness/*
         !.harness/config.yaml
+        !.harness/repo_list.yaml
         audit/
         metrics/
   - fixes the wrong form `.harness/` (or `.harness`), which stops Git from ever
@@ -29,7 +30,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-REQUIRED = [".harness/*", "!.harness/config.yaml", "audit/", "metrics/"]
+REQUIRED = [".harness/*", "!.harness/config.yaml", "!.harness/repo_list.yaml",
+            "audit/", "metrics/"]
 BLOCK_START = "# --- SDLC-Harness: harness working files (added by the harness) ---"
 BLOCK_END = "# --- end SDLC-Harness ---"
 # A line that ignores the whole .harness folder: Git cannot re-include a file

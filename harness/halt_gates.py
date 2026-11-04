@@ -54,6 +54,9 @@ DEPENDENCIES_MISSING = "dependencies_missing"
 # The story names an upstream repo but its contract file is not attached, or
 # the attached contract was produced by a different repo (handoff.py).
 CONTRACT_MISSING = "contract_missing"
+# The context phase asked for a repo that could not be used: not in
+# .harness/repo_list.yaml, over the limit, or the clone failed.
+REFERENCE_REPO = "reference_repo"
 
 # --- gates that stopped the run because OUR PLUMBING failed ---
 SDK_ERROR = "sdk_error"              # auth, network, Copilot CLI
@@ -66,7 +69,7 @@ HALT_GATES = frozenset({
     CLARIFICATION, FEASIBILITY, WRITE_BOUNDARY, SCOPE, CODE_REVIEW,
     COVERAGE, TEST_BUILD, AC_CONFORMANCE, ARTIFACT_MISSING, ITERATION_CAP,
     PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, INPUT_GUARD, DEPENDENCIES_MISSING,
-    CONTRACT_MISSING, SDK_ERROR, CONFIG_ERROR, OTHER,
+    CONTRACT_MISSING, REFERENCE_REPO, SDK_ERROR, CONFIG_ERROR, OTHER,
 })
 
 # Halts caused by our own plumbing rather than by the work being unacceptable.
@@ -90,6 +93,7 @@ LABELS = {
     INPUT_GUARD: "Story or attachment blocked by the input guard (PII/PHI, type, size)",
     DEPENDENCIES_MISSING: "Story has no 'Requires a new or changed contract from' line",
     CONTRACT_MISSING: "Upstream contract not attached (or wrong one attached)",
+    REFERENCE_REPO: "Reference repo not listed, over the limit, or not cloned",
     SDK_ERROR: "Infrastructure or authentication failure",
     CONFIG_ERROR: "Configuration error",
     OTHER: "Unclassified halt",

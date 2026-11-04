@@ -1272,6 +1272,9 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         "traced AC. Do NOT ask again a question an answer settles; ask again only "
         "if the answer leaves it open, quoting what is still missing.\n"
     ) if _asked_block else ""
+    from reference_repos import prompt_block as _reference_prompt
+    _reference_block = (_reference_prompt(repo_root, getattr(run, "reference_repos", None) or [])
+                        if phase.id == "context" else "")
     _story_ref = (f"{run.story_path or 'story'} @ {(run.story_sha256 or '')[:12]}"
                   .strip(" @"))
     _proposal_dir = f"{rr}/.harness/toolkit-proposal"
@@ -1368,6 +1371,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"precise '[NEEDS CLARIFICATION]: <missing dimension>' line in Section 8 — do NOT "
             f"guess and do NOT use vague language. Do NOT modify any source files. "
             f"{_context_followup}"
+            f"{_reference_block}"
             f"Write ONLY the single context .md file in {ctx_dir}."
         ),
         "prompt_steps": (

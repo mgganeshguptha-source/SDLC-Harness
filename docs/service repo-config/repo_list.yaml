@@ -1,0 +1,19 @@
+# .harness/repo_list.yaml — other repos the context phase may ask to read.
+# Required on every fresh run. Keep it on the story branch, so each release
+# branch can have its own repos and branches.
+#
+# If no other repo is needed:
+#   repos: []
+#
+# Git ignores .harness/*, so add this line to .gitignore (or use git add -f):
+#   !.harness/repo_list.yaml
+#
+# Repos are cloned only when context asks for them, at most 3 per run. They are
+# NOT scanned for PII or secrets, so list only repos approved for this use.
+default_branch: master
+repos:
+  - name: BCBSM/dx_mpa_responsive
+    purpose: MPA monolith, SOAP clients
+  - name: BCBSM/dx_example-service
+    branch: PM_Sep          # overrides default_branch
+    purpose: What this repo holds, so context can choose correctly

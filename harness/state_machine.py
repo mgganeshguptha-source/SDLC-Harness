@@ -577,6 +577,8 @@ class StateMachine:
                 return run
             if self._input_guard(run, phase):
                 return run
+            if self._prepare_reference_repos(run, phase):
+                return run
 
         if _skip:
             self.log(f"  [harness] '{phase.id}' skipped by config (skip_phases) — "
@@ -591,6 +593,21 @@ class StateMachine:
         # and stage it for harness-metrics; never fails the run.
         if phase.id == "documentation" and code == ExitCode.OK:
             self._finalize_contract(run)
+
+        # Context asked for another repo: clone it and run context once more,
+        # BEFORE the clarification and feasibility gates. The repo may well
+        # answer what this pass could only ask.
+        if phase.id == "context" and code in (ExitCode.OK, ExitCode.AWAITING_APPROVAL):
+            if self._reference_request(run, phase, _phase_started):
+                return run
+
+        # The harness, not the model, tells the reviewer which repos were read.
+        if phase.id == "raise_pr" and code == ExitCode.OK:
+            try:
+                from reference_repos import add_to_pr_body
+                add_to_pr_body(self.repo_root, getattr(run, "reference_repos", None) or [])
+            except Exception as _e:
+                self.log(f"  [reference] PR note skipped ({type(_e).__name__})")
 
         if _ri_before is not None:
             try:
@@ -1707,6 +1724,110 @@ class StateMachine:
         run.halt_detail = (res.problems[0] if res.problems else "dependencies")[:200]
         run.last_feedback = msg
         run.save(self.harness_dir)
+        return True
+
+    def _reference_halt(self, run: RunState, problem: str) -> bool:
+        msg = ("\n  ================ REFERENCE REPO: HALTED ================\n"
+               f"  {problem}\n\n"
+               "  Fix .harness/repo_list.yaml if the repo or branch is wrong. Check the\n"
+               "  token can read the repo if access failed.\n"
+               "    Fresh run : fix the file on the story branch.\n"
+               f"    Resume    : fix it on harness-wip/{run.feature_id}, resume=true.\n"
+               "  ========================================================\n")
+        self.log(msg)
+        run.status = "halted"
+        run.halt_gate = HG.REFERENCE_REPO
+        run.halt_detail = problem[:200]
+        run.last_feedback = msg
+        run.save(self.harness_dir)
+        return True
+
+    def _prepare_reference_repos(self, run: RunState, phase: Phase) -> bool:
+        """Only context reads these repos: later phases start with them gone, and
+        context re-entered on a new runner gets them back. True when it HALTED."""
+        import reference_repos as RR
+        if phase.id != "context":
+            if RR.remove_clones(self.repo_root):
+                self.log("  [reference] clones removed; later phases use the context file")
+            return False
+        records = getattr(run, "reference_repos", None) or []
+        missing = [r for r in records
+                   if not RR.clone_path(self.repo_root, r["repo"]).is_dir()]
+        if not missing:
+            return False
+        try:
+            entries = RR.load(self.repo_root) or []
+            for r in missing:
+                entry = RR.find(entries, r["repo"]) or RR.RepoEntry(
+                    r["repo"], r["branch"], r["source"])
+                r.update(branch=entry.branch, source=entry.source,
+                         commit=RR.clone(entry, self.repo_root))
+                self.log(f"  [reference] {RR.record_line(r)}")
+        except (ValueError, RuntimeError) as e:
+            return self._reference_halt(run, str(e))
+        return False
+
+    def _reference_request(self, run: RunState, phase: Phase, started: float) -> bool:
+        """Act on REFERENCE REPO NEEDED lines. True when the run should not move
+        on: it halted, or context is going round once more."""
+        import reference_repos as RR
+        from clarification import _newest_context_file
+        from config import HarnessConfig as _HCrr
+        cfg = _HCrr.load(self.harness_dir)
+        f = _newest_context_file(self.repo_root, cfg.context_output_dir, started)
+        if f is None:
+            return False
+        have = {r["repo"].lower() for r in run.reference_repos}
+        have |= {n.rsplit("/", 1)[-1] for n in have}
+        asked = [q for q in RR.parse_requests(f.read_text(encoding="utf-8", errors="replace"))
+                 if q["repo"].lower() not in have]
+        if not asked:
+            return False
+        if run.iterations.get("__reference_pass__"):
+            self.log(f"  ! [reference] one round only; not cloning "
+                     f"{', '.join(q['repo'] for q in asked)}")
+            return False
+        try:
+            entries = RR.load(self.repo_root)
+        except ValueError as e:
+            return self._reference_halt(run, str(e))
+        names = ", ".join(q["repo"] for q in asked)
+        if len(asked) + len(run.reference_repos) > RR.MAX_PER_RUN:
+            return self._reference_halt(
+                run, f"Context asked for {names}, over the limit of {RR.MAX_PER_RUN} "
+                     f"repos per run. Narrow the story, or split it.")
+        chosen = []
+        for q in asked:
+            entry = RR.find(entries or [], q["repo"])
+            if entry is None:
+                return self._reference_halt(
+                    run, f"Context asked for '{q['repo']}', which is not in "
+                         f"{RR.REPO_LIST_FILE}. Add it, then run again. Reason given: "
+                         f"{q['reason'] or '(none)'}")
+            chosen.append((entry, q["reason"]))
+        added = []
+        for entry, reason in chosen:
+            try:
+                commit = RR.clone(entry, self.repo_root)
+            except RuntimeError as e:
+                return self._reference_halt(run, str(e))
+            added.append({"repo": entry.name, "branch": entry.branch, "commit": commit,
+                          "source": entry.source, "reason": reason})
+            self.log(f"  [reference] {RR.record_line(added[-1])}")
+        run.reference_repos.extend(added)
+        RR.write_job_summary(added)
+        run.iterations["__reference_pass__"] = 1
+        run.iterations[phase.id] = 0
+        run.approvals[phase.id] = "rejected"
+        run.last_feedback = (
+            "You asked for other repos and they are now checked out; see REFERENCE "
+            f"REPOS below. Read your previous context file, {f.name}, then write a new, "
+            "complete context file that fills only that gap. Keep what still holds, and "
+            "drop any question those repos answer.")
+        run.current_phase = phase.id
+        run.status = "running"
+        run.save(self.harness_dir)
+        self.log(f"  [reference] running '{phase.id}' once more with {len(added)} repo(s)")
         return True
 
     def _finalize_contract(self, run: RunState) -> None:
