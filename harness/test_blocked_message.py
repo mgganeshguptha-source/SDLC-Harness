@@ -39,6 +39,14 @@ def test_message_does_not_ask_for_start_phase():
     assert "resume      = true" in msg
 
 
+def test_no_halt_message_asks_for_start_phase():
+    # start_phase is hidden on the caller form; a blank value resumes where the
+    # run halted (run-state.json).
+    for name in ("attachments.py", "blocked.py", "resume.py", "state_machine.py"):
+        text = (Path(__file__).parent / name).read_text(encoding="utf-8")
+        assert "start_phase=" not in text, name
+
+
 def test_message_gives_a_route_when_the_change_is_not_needed():
     msg = halt_message("OP-1", "coding", BlockedDeclaration(declared=True, needs="x"))
     assert "If the change is not needed" in msg

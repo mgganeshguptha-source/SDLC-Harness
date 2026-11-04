@@ -562,7 +562,7 @@ def guard_message(res: GuardResult, feature_id: str, phase_id: str) -> str:
         "           input is mocked test data, set attachment_pii_scan: false.",
         "           A resume reads config.yaml from harness-wip/<feature_id> —",
         "           change it there too.",
-        f"  Resume : feature_id={feature_id}, resume=true, start_phase={phase_id}",
+        f"  Resume : feature_id={feature_id}, resume=true",
         "  ======================================================",
         "",
     ]

@@ -422,8 +422,7 @@ class StateMachine:
                 else:
                     self.log("    Read the phase's last output and the gate that preceded "
                              "it, fix the underlying cause, then resume.")
-                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true, "
-                         f"start_phase={phase.id}")
+                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true")
                 run.status = "halted"
                 run.halt_gate = HG.PHASE_RUN_CAP
                 run.halt_reason = (
@@ -937,8 +936,7 @@ class StateMachine:
                     "  This is the harness's plumbing (auth, network, Copilot CLI), not\n"
                     "  the story or the code. No phase will be retried.\n"
                     f"  Action : {_action}\n"
-                    f"  Resume : feature_id={run.feature_id}, resume=true, "
-                    f"start_phase={phase.id}\n"
+                    f"  Resume : feature_id={run.feature_id}, resume=true\n"
                     "  ================================================================\n"
                 )
                 self.log(msg)
@@ -1427,8 +1425,7 @@ class StateMachine:
                             "  Ways forward:\n"
                             "    1. Add the missing tests by hand:\n"
                             f"         git checkout harness-wip/{run.feature_id}\n"
-                            "       write the tests, push, then re-run with resume=true "
-                            f"and start_phase={cfg.coverage_loopback_phase}.\n"
+                            "       write the tests, push, then re-run with resume=true.\n"
                             "    2. If the uncovered lines are not meaningfully testable "
                             "(Spring @Configuration classes, data holders, defensive "
                             "branches), lower min_coverage in the SERVICE repo's "
@@ -1759,8 +1756,7 @@ class StateMachine:
             f"  Detail : {vr.summary}\n"
             f"  Reason : {reason or 'unknown'}\n"
             f"  Action : {hint or 'Read the tail below and fix the build environment.'}\n"
-            f"  Resume : feature_id={run.feature_id}, resume=true, "
-            f"start_phase={phase.id}\n"
+            f"  Resume : feature_id={run.feature_id}, resume=true\n"
             "  --- build output tail ---\n"
             f"{vr.output_tail}\n"
             "  ============================================================\n"
