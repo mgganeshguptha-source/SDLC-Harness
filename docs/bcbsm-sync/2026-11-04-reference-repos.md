@@ -26,6 +26,7 @@ PII or secrets, and what context reads goes to the model.
 | harness/reference_repos.py | NEW — list, clone, prompts, job summary, PR note |
 | harness/test_reference_repos.py | NEW — tests |
 | harness/state_machine.py | Clone request and second context pass; clones removed before later phases |
+| harness/config.py | No phase may write to .harness/reference-repos/ |
 | harness/sdk_runner.py | Context prompt carries the repo list |
 | harness/run.py | `init` halts when the file is missing or invalid |
 | harness/gitignore.py | Adds `!.harness/repo_list.yaml` |

@@ -24,8 +24,8 @@ THE FLOW
 1. The context phase sees the list. When it needs one of them, it writes
        REFERENCE REPO NEEDED: <repo> — <why>
 2. The harness checks the repo is listed and clones it on its listed branch,
-   outside the service repo, with no .git folder. The write boundary covers the
-   service repo only, so no phase can change it.
+   into .harness/reference-repos/, with no .git folder. Git ignores that folder,
+   and config.py denies every phase write access to it.
 3. Context runs a second pass that fills only that gap and records its findings
    with repo, branch and file.
 4. The clones are deleted before the next phase. Later phases use the findings
@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import List, Optional
 
 REPO_LIST_FILE = ".harness/repo_list.yaml"
+CLONES_DIR = ".harness/reference-repos"
 MAX_PER_RUN = 3
 CLONE_TIMEOUT_SECONDS = 600
 PR_MARKER = "<!-- sdlc-harness-reference-repos -->"
@@ -152,9 +153,7 @@ def parse_requests(context_text: str) -> List[dict]:
 
 
 def clones_root(repo_root) -> Path:
-    """Beside the service repo, so it is outside every write boundary and can
-    never be committed."""
-    return Path(repo_root).resolve().parent / "reference-repos"
+    return Path(repo_root).resolve() / CLONES_DIR
 
 
 def clone_path(repo_root, name: str) -> Path:
@@ -258,8 +257,10 @@ def prompt_block(repo_root, records: List[dict]) -> str:
             out.append(f"  - {r['repo']}, branch {r['branch']}, at "
                        f"{clone_path(repo_root, r['repo'])}"
                        + (f" (needed because: {r['reason']})" if r.get("reason") else ""))
-        out += ["Find only what the gap needs: search first, then open the files that "
-                "matter. These folders are gone after this phase, so write what later "
+        out += ["Search these folders by their full path: a repo-wide search skips "
+                "them, because git ignores them. They are read-only. Find only what the "
+                "gap needs: search first, then open the files that matter. They are "
+                "gone after this phase, so write what later "
                 "phases need into the context file, under '## Reference repo findings', "
                 "giving the repo, branch and file for each finding. Do not copy secrets, "
                 "credentials or member data. Do not write a REFERENCE REPO NEEDED line "

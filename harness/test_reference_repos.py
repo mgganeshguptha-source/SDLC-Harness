@@ -137,10 +137,31 @@ def test_token_stays_out_of_arguments_and_url(monkeypatch, tmp_path):
     assert "secret-token" not in seen["env"]["GIT_CONFIG_VALUE_0"]   # base64
 
 
-def test_clones_are_outside_the_write_boundary(tmp_path):
+def test_no_phase_can_write_to_the_clones(tmp_path):
+    from config import HarnessConfig
+    from phases import PHASES
     repo = _repo(tmp_path)
-    assert not is_write_allowed(str(RR.clone_path(repo, "acme/mpa") / "Soap.java"),
-                                ["**"], repo_root=str(repo))
+    cfg = HarnessConfig.load(repo / ".harness", repo_root=repo)
+    target = RR.clone_path(repo, "acme/mpa") / "Soap.java"
+    other = repo / ".harness" / "notes.md"
+    for p in PHASES:
+        for path in (str(target), ".harness/reference-repos/acme__mpa/Soap.java"):
+            assert not is_write_allowed(path, ["**"], repo_root=str(repo),
+                                        exclude_globs=cfg.phase_exclude(p)), p.id
+    # The rest of .harness is not affected.
+    assert is_write_allowed(str(other), [".harness/**"], repo_root=str(repo),
+                            exclude_globs=cfg.phase_exclude(PHASES[0]))
+
+
+def test_git_ignores_the_clones(tmp_path, server):
+    import gitignore as GI
+    repo = _repo(tmp_path)
+    _git(repo, "init", "-q")
+    GI.ensure(repo, log=lambda *a: None)
+    RR.clone(RR.RepoEntry("acme/mpa", "master", "default"), repo)
+    out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "-uall"],
+                         capture_output=True, text=True).stdout
+    assert "reference-repos" not in out and "repo_list.yaml" in out
 
 
 # --- prompts ---
