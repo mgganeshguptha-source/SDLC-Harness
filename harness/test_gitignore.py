@@ -26,7 +26,7 @@ def test_adds_only_missing_and_keeps_existing(tmp_path):
     gi = tmp_path / ".gitignore"
     gi.write_text("node_modules/\n/audit\n.harness/*\n\n", encoding="utf-8")
     added = GI.ensure(tmp_path, log=_quiet)
-    assert added == ["!.harness/config.yaml", "metrics/"]
+    assert added == ["!.harness/config.yaml", "!.harness/repo_list.yaml", "metrics/"]
     lines = gi.read_text().splitlines()
     assert lines[:3] == ["node_modules/", "/audit", ".harness/*"]
     assert lines.count(".harness/*") == 1
@@ -34,7 +34,8 @@ def test_adds_only_missing_and_keeps_existing(tmp_path):
 
 def test_complete_file_is_untouched(tmp_path):
     gi = tmp_path / ".gitignore"
-    original = b"target/\r\n/.harness/*\r\n!/.harness/config.yaml\r\naudit\r\nmetrics/\r\n"
+    original = (b"target/\r\n/.harness/*\r\n!/.harness/config.yaml\r\n"
+                b"!/.harness/repo_list.yaml\r\naudit\r\nmetrics/\r\n")
     gi.write_bytes(original)
     assert GI.ensure(tmp_path, log=_quiet) == []
     assert gi.read_bytes() == original
@@ -44,7 +45,7 @@ def test_whole_folder_form_is_replaced(tmp_path):
     gi = tmp_path / ".gitignore"
     gi.write_text("dist/\n.harness/\naudit/\nmetrics/\n", encoding="utf-8")
     added = GI.ensure(tmp_path, log=_quiet)
-    assert added == [".harness/*", "!.harness/config.yaml"]
+    assert added == [".harness/*", "!.harness/config.yaml", "!.harness/repo_list.yaml"]
     lines = gi.read_text().splitlines()
     assert ".harness/" not in lines and "dist/" in lines
 

@@ -788,6 +788,8 @@ class HarnessConfig:
         phase that writes production code (in Angular, specs sit inside src/app,
         so src/app/** alone would let coding write tests)."""
         out = list(self.write_exclude or [])
+        # Reference repos sit under .harness/, which some phases may write.
+        out.append(".harness/reference-repos/**")
         if "src/main/**" in phase.allowed_writes and "src/test/**" not in phase.allowed_writes:
             for g in self.test_paths():
                 if g not in out:

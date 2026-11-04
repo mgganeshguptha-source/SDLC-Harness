@@ -35,6 +35,9 @@ class RunState:
     # (status published | missing | blocked_pii | none).
     dependencies: dict = field(default_factory=dict)
     contract_output: dict = field(default_factory=dict)
+    # Other repos the context phase read (reference_repos.py): one entry per
+    # repo with repo, branch, commit, source (default/override) and reason.
+    reference_repos: list = field(default_factory=list)
     # Every set of questions the context gate halted on, oldest first:
     # {"run_id", "story_sha256", "questions": [...]}. Developers often answer
     # under their own heading without repeating the question, so later phases

@@ -214,6 +214,7 @@ Flat package under `harness/`.
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
 | `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap |
+| `reference_repos.py` | Reads `.harness/repo_list.yaml`; clones a listed repo when the context phase asks for it, read-only, for that phase only |
 | `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY, and halts on `<placeholder>` file paths |
 | `contracts.py` | The pinned exit-code contract the orchestrator speaks |
 | `executor.py` | The PhaseExecutor: builds the prompt, runs the agent, enforces the write boundary, iteration cap, artifact and scope checks |
@@ -261,6 +262,7 @@ run in a new organization:
 - `YOUR-TOOLKIT-REPO` → your toolkit repository name/path
 - The caller workflow's reusable-workflow reference → your `SDLC-Harness` location
 - `.harness/config.yaml` → your test command, target module and validation scope
+- `.harness/repo_list.yaml` → other repos context may ask to read, or `repos: []`. Required on every fresh run; add `!.harness/repo_list.yaml` to `.gitignore`. See `docs/service repo-config/repo_list.yaml`
 
 Environment notes:
 
