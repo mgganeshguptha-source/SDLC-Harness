@@ -44,7 +44,7 @@ _DECL = re.compile(
     r"(MANUAL[_\- ]?CHANGE[_\- ]?REQUIRED)\b",
     re.IGNORECASE | re.MULTILINE,
 )
-_FIELD = re.compile(r"^[\s\-\*>\u2022]*\**\s*(NEEDS|FILE|WHY|SUGGESTED)\s*\**\s*:\s*(\S.*)$",
+_FIELD = re.compile(r"^[\s\-\*>\u2022]*\**\s*(NEEDS|MISSING|SEARCHED|FILE|WHY|SUGGESTED)\s*\**\s*:\s*(\S.*)$",
                     re.IGNORECASE | re.MULTILINE)
 
 # Paths that commonly need a human because no phase may write them. Used only to
@@ -58,6 +58,8 @@ _BUILD_FILES = ("pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle"
 class BlockedDeclaration:
     declared: bool = False
     needs: str = ""            # what is required, in one line
+    missing: str = ""          # exact classes or imports the phase could not find
+    searched: str = ""         # where the phase looked for them
     file: str = ""             # which file a human must change
     why: str = ""              # why the phase could not do it
     suggested: str = ""        # the concrete change, if the phase proposed one
@@ -79,6 +81,8 @@ def read_declaration(repo_root: Path) -> BlockedDeclaration:
     return BlockedDeclaration(
         declared=True,
         needs=fields.get("NEEDS", ""),
+        missing=fields.get("MISSING", ""),
+        searched=fields.get("SEARCHED", ""),
         file=fields.get("FILE", ""),
         why=fields.get("WHY", ""),
         suggested=fields.get("SUGGESTED", ""),
@@ -113,6 +117,10 @@ def halt_message(feature_id: str, phase_id: str, decl: BlockedDeclaration,
     m += f"  The '{phase_id}' phase stopped because it needs a change it is not\n"
     m += "  allowed to make. It did NOT work around the restriction.\n\n"
     m += f"  What is needed : {needs}\n"
+    if decl.missing:
+        m += f"  Missing        : {decl.missing}\n"
+    if decl.searched:
+        m += f"  Searched       : {decl.searched}\n"
     m += f"  File to change : {target}\n"
     if decl.why:
         m += f"  Why the harness cannot do it : {decl.why}\n"
@@ -122,13 +130,23 @@ def halt_message(feature_id: str, phase_id: str, decl: BlockedDeclaration,
               "                     deliberately a human decision.\n")
     if decl.suggested:
         m += f"\n  Suggested change:\n    {decl.suggested}\n"
-    m += "\n  To continue:\n"
+    m += "\n  Check first:\n"
+    m += "    This is the agent's finding, not a confirmed fact. It may not see\n"
+    m += "    classes inside library JARs or classes generated during the build.\n"
+    m += "    Ask a developer who knows this code whether the change is needed.\n"
+    m += "\n  If the change is needed:\n"
     m += f"    1. git fetch && git checkout harness-wip/{feature_id}\n"
     m += "    2. make the change above, commit and push\n"
     m += "    3. re-run the Harness workflow with:\n"
     m += f"         feature_id  = {feature_id}\n"
     m += "         resume      = true\n"
-    m += f"         start_phase = {phase_id}\n"
-    m += "\n  The phases that already passed will not re-run.\n"
+    m += "    The run continues from where it halted. The phases that already\n"
+    m += "    passed will not re-run.\n"
+    m += "\n  If the change is not needed:\n"
+    m += "    1. do not change the file\n"
+    m += "    2. add to the story, on the base branch, which existing class or\n"
+    m += "       library to use\n"
+    m += "    3. start a fresh run (resume unticked). A resume at this phase keeps\n"
+    m += "       the original story, so it would not see this.\n"
     m += "  ============================================\n"
     return m

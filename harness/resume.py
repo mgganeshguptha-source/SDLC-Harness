@@ -163,8 +163,8 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
     elif new_hash != old_hash:
         log(f"  [resume] story {path} changed on {base_ref} since this run started. "
             f"Resuming at '{run.current_phase}' keeps the ORIGINAL story, because "
-            f"the plan and code were built from it. To use the new text, resume "
-            f"with start_phase=context or start a fresh run.")
+            f"the plan and code were built from it. To use the new text, start "
+            f"a fresh run.")
         print(f"::warning title=Story changed::{path} changed on {base_ref}; "
               f"this resume keeps the original story.")
     return run

@@ -422,8 +422,7 @@ class StateMachine:
                 else:
                     self.log("    Read the phase's last output and the gate that preceded "
                              "it, fix the underlying cause, then resume.")
-                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true, "
-                         f"start_phase={phase.id}")
+                self.log(f"    Resume with: feature_id={run.feature_id}, resume=true")
                 run.status = "halted"
                 run.halt_gate = HG.PHASE_RUN_CAP
                 run.halt_reason = (
@@ -756,7 +755,8 @@ class StateMachine:
         # coding costs a full expensive phase. A directory listing costs nothing.
         if phase.id == "prompt_steps" and code == ExitCode.OK:
             try:
-                from plan_check import check_plan, halt_message as _plan_msg
+                from plan_check import (check_plan, check_external, external_declaration,
+                                        halt_message as _plan_msg)
                 from config import HarnessConfig as _HCp
                 _cfgp = _HCp.load(self.harness_dir, repo_root=self.repo_root)
                 _pf = self.repo_root / ".harness" / "prompt-steps.md"
@@ -772,6 +772,20 @@ class StateMachine:
                     return run
                 if _pr.checked:
                     self.log(f"  [harness] plan paths: {_pr.checked} checked, all resolve")
+                # External classes: same stage, same reason. Finding a missing
+                # dependency in coding costs a full phase (OP018-6434).
+                _ext = check_external(_pf, log=self.log)
+                if _ext:
+                    from blocked import halt_message as _blocked_msg
+                    _d = external_declaration(_ext, self.repo_root, _cfgp.target_module)
+                    _m = _blocked_msg(run.feature_id, phase.id, _d)
+                    self.log(_m)
+                    run.status = "halted"
+                    run.halt_gate = HG.MANUAL_CHANGE_REQUIRED
+                    run.halt_detail = f"plan needs external classes: {_d.missing}"[:200]
+                    run.last_feedback = _m
+                    run.save(self.harness_dir)
+                    return run
             except Exception as _e:
                 self.log(f"  [harness] plan path check skipped ({type(_e).__name__})")
 
@@ -937,8 +951,7 @@ class StateMachine:
                     "  This is the harness's plumbing (auth, network, Copilot CLI), not\n"
                     "  the story or the code. No phase will be retried.\n"
                     f"  Action : {_action}\n"
-                    f"  Resume : feature_id={run.feature_id}, resume=true, "
-                    f"start_phase={phase.id}\n"
+                    f"  Resume : feature_id={run.feature_id}, resume=true\n"
                     "  ================================================================\n"
                 )
                 self.log(msg)
@@ -1427,8 +1440,7 @@ class StateMachine:
                             "  Ways forward:\n"
                             "    1. Add the missing tests by hand:\n"
                             f"         git checkout harness-wip/{run.feature_id}\n"
-                            "       write the tests, push, then re-run with resume=true "
-                            f"and start_phase={cfg.coverage_loopback_phase}.\n"
+                            "       write the tests, push, then re-run with resume=true.\n"
                             "    2. If the uncovered lines are not meaningfully testable "
                             "(Spring @Configuration classes, data holders, defensive "
                             "branches), lower min_coverage in the SERVICE repo's "
@@ -1759,8 +1771,7 @@ class StateMachine:
             f"  Detail : {vr.summary}\n"
             f"  Reason : {reason or 'unknown'}\n"
             f"  Action : {hint or 'Read the tail below and fix the build environment.'}\n"
-            f"  Resume : feature_id={run.feature_id}, resume=true, "
-            f"start_phase={phase.id}\n"
+            f"  Resume : feature_id={run.feature_id}, resume=true\n"
             "  --- build output tail ---\n"
             f"{vr.output_tail}\n"
             "  ============================================================\n"
