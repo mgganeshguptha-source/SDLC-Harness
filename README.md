@@ -214,7 +214,7 @@ Flat package under `harness/`.
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
 | `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap |
-| `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, and halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY |
+| `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY, and halts on `<placeholder>` file paths |
 | `contracts.py` | The pinned exit-code contract the orchestrator speaks |
 | `executor.py` | The PhaseExecutor: builds the prompt, runs the agent, enforces the write boundary, iteration cap, artifact and scope checks |
 | `boundaries.py` | The write-boundary interlock as a pure function (`is_write_allowed`) |
