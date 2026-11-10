@@ -69,6 +69,12 @@ _LINE_RX = re.compile(
     r"^[ \t>*-]*\**\s*requires a new or changed contract from\s*:?\s*\**\s*:?\s*(.*)$",
     re.IGNORECASE | re.MULTILINE)
 _SECTION_RX = r"^#{{1,6}}\s*upstream contract\s*:\s*`?{repo}`?\s*$"
+# Any "<label>: <value>" line (list marker, heading, bold optional). Used to find
+# the contract line when its wording differs from LINE_LABEL (OP018-6418 Story 2
+# wrote "Requires new or changed contract from" and halted on the missing "a").
+_LABEL_LINE_RX = re.compile(
+    r"^[ \t>*#-]*\**\s*(?P<label>[A-Za-z][^:\n]{2,80}?)\s*\**\s*:\s*\**\s*(?P<val>.*)$",
+    re.MULTILINE)
 
 HEADER_START = "<!-- sdlc-harness-contract v1"
 HEADER_END = "-->"
@@ -262,23 +268,79 @@ class Requirement:
     status: str              # missing | unfilled | none | repos
     repos: list = field(default_factory=list)
     raw: str = ""
+    label: str = ""          # the label as written, when it differs from LINE_LABEL
+    near_miss: str = ""      # status missing: a line that looks like the label
+
+
+def _edit_distance(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _label_words(label: str) -> list:
+    return re.findall(r"[a-z]+", label.lower())
+
+
+def _is_contract_label(label: str) -> bool:
+    """A short label that ends with "from" and has a word close to "contract":
+    "Requires new or changed contract from", "Requires a changed contarct from",
+    "Contract from". The "from" ending keeps out prose and labels such as
+    "Contract" or "Upstream contract". A misspelt "contract" also needs one of
+    the template's other words, so "Contact details from" is not read as it."""
+    words = _label_words(label)
+    if not words or len(words) > 10 or words[-1] != "from":
+        return False
+    body = [w.rstrip("s") for w in words[:-1]]
+    if "contract" in body:
+        return True
+    close = any(len(w) >= 6 and _edit_distance(w, "contract") <= 2 for w in body)
+    return close and bool({"requires", "require", "new", "changed", "change"} & set(words))
+
+
+def _near_miss(story: str) -> str:
+    """A label line that looks like the contract line but is not accepted, so
+    the halt message can point at it."""
+    import difflib
+    want = " ".join(_label_words(LINE_LABEL))
+    best, best_score = "", 0.0
+    for m in _LABEL_LINE_RX.finditer(story or ""):
+        label = " ".join(_label_words(m.group("label")))
+        if not label:
+            continue
+        score = difflib.SequenceMatcher(None, label, want).ratio()
+        if any(len(w) >= 6 and _edit_distance(w.rstrip("s"), "contract") <= 2
+               for w in label.split()):
+            score = max(score, 0.6)
+        if score >= 0.6 and score > best_score:
+            best, best_score = m.group(0).strip(), score
+    return best
 
 
 def parse_requirement(story: str) -> Requirement:
     m = _LINE_RX.search(story or "")
+    label = ""
     if not m:
-        return Requirement("missing")
-    raw = m.group(1).strip()
+        loose = next((x for x in _LABEL_LINE_RX.finditer(story or "")
+                      if _is_contract_label(x.group("label"))), None)
+        if loose is None:
+            return Requirement("missing", near_miss=_near_miss(story))
+        m, label = loose, loose.group("label").strip().strip("*").strip()
+    raw = (m.group("val") if label else m.group(1)).strip()
     val = re.sub(r"<!--.*?-->", "", raw).strip().strip("*").strip()
     val = val.replace("`", "").strip()
     if not val or "<" in val or "|" in val:
-        return Requirement("unfilled", raw=raw)
+        return Requirement("unfilled", raw=raw, label=label)
     if val.lower().rstrip(".") in ("none", "n/a", "na"):
-        return Requirement("none", raw=raw)
+        return Requirement("none", raw=raw, label=label)
     repos = [r.strip().strip(".").strip() for r in re.split(r"[,;]| and ", val) if r.strip()]
     if not repos or any(re.search(r"\s", r) for r in repos):
-        return Requirement("unfilled", raw=raw)
-    return Requirement("repos", repos=repos, raw=raw)
+        return Requirement("unfilled", raw=raw, label=label)
+    return Requirement("repos", repos=repos, raw=raw, label=label)
 
 
 # =============================================================================
@@ -374,7 +436,15 @@ def check_dependencies(repo_root: Path, cfg, feature_id: str, story: str) -> Dep
                 ("the story has no" if req.status == "missing" else "the story has an unfilled")
                 + f" '**{LINE_LABEL}:**' line. Add it with None, or with the upstream repo "
                   f"name when this story needs that repo's new or changed contract.")
+            if req.near_miss:
+                res.problems.append(
+                    f"did you mean this line? '{req.near_miss[:160]}' — change its label "
+                    f"to '**{LINE_LABEL}:**'")
             return res
+        if req.label:
+            res.warnings.append(
+                f"read '{req.label}' as the '{LINE_LABEL}' line; consider using the "
+                f"exact wording in future stories")
         if req.status == "none":
             return res
 
