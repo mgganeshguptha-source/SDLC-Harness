@@ -406,3 +406,62 @@ def test_is_excluded_negation():
     ex = ["mod/**", "!mod/src/main/resources/a.yml"]
     assert not is_excluded("mod/src/main/resources/a.yml", ex)
     assert is_excluded("mod/src/main/java/A.java", ex)
+
+
+# ------------------------------------------------- loose label (OP018-6418)
+@pytest.mark.parametrize("story,status,repos", [
+    ("**Requires new or changed contract from:** BCBSM/dx_mex", "repos", ["BCBSM/dx_mex"]),
+    ("- Requires a changed contarct from: None", "none", []),
+    ("## Requires New Or Changed Contract From: dx_a, dx_b", "repos", ["dx_a", "dx_b"]),
+    ("**Contracts from:** None", "none", []),
+    ("**Requires new or changed contract from:** <upstream repo>", "unfilled", []),
+])
+def test_loose_label_is_read(story, status, repos):
+    r = HO.parse_requirement(story)
+    assert (r.status, r.repos) == (status, repos)
+    assert r.label
+
+
+@pytest.mark.parametrize("story", [
+    "**Dependencies:** Requires Story 1 (mex) contract from the backend first.",
+    "**Upstream contract:** dx_a",
+    "**Contact details from:** someone",
+])
+def test_other_lines_are_not_read_as_the_label(story):
+    assert HO.parse_requirement(story).status == "missing"
+
+
+def test_prose_label_with_a_sentence_value_still_halts():
+    # Read as the label, but "the backend team" is not a repo name.
+    assert HO.parse_requirement(
+        "This story needs a contract from: the backend team").status == "unfilled"
+
+
+def test_exact_label_wins_and_has_no_warning(tmp_path):
+    story = f"**Contracts from:** dx_x\n{LINE} None\n"
+    r = HO.parse_requirement(story)
+    assert (r.status, r.label) == ("none", "")
+
+
+def test_loose_label_passes_the_gate_with_a_warning(tmp_path):
+    repo = _repo(tmp_path)
+    res = HO.check_dependencies(repo, _cfg(repo), "F-1",
+                                "**Requires new or changed contract from:** None")
+    assert res.ok
+    assert any("Requires new or changed contract from" in w for w in res.warnings)
+
+
+def test_near_miss_is_quoted_in_the_halt(tmp_path):
+    repo = _repo(tmp_path)
+    story = "**Upstream contract change needed:** dx_mex\n"
+    res = HO.check_dependencies(repo, _cfg(repo), "F-1", story)
+    assert not res.ok and res.gate == HG.DEPENDENCIES_MISSING
+    assert any("did you mean" in p and "Upstream contract change needed" in p
+               for p in res.problems)
+    assert "did you mean" in HO.gate_message(res, "F-1")
+
+
+def test_no_near_miss_for_unrelated_story(tmp_path):
+    repo = _repo(tmp_path)
+    res = HO.check_dependencies(repo, _cfg(repo), "F-1", "**Title:** x\n**Owner:** y\n")
+    assert not any("did you mean" in p for p in res.problems)
