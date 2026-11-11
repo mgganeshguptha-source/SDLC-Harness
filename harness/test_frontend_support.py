@@ -154,7 +154,7 @@ def test_skipped_unit_testing_runs_its_gate_but_not_the_ai(tmp_path, monkeypatch
     monkeypatch.setattr(tsm, "_ARTIFACTS", arts)
     ex = ScriptedExecutor()
     sm = _sm(ex, hd, validator=validator)
-    monkeypatch.setattr(state_machine, "harness_runs_build", lambda: True)
+    monkeypatch.setattr(state_machine, "harness_runs_build", lambda *a, **k: True)
     run = _drive(sm, _new_run())
     assert "unit_testing" not in ex.calls       # no AI work
     assert calls                                 # the build gate still ran

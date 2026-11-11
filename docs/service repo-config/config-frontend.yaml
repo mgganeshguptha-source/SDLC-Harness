@@ -74,6 +74,14 @@ target_module: ""
 # Remove it once the repo's peer dependencies match, or a lock file / .npmrc is
 # committed.
 test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-lock --no-audit --no-fund --legacy-peer-deps && npx ng build --configuration development"
+# Use `npm install`, not `npm ci`, in a repo that commits packages under
+# node_modules/: `npm ci` deletes node_modules/ first (OP018-6418).
+
+# Whether the harness builds and tests the code itself (the build gate after
+# unit_testing, coverage and their loopbacks). false = the runner cannot build
+# this repo; the developer builds and tests locally before approving the PR.
+# This value wins over the caller workflow's old runs_build input.
+runs_build: true
 
 # Narrow the test run to a subset. Blank => run the whole suite.
 # Maven example: "-Dtest=OwnerServiceTest". Not used for this frontend repo.

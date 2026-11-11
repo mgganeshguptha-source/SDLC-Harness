@@ -1210,7 +1210,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     # Build/test gate off (HARNESS_RUNS_BUILD=false): nothing was compiled or
     # run, so validation judges by reading code and the PR must not claim green.
     # On (default): the harness gate already built and tested — add nothing.
-    if harness_runs_build():
+    if harness_runs_build(repo_root / ".harness"):
         # Validation runs AFTER the harness's build/test gate, so reaching it
         # means that gate passed on this exact code. Say so: without it the
         # validator (which may not run shell commands) marked "the build passes"

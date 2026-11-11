@@ -112,6 +112,8 @@ jobs:
       toolkit_repo: BCBSM/dx_copilot-standards-workspace
       # Toolkit's default branch. All BCBSM repos use 'master' (no 'main').
       toolkit_ref: master
+      # DEPRECATED: set runs_build in .harness/config.yaml instead; that value
+      # wins. This input is only used when config.yaml does not set it.
       # Harness builds the code, runs unit tests + the coverage gate after
       # unit_testing (loops back on red / low coverage). false = skip; the
       # developer builds and tests locally before approving the PR.

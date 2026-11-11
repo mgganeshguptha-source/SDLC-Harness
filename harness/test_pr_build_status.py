@@ -19,7 +19,7 @@ def test_story_attachments_are_not_this_repos_spec(tmp_path: Path):
 
 def test_pr_and_docs_told_build_passed(monkeypatch):
     src = Path(sdk_runner.__file__).read_text(encoding="utf-8")
-    on = src[src.index("if harness_runs_build():"):src.index("    else:\n        build_status_validation")]
+    on = src[src.index("if harness_runs_build(repo_root / \".harness\"):"):src.index("    else:\n        build_status_validation")]
     assert "build_status_pr = (" in on and "PASSED" in on
     docs = src[src.index('"documentation": ('):src.index('"raise_pr": (')]
     assert "{build_status_pr}" in docs
