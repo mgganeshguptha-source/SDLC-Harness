@@ -113,6 +113,16 @@ def ensure_planned_dirs(repo_root: Path, phase_id: str, allowed, exclude,
     return sorted(set(made))
 
 
+def preserve_repo_token() -> None:
+    """Save the repo-access token as HARNESS_REPO_TOKEN before COPILOT_GITHUB_TOKEN
+    is pointed at the model credential. Only the first call saves anything: by the
+    second phase, COPILOT_GITHUB_TOKEN already holds the model token."""
+    import os
+    repo = os.environ.get("COPILOT_GITHUB_TOKEN", "").strip()
+    if repo and not os.environ.get("HARNESS_REPO_TOKEN", "").strip():
+        os.environ["HARNESS_REPO_TOKEN"] = repo
+
+
 def _describe_token(token: str | None) -> tuple[str, bool]:
     """Name the KIND of credential, and say whether Copilot accepts it.
 
@@ -1852,6 +1862,10 @@ class SdkAgentRunner:
             # token while we hand the client the MODEL token, the two disagree and
             # which one wins is not something to leave to chance. Align them: the
             # model credential is the only one this subprocess should ever see.
+            # Keep the repo token first: later steps in this process need it
+            # (reference repo clones, billing), and the model token cannot read
+            # other repos (OP018-6418, 2026-11-11).
+            preserve_repo_token()
             os.environ["COPILOT_GITHUB_TOKEN"] = model_token
 
             # Default is to pass the token EXPLICITLY — env-var auto-detection has

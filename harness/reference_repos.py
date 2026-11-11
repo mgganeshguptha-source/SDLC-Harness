@@ -170,9 +170,12 @@ def remove_clones(repo_root) -> bool:
 
 def _clone_env(server: str) -> dict:
     """The token travels as a per-process git setting: never in the URL, the
-    process arguments or a git config file."""
+    process arguments or a git config file. HARNESS_REPO_TOKEN first: after the
+    first model call COPILOT_GITHUB_TOKEN holds the Copilot model credential,
+    which cannot read other repos (sdk_runner.preserve_repo_token)."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    token = os.environ.get("COPILOT_GITHUB_TOKEN", "").strip()
+    token = (os.environ.get("HARNESS_REPO_TOKEN", "").strip()
+             or os.environ.get("COPILOT_GITHUB_TOKEN", "").strip())
     if token and server.startswith("http"):
         auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         env["GIT_CONFIG_COUNT"] = "1"
@@ -205,7 +208,10 @@ def clone(entry: RepoEntry, repo_root) -> str:
         raise RuntimeError(f"cloning {full} took over {CLONE_TIMEOUT_SECONDS} seconds")
     if r.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
-        raise RuntimeError(f"could not clone {full} on branch '{entry.branch}': "
+        hint = (" (the token was refused: check it can read this repo)"
+                if "could not read Username" in r.stderr or "Authentication failed" in r.stderr
+                else "")
+        raise RuntimeError(f"could not clone {full} on branch '{entry.branch}'{hint}: "
                            f"{r.stderr.strip()[-300:]}")
     sha = subprocess.run(["git", "-C", str(dest), "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()

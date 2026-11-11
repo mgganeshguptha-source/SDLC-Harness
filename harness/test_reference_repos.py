@@ -307,3 +307,32 @@ def test_job_summary(tmp_path, monkeypatch):
     RR.write_job_summary([{"repo": "a/b", "branch": "m", "commit": "c",
                            "source": "override", "reason": "r"}])
     assert "| a/b | m | c | override | r |" in s.read_text()
+
+
+# --- the token used for clones (OP018-6418, 2026-11-11) ---
+def test_repo_token_survives_the_model_token_swap(monkeypatch):
+    import sdk_runner
+    monkeypatch.delenv("HARNESS_REPO_TOKEN", raising=False)
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "repo-pat")
+    sdk_runner.preserve_repo_token()
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "model-token")   # what sdk_runner does next
+    sdk_runner.preserve_repo_token()                           # second phase
+    import os
+    assert os.environ["HARNESS_REPO_TOKEN"] == "repo-pat"
+
+
+def test_clone_uses_the_repo_token_not_the_model_token(monkeypatch, tmp_path):
+    import base64
+    monkeypatch.setenv("HARNESS_REPO_TOKEN", "repo-pat")
+    monkeypatch.setenv("COPILOT_GITHUB_TOKEN", "model-token")
+    env = RR._clone_env("https://github.com")
+    assert base64.b64decode(env["GIT_CONFIG_VALUE_0"].split()[-1]).decode() == \
+        "x-access-token:repo-pat"
+
+
+def test_refused_token_is_named_in_the_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(RR.subprocess, "run", lambda cmd, **k: subprocess.CompletedProcess(
+        cmd, 128, "", "fatal: could not read Username for 'https://github.com'"))
+    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    with pytest.raises(RuntimeError, match="the token was refused"):
+        RR.clone(RR.RepoEntry("a/b", "m", "default"), _repo(tmp_path))
