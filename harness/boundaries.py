@@ -46,7 +46,15 @@ def _matches(path: str, pattern: str) -> bool:
 
     if pattern.endswith("/**"):
         prefix = pattern[:-3].rstrip("/")
-        return path == prefix or path.startswith(prefix + "/")
+        if not any(c in prefix for c in "*?["):
+            return path == prefix or path.startswith(prefix + "/")
+        # A wildcard prefix, e.g. '**/node_modules/**': the documented
+        # write_exclude form, which the literal prefix test above never matched
+        # (OP018-6418, 2026-11-11). Match the folder at any depth, or at the root.
+        for pre in {prefix, prefix.replace("**/", "")}:
+            if fnmatch.fnmatch(path, pre) or fnmatch.fnmatch(path, pre + "/*"):
+                return True
+        return False
 
     # exact or fnmatch fallback. '**/' must also match ZERO directories, so
     # 'src/app/**/*.spec.ts' matches 'src/app/a.spec.ts' as well as

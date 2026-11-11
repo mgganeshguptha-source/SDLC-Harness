@@ -741,6 +741,11 @@ jobs:
           git add -A
           git reset -q -- .harness audit metrics contracts \
             .github/skills .github/instructions .github/story-context-files 2>/dev/null || true
+          # Paths no phase may write (node_modules/, generated code, lock files):
+          # a change there came from a tool (e.g. `npm ci` emptying a committed
+          # node_modules/), never from the work. Leave it out (OP018-6418).
+          PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 "$GITHUB_WORKSPACE/engine/harness/protected_paths.py" unstage --repo . \
+            || echo "::warning title=Protected paths::check skipped; review the WIP commit for node_modules/ or generated files"
           # The WIP branch is the resume point and MUST carry run-state.json, or
           # `resume=true` fails with "no run-state.json". Each file is force-added
           # ON ITS OWN: `git add -f a b` aborts entirely when one path is missing,
@@ -941,6 +946,11 @@ jobs:
           DEC_DIR="${DEC_DIR:-docs/decisions}"
           git diff -z --name-only --diff-filter=ACMRT "$MB" "$WIP_SHA" -- "$DEC_DIR" >> "$WORKTREE/changed"
           git diff -z --name-only --diff-filter=D     "$MB" "$WIP_SHA" -- . "${EXCL[@]}" > "$WORKTREE/deleted"
+          # Never carry paths no phase may write, even if an older WIP commit has
+          # them (OP018-6418: 27 committed node_modules/ files deleted by npm ci).
+          PYTHONPATH="$GITHUB_WORKSPACE/engine/harness" python3 "$GITHUB_WORKSPACE/engine/harness/protected_paths.py" filter --repo . \
+            --changed "$WORKTREE/changed" --deleted "$WORKTREE/deleted" \
+            || echo "::warning title=Protected paths::check skipped; review the PR for node_modules/ or generated files"
           echo "Files carried into the PR:"
           tr '\0' '\n' < "$WORKTREE/changed"
 

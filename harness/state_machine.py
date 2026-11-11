@@ -1291,11 +1291,13 @@ class StateMachine:
             # ---- DETERMINISTIC VALIDATION GATE ----
             # The harness (not the agent) runs the tests. Red => halt before advancing.
             # Switchable — see harness_runs_build() at the top of this file.
-            _runs_build = harness_runs_build()
+            _runs_build = harness_runs_build(self.harness_dir)
             if phase.validate_after and not _runs_build:
+                from config import runs_build_source as _rbs
                 self.log("  [harness] build/test gate: OFF — the harness does not "
                          "compile or run tests; the developer builds and runs them "
-                         "locally before approving the PR.")
+                         f"locally before approving the PR. (runs_build from: "
+                         f"{_rbs(self.harness_dir)})")
             if phase.validate_after and _runs_build:
                 if self._validator is not None:
                     vr = self._validator(self.repo_root, self.harness_dir, self.log)
@@ -1303,6 +1305,18 @@ class StateMachine:
                     from validation import run_validation
                     vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
                                         changed_files=run.changed_main_files)
+                # A build may change files no phase may write (npm ci empties a
+                # committed node_modules/; npm install rewrites package-lock.json).
+                # Put them back so later phases and the commits never carry them
+                # (OP018-6418 Story 2, 2026-11-11).
+                try:
+                    from protected_paths import restore_worktree
+                    _restored = restore_worktree(self.repo_root, self.harness_dir)
+                    if _restored:
+                        self.log(f"  [protected] restored {len(_restored)} file(s) the build "
+                                 f"changed outside the allowed paths, e.g. {_restored[0]}")
+                except Exception as _e:
+                    self.log(f"  [protected] restore skipped ({type(_e).__name__})")
                 self.log(f"  [harness] validation: {vr.summary} (exit {vr.exit_code})")
                 if vr.passed:
                     # The fix loop is over: lift the contract freeze.

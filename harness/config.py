@@ -35,16 +35,51 @@ FRONTEND_STACKS = {"angular-frontend", "frontend", "mobile-frontend", "ionic"}
 SKIPPABLE_PHASES = ("unit_testing",)
 
 
-def harness_runs_build() -> bool:
+def _config_runs_build(harness_dir) -> bool | None:
+    """`runs_build` from the service's .harness/config.yaml, or None when the file
+    does not set it."""
+    if harness_dir is None or yaml is None:
+        return None
+    try:
+        p = Path(harness_dir) / "config.yaml"
+        if not p.is_file():
+            return None
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    v = data.get("runs_build") if isinstance(data, dict) else None
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() not in ("false", "0", "no", "off")
+
+
+def runs_build_source(harness_dir=None) -> str:
+    """Where harness_runs_build() took its value from, for the log."""
+    if _config_runs_build(harness_dir) is not None:
+        return ".harness/config.yaml"
+    if os.environ.get("HARNESS_RUNS_BUILD", "").strip():
+        return "caller workflow (runs_build input)"
+    return "default"
+
+
+def harness_runs_build(harness_dir=None) -> bool:
     """True when the harness builds the code and runs the unit tests itself.
 
     Controls the deterministic validation gate after 'unit_testing' (build +
-    tests), the coverage gate and its loopback. Read from the HARNESS_RUNS_BUILD
-    env var (set by the `runs_build` workflow input); default ON. Set it to
-    false/0/no/off when the runner cannot build the repo — the developer then
-    builds and runs the tests locally before approving the PR, and the
-    validation and raise_pr prompts say so.
+    tests), the coverage gate and its loopback. Set it false when the runner
+    cannot build the repo — the developer then builds and runs the tests locally
+    before approving the PR, and the validation and raise_pr prompts say so.
+
+    Precedence (backlog #8, 2026-11-11): `runs_build` in the service's
+    .harness/config.yaml, next to test_command, when it is set; otherwise the
+    HARNESS_RUNS_BUILD env var (the caller workflow's `runs_build` input, kept
+    for repos that have not moved it yet); otherwise ON.
     """
+    from_config = _config_runs_build(harness_dir)
+    if from_config is not None:
+        return from_config
     v = os.environ.get("HARNESS_RUNS_BUILD", "").strip().lower()
     return v not in ("false", "0", "no", "off")
 

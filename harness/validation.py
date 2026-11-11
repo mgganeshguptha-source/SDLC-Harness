@@ -360,6 +360,25 @@ _TOOLCHAIN_SIGNATURES = (
 # conflict that npm 7+ refuses by default (observed at BCBSM, dx_mycoverage-ui:
 # primeng@17 declares Angular 17/18 peers in an Angular 19 app). The fix is a
 # flag or a dependency upgrade, not network access, so it gets its own hint.
+# The build cannot find files under node_modules/ that it names by path, e.g. an
+# angular.json "scripts" entry 'node_modules/mpa-js/bootstrap/bootstrap.bundle.min.js'.
+# No phase can create those: they come from npm, or from files committed under
+# node_modules/ (dx_mpa_responsive commits mpa-js there, and `npm ci` deletes
+# node_modules/ first). Only the explicit 'node_modules/...' path form counts: a
+# bare import of an uninstalled package in src/app ("Can't resolve 'some-pkg'")
+# can be the code's own mistake and stays a code failure (OP018-6418, 2026-11-11).
+_NODE_MODULES_PATH_RX = re.compile(r"can't resolve '(?:\./)?node_modules/((?:@[^/']+/)?[^/']+)")
+
+
+def missing_node_modules_packages(output: str) -> list:
+    """Package names from "Can't resolve 'node_modules/<pkg>/...'" lines."""
+    seen = []
+    for m in _NODE_MODULES_PATH_RX.finditer((output or "").lower()):
+        if m.group(1) not in seen:
+            seen.append(m.group(1))
+    return seen
+
+
 _NPM_PEER_SIGNATURES = (
     "npm err! code eresolve", "npm error code eresolve",
 )
@@ -463,6 +482,16 @@ _HINTS = {
         "           and a token, e.g. via .npmrc and a secret); ENOTFOUND = registry\n"
         "           unreachable from the runner; E401/E403 = credentials missing or\n"
         "           refused. Fix it, then resume."),
+    "node_modules_missing": (
+        "The build names files under node_modules/ that are not on the runner\n"
+        "           (see the package names in the detail line). No phase can create\n"
+        "           them. Usual causes: the package is not in package.json (it is\n"
+        "           committed under node_modules/, or a CI script copies it there),\n"
+        "           or it comes from a private registry the runner cannot reach.\n"
+        "           Note: `npm ci` deletes node_modules/ first, so it removes\n"
+        "           committed packages — use `npm install` in test_command for such\n"
+        "           a repo. Or set runs_build: false in .harness/config.yaml and\n"
+        "           let the developer build locally. Then resume."),
     "browser": (
         "The test browser (headless Chrome) could not start, so no spec ran.\n"
         "           No phase can fix this. On a GitHub-hosted runner Chrome is\n"
@@ -563,6 +592,8 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
         return "toolchain"
     if any(s in low for s in _NPM_PEER_SIGNATURES):
         return "npm_peer_conflict"
+    if _NODE_MODULES_PATH_RX.search(low):
+        return "node_modules_missing"
     if any(s in low for s in _NPM_SIGNATURES):
         return "npm_install"
     if any(s in low for s in _BROWSER_START_SIGNATURES):
@@ -707,9 +738,14 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             "browser": "the test browser (headless Chrome) could not start",
             "angular_config": "the Angular build configuration in test_command is not defined in angular.json",
             "angular_cli": "the Angular CLI stopped with an unhandled exception",
+            "node_modules_missing": "files under node_modules/ are missing on the runner",
         }
         summary = (f"ENVIRONMENT FAILURE (exit {proc.returncode}) — "
                    f"{_labels.get(_env, 'build did not run')}")
+        if _env == "node_modules_missing":
+            _pk = missing_node_modules_packages(out)
+            if _pk:
+                summary += f": {', '.join(_pk[:8])}"
         log(f"  ! {summary}")
         log("    This is an environment problem, not a code problem — no phase "
             "can fix it, so the harness will halt instead of looping.")
