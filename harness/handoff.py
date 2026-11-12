@@ -14,7 +14,10 @@ Not every story goes through the harness, so the contract is never a file only
 the harness can write. Rule of thumb for the developer:
   - upstream story was a BACKEND story  -> attach that repo's OpenAPI file
   - upstream story was an ANGULAR story -> attach that repo's NgRx store folder
-                                           (src/app/store/, with its subfolders)
+                                           (a folder named store/ at any depth, e.g.
+                                           src/app/store/ or mpa-web/src/app/mpa/store/,
+                                           with its subfolders, plus the model files
+                                           it imports)
 Files go in the downstream story's attachments folder (stories/<feature_id>/);
 a subfolder is optional.
 
@@ -36,9 +39,10 @@ The story id is never typed.
 
 UPSTREAM PUBLISHING (contract_handoff)
 When a harness run changes contract files (backend: controllers, DTOs, the
-OpenAPI file; Angular: src/app/store/**), the engine copies the CURRENT
-contract files of the repo (backend: the OpenAPI file(s); Angular: the whole
-src/app/store/ folder; plus contract_files from config) to
+OpenAPI file; Angular: **/store/**), the engine copies the CURRENT
+contract files of the repo (backend: the OpenAPI file(s); Angular: every store/
+folder at any depth, its .ts files and the local files they import, such as the
+model; plus contract_files from config) to
 .harness/contract/files/, PII-scans them, writes manifest.json (repo, feature,
 run, commit, base, files) and an optional model-written summary
 (contract-<repo>.md). collect-audit and the workflow publish them to the
@@ -112,12 +116,17 @@ _API_FILE_PATTERNS = ["**/*Controller.java", "**/*Request.java", "**/*Response.j
                       "**/*Dto.java", "**/*DTO.java", "**/*Controller.kt",
                       "**/*Request.kt", "**/*Response.kt", "**/*Dto.kt"]
 # What is published as the contract, per stack (besides OpenAPI files).
+# Any folder named store/, at any depth: dx_mpa_responsive keeps its NgRx store
+# in mpa-web/src/app/mpa/store/, which a root-anchored "src/app/store/**" never
+# found, so OP018-6418 Story 2 published no contract (2026-11-12).
+_STORE_GLOB = "**/store/**"
 STACK_CONTRACT_SOURCES = {
-    "angular-frontend": ["src/app/store/**"],
-    "frontend": ["src/app/store/**"],
-    "mobile-frontend": ["src/app/store/**"],
-    "ionic": ["src/app/store/**"],
+    "angular-frontend": [_STORE_GLOB],
+    "frontend": [_STORE_GLOB],
+    "mobile-frontend": [_STORE_GLOB],
+    "ionic": [_STORE_GLOB],
 }
+_RELATIVE_IMPORT_RX = re.compile(r"""(?:import|export)[^'"]*?from\s*['"](\.{1,2}/[^'"]+)['"]""")
 
 
 def _stacks(cfg) -> list:
@@ -457,8 +466,9 @@ def check_dependencies(repo_root: Path, cfg, feature_id: str, story: str) -> Dep
             res.problems.append(
                 f"the story names {', '.join(req.repos)} but no contract file is attached in "
                 f"{_rel(folder, repo_root)}/. Attach the upstream repo's OpenAPI file (backend "
-                f"story) or its src/app/store/ folder (Angular story) — from the upstream "
-                f"branch, or from contracts/<upstream feature_id>/ on its harness-metrics branch.")
+                f"story) or its NgRx store folder and the model files it imports (Angular "
+                f"story, e.g. src/app/store/) — from the upstream branch, or from "
+                f"contracts/<upstream feature_id>/ on its harness-metrics branch.")
             return res
 
         # Tie files to repos: file path, an OpenAPI info.title, a manifest.json
@@ -537,7 +547,9 @@ def gate_message(res: DepResult, feature_id: str) -> str:
         "                        schema, config). When a repo is named, attach its",
         "                        contract files in stories/<feature_id>/:",
         "                          backend upstream story -> its OpenAPI file",
-        "                          Angular upstream story  -> its src/app/store/ folder",
+        "                          Angular upstream story  -> its NgRx store folder",
+        "                            (any store/ folder, e.g. src/app/store/) and the",
+        "                            model files it imports",
         f"  Resume : feature_id={feature_id}, resume=true (the story and its",
         "           attachments are re-read from the story branch)",
         "  ==========================================================", ""]
@@ -576,23 +588,55 @@ def boundary_files(changed: list, cfg, specs: list | None = None) -> list:
 
 def contract_sources(repo_root: Path, cfg, specs: list | None = None) -> list:
     """Repo-relative files that ARE this repo's contract: OpenAPI files, the
-    stack's contract folders (Angular src/app/store/**), contract_files."""
+    stack's contract folders (Angular: every store/ folder at any depth, its .ts
+    files and the local files they import), contract_files."""
     root = Path(repo_root)
     out: list = list(specs if specs is not None else api_specs(root, cfg))
-    globs: list = []
+    stack_globs: list = []
     for st in _stacks(cfg):
-        globs += [g for g in STACK_CONTRACT_SOURCES.get(st, []) if g not in globs]
-    globs += [g for g in (getattr(cfg, "contract_files", None) or []) if g not in globs]
-    if globs:
+        stack_globs += [g for g in STACK_CONTRACT_SOURCES.get(st, []) if g not in stack_globs]
+    own_globs = [g for g in (getattr(cfg, "contract_files", None) or [])]
+    store_files: list = []
+    if stack_globs or own_globs:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
             for fn in filenames:
                 rel = str((Path(dirpath) / fn).relative_to(root)).replace("\\", "/")
-                if rel.endswith(".spec.ts"):
+                if rel.endswith(".spec.ts") or rel in out:
                     continue
-                if any(_match(rel, g) for g in globs) and rel not in out:
+                if any(_match(rel, g) for g in own_globs):
                     out.append(rel)
+                elif rel.endswith(".ts") and any(_match(rel, g) for g in stack_globs):
+                    out.append(rel)
+                    store_files.append(rel)
+    # The store's state and selectors usually type their data with a model kept
+    # outside store/ (mpa-web/src/app/mpa/shared/data/model/visitsummary.ts).
+    # Add the local .ts files the store imports, one level deep.
+    for rel in store_files:
+        for imp in _local_imports(root, rel):
+            if imp not in out:
+                out.append(imp)
     return sorted(dict.fromkeys(out))
+
+
+def _local_imports(root: Path, rel: str) -> list:
+    """Repo-relative .ts files that `rel` imports with a relative path."""
+    try:
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    found = []
+    base = (root / rel).parent
+    for spec in _RELATIVE_IMPORT_RX.findall(text):
+        target = os.path.normpath(base / spec)
+        for cand in (target + ".ts", os.path.join(target, "index.ts")):
+            if os.path.isfile(cand):
+                r = str(Path(cand).resolve().relative_to(root.resolve())).replace("\\", "/")
+                parts = set(r.split("/"))
+                if not r.endswith(".spec.ts") and not (parts & _SKIP_DIRS):
+                    found.append(r)
+                break
+    return found
 
 
 def contract_dir(repo_root: Path) -> Path:
@@ -677,7 +721,7 @@ def finalize(repo_root: Path, cfg, run, changed: list, log=print, force: bool = 
         if not sources:
             info["status"] = "missing"
             log("  [contract] ! no contract files found to publish (no OpenAPI file, no "
-                "src/app/store/, no contract_files)")
+                "store/ folder, no contract_files)")
             return _store(run, info)
 
         files_dir = cdir / "files"
