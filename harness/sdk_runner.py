@@ -525,7 +525,7 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     # ---- instructions ----
     instr_dir = gh / "instructions"
     if instr_dir.is_dir():
-        scope = cfg.phase_file_scope.get(phase.id, []) if cfg.selective_capability else None
+        scope = cfg.file_scope_for_phase(phase.id) if cfg.selective_capability else None
         stacks = cfg.repo_stacks or []
         include_all_stacks = (not stacks) or ("*" in stacks)
         for md in sorted(instr_dir.rglob("*.md")):
@@ -1351,8 +1351,63 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         f"{_toolkit_block}"
     )
 
+    # ANALYSIS MODE (bug-fix analysis). One read-only phase that writes one
+    # document; the harness publishes it and a person reviews it in a PR.
+    analysis_file = f"{rr}/.harness/bug-analysis.md"
+    _analysis_followup = (
+        "\n" + _asked_block + "Treat those answers as evidence. Do NOT ask again a "
+        "question an answer settles; ask again only if the answer leaves it open, "
+        "quoting what is still missing.\n"
+    ) if _asked_block else ""
+
     _repo_instr = f"{rr}/.github/copilot-instructions.md"
     base = {
+        "bug_analysis": (
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. Use the analyze-bug skill in CI mode.\n"
+            f"THIS IS AN ANALYSIS-ONLY RUN FOR A BUG REPORT. Find the root cause and "
+            f"work out what a fix would affect. You MUST NOT create or edit any "
+            f"source, test, build or configuration file: the fix is made by a "
+            f"separate run, after a person has reviewed this analysis. Any write "
+            f"other than the one file named below is denied by the harness.\n"
+            f"  BUG REPORT: {story}\n"
+            f"The reporter's evidence (stack trace, log lines, reproduction steps, "
+            f"screenshots) is in the report above and in the attached files, when "
+            f"there are any. Start from that evidence, then read the code "
+            f"(read-only): follow the failing path from its entry point to the "
+            f"defect, then find what else uses the code a fix would change. "
+            f"Application code is under {src_main}; tests are under {src_test}.\n"
+            f"EVIDENCE RULES:\n"
+            f"  - Every statement about the code cites a file and line you actually "
+            f"read, as `repo/relative/path.ext:LINE`. Never cite from memory.\n"
+            f"  - For every class, method, field, endpoint, DTO or configuration key "
+            f"a fix would change, SEARCH the repository for its uses and list each "
+            f"one found. Write 'none found' only after searching, and say what you "
+            f"searched for.\n"
+            f"  - Say plainly what you could not establish from this repository "
+            f"(other repositories, data, environment, timing).\n"
+            f"WHEN THE EVIDENCE IS NOT ENOUGH, DO NOT GUESS. If the report has no "
+            f"stack trace, log lines or reproduction steps and the code alone does "
+            f"not show the defect, or the bug depends on data, environment or "
+            f"timing you cannot see, or two causes fit and the evidence cannot "
+            f"separate them, write one line per missing item in the template's open "
+            f"questions section, in this exact form:\n"
+            f"  [NEEDS CLARIFICATION]: <the specific evidence or answer needed>\n"
+            f"The harness halts on those lines and asks the reporter. A plausible "
+            f"root cause that is wrong costs far more than a question. When nothing "
+            f"blocks, write 'None.' there and do not use the marker anywhere.\n"
+            f"{_analysis_followup}"
+            f"Leave the template's lead approval section unfilled; the reviewer "
+            f"fills it. Do not write a commit id or branch name: the harness "
+            f"records the analysed source itself.\n"
+            f"BUDGET YOUR TURNS. The run FAILS if the file does not exist when your "
+            f"turns run out. Read what the failing path and its callers need, not "
+            f"the whole repository, then write the document in ONE pass, complete.\n"
+            f"Write the analysis, following the skill's template exactly, to this "
+            f"EXACT file (its parent .harness ALREADY EXISTS, do not mkdir, shell is "
+            f"disallowed): {analysis_file}\n"
+            f"Write ONLY {analysis_file}."
+        ),
         "repo_instructions": (
             f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
             f"and do NOT wait for input. This repository has no repo-wide Copilot "

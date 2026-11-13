@@ -58,6 +58,50 @@ per-acceptance-criterion conformance check.
 `design` is skipped when the `context` phase judges the story follows an existing
 pattern. This is the one branch point in the spine.
 
+---
+
+## Analysis mode (bug-fix analysis)
+
+The ten phases above are **build mode**, the default. A run started with the
+workflow input `mode: analysis` walks a separate, one-phase sequence instead. It
+reads a bug report and the code, and opens a pull request that holds **one
+file**: a root-cause and impact analysis. It changes no code.
+
+| Phase | What runs | May write | Required artifact |
+|-------|-----------|-----------|-------------------|
+| `bug_analysis` | Reads the bug report (`stories/<feature_id>.md`), its evidence in `stories/<feature_id>/` (stack trace, logs, screenshots) and the code, with the toolkit's `analyze-bug` skill and template | `.harness/bug-analysis.md` only | `.harness/bug-analysis.md` |
+
+What the harness does after the phase, in code (`analysis.py`):
+
+1. **Analysis gate.** An open `[NEEDS CLARIFICATION]` line in the document means
+   the evidence did not establish a root cause. The run halts (`needs_input`) and
+   nothing is published. Add the missing evidence to the bug report on the base
+   branch and re-run with `resume: true`.
+2. **Stamp.** Records the commit, branch and bug-report hash the analysis read,
+   at the top of the document. The model is not asked for these.
+3. **Publish.** Copies the document to
+   `stories/<feature_id>/<feature_id>-bug-analysis.md` and writes the PR body with
+   the reviewer's checklist.
+4. **Pull request.** The workflow opens a PR from
+   `harness/<feature>/analysis-<actor>-<date>-<run_id>` carrying exactly that file.
+
+A lead reviews the document in the PR, corrects it and merges it into the story
+branch. The fix is a **separate build run** of the same `feature_id`
+(`mode: build`): the document sits in the story folder, so it reaches the
+context, design, planning, coding, review and validation phases as a story
+attachment, alongside the code as it is at that time.
+
+Set a stronger model for the analysis with `phase_models: {bug_analysis: ...}`
+in `.harness/config.yaml`. The story's PII/PHI input guard, the mandatory
+contract line and `.harness/repo_list.yaml` apply as in build mode.
+
+**Not built yet** (next steps): engine-side evidence collection (callers of the
+code a fix touches) and the evidence gates that rest on it; reading other
+repositories; a check in the build run that the code the analysis cites has not
+changed since, and that the fix stays inside the approved scope. Until then the
+build run treats the document as input, not as a binding constraint. Do not use
+analysis mode on real client bugs before those controls exist.
+
 ### Answering clarifications, and learning from the answers
 
 - **Answer in the story, then resume.** When the context gate halts on
@@ -190,6 +234,8 @@ always current and are never copied into the service repo.
 - `harness-audit/<feature>/<date>-<outcome>-<run_id>` — the audit trail
 - `harness-metrics` — accumulates one metrics record per run
 - `harness/<feature>/<date>-<run_id>` — the branch the pull request is opened from
+- `harness/<feature>/analysis-<actor>-<date>-<run_id>` — analysis mode: the branch
+  of the document-only pull request
 
 ---
 
@@ -200,6 +246,7 @@ always current and are never copied into the service repo.
 | default (all phases) | `gpt-5-mini` | — |
 | `code_review` | `claude-haiku-4.5` | a different vendor from the coder, deliberately |
 | `design`, `validation` | `claude-sonnet-4.5` | architecture trade-offs and per-AC judgement |
+| `bug_analysis` (analysis mode) | the default, unless `phase_models.bug_analysis` is set | root-cause reasoning; set a stronger model here |
 
 Set in `.harness/config.yaml` (`model`, `phase_models`, `review_model`).
 
@@ -213,7 +260,8 @@ Flat package under `harness/`.
 |------|----------------|
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
-| `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap |
+| `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap. Also the analysis-mode sequence and the helpers that pick a sequence by run mode |
+| `analysis.py` | Analysis mode: the analysis gate (open questions halt), the analysed-source stamp, publishing the document to the story folder, the PR body |
 | `reference_repos.py` | Reads `.harness/repo_list.yaml`; clones a listed repo when the context phase asks for it, read-only, for that phase only |
 | `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY, and halts on `<placeholder>` file paths |
 | `contracts.py` | The pinned exit-code contract the orchestrator speaks |
@@ -283,9 +331,10 @@ State these openly.
 - **A story needing a new dependency halts.** No phase may write `pom.xml`. The
   coding phase declares `.harness/blocked.md` and the run stops with instructions
   to add the dependency by hand and resume. Deliberate, but a real constraint.
-- **Only new development and enhancement profiles exist.** A bug-fix / analysis
-  profile (diagnose root cause, derive acceptance criteria, test-before-fix) is
-  designed but not yet built.
+- **Bug-fix analysis is at its first step.** Analysis mode produces a reviewed
+  root-cause and impact document (see "Analysis mode"). The engine does not yet
+  collect caller evidence itself, read other repositories, or bind the later
+  build run to the approved document; test-before-fix is not built.
 - **Skill attribution is best-effort.** The SDK reports its own agent rather than
   the repo skills it loaded, so per-run skill attribution is approximate.
 - **Local runs have no enforcement.** A helper exists to run phases locally with

@@ -50,6 +50,9 @@ model: "gpt-5-mini"                     # default for every phase
 phase_models:
   design: "claude-sonnet-4.5"           # architecture decisions and trade-offs
   validation: "claude-sonnet-4.5"       # judging each acceptance criterion
+  # Analysis mode (workflow input mode: analysis) has one phase, bug_analysis.
+  # Root-cause reasoning is the hard step: set a stronger model for it here.
+  # bug_analysis: "claude-sonnet-4.5"
   # unit_testing: "gpt-5.1-mini"        # re-enable once the model string is verified
 review_model: "claude-haiku-4.5"        # code_review only — set HERE, not in phase_models
 review_loopback_phase: "coding"

@@ -18,6 +18,14 @@ class RunState:
     story: str                            # the user story text
     current_phase: str                    # phase id we are on / paused at
     status: str = "running"               # running | awaiting_approval | halted | done
+    # Which phase sequence this run walks (phases.phases_for): "build" (story ->
+    # code -> PR) or "analysis" (bug report -> root-cause and impact document ->
+    # document-only PR). Set once at init from the workflow's `mode` input.
+    mode: str = "build"
+    # Analysis mode: repo-relative path the harness copied the approved-for-
+    # review analysis document to (the story folder). The PR step carries
+    # exactly this file. None until the analysis gate passes.
+    analysis_doc: Optional[str] = None
     # Where the story text came from and a hash of it, so a resume can tell
     # whether the developer has edited the story since the run started.
     story_path: Optional[str] = None

@@ -63,7 +63,9 @@ from pathlib import Path
 # v6: dependencies (the story's contract line + upstream contracts attached),
 # contract_output (contract produced for downstream stories: status, file).
 # v7: reference_repos (other repos the context phase read: repo, branch, commit).
-SCHEMA_VERSION = 7
+# v8: mode (build | analysis) and analysis_doc (the document an analysis run
+# published for review). Records written before v8 are build runs.
+SCHEMA_VERSION = 8
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -132,6 +134,8 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         # --- identity ---
         "run_id": _env("GITHUB_RUN_ID") or "local",
         "feature_id": getattr(run, "feature_id", None),
+        "mode": getattr(run, "mode", None) or "build",
+        "analysis_doc": getattr(run, "analysis_doc", None),
         "repo": _env("GITHUB_REPOSITORY"),
         "actor": getattr(run, "actor", None) or _env("GITHUB_ACTOR"),
         "engine_ref": _env("HARNESS_ENGINE_REF"),

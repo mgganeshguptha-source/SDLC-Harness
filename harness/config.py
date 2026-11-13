@@ -203,7 +203,12 @@ SKILL_ALIASES = {
 }
 
 # Phases added after repos began overriding phase_skills; see skills_for_phase.
-_PHASES_ADDED_LATER = frozenset({"repo_instructions"})
+_PHASES_ADDED_LATER = frozenset({"repo_instructions", "bug_analysis"})
+
+# Analysis mode's phase. It reads the bug's evidence (stack trace, logs,
+# screenshots), which arrives as story attachments, so it always receives them
+# — whatever a repo's attachment_phases override lists.
+ANALYSIS_PHASE = "bug_analysis"
 
 
 @dataclass
@@ -368,6 +373,10 @@ class HarnessConfig:
     # applyTo "**" files are always-on guardrails (load in every phase).
     # Keyed by phase id.
     phase_file_scope: dict = field(default_factory=lambda: {
+        # bug_analysis (analysis mode) reads the same code as context; a repo
+        # override that does not name it falls back to its context scope
+        # (file_scope_for_phase).
+        "bug_analysis": ["src/main/java/**", "src/main/**"],
         "context":      ["src/main/java/**", "src/main/**"],
         "prompt_steps": ["src/main/java/**", "src/main/**"],
         "coding":       ["src/main/java/**"],
@@ -383,6 +392,8 @@ class HarnessConfig:
                               "build-copilot-instructions-angular-frontend",
                               "build-copilot-instructions-mobile-frontend"],
         "context":      ["build-context", "analyze-service"],
+        # Analysis mode (bug-fix analysis): root cause + impact document.
+        "bug_analysis": ["analyze-bug"],
         "prompt_steps": ["build-prompt-steps"],
         # analyze-service is deliberately NOT loaded here. It recursively traces
         # downstream API calls — far heavier than a design phase needs, and in run
@@ -539,7 +550,7 @@ class HarnessConfig:
     # asked again — by the same developer or anyone else.
     knowledge_paths: list = field(default_factory=lambda: ["docs/decisions/*.md"])
     knowledge_phases: list = field(default_factory=lambda: [
-        "context", "design", "prompt_steps", "validation"])
+        "context", "bug_analysis", "design", "prompt_steps", "validation"])
     # Cap on the inlined knowledge, in characters. Newest files win when over.
     knowledge_max_chars: int = 40_000
     # Create .github/copilot-instructions.md when the repo has none (the
@@ -581,8 +592,11 @@ class HarnessConfig:
     # A missing or empty folder means "no attachments" — nothing changes.
     attachments_dir: str = "stories/{feature_id}"
     # Phases whose model receives the attachments with its prompt.
+    # bug_analysis (analysis mode) is always included: the attachments are the
+    # bug's evidence. An override that leaves it out still gets it (see load).
     attachment_phases: list = field(default_factory=lambda: [
-        "context", "design", "prompt_steps", "coding", "code_review", "validation"])
+        "context", "bug_analysis", "design", "prompt_steps", "coding",
+        "code_review", "validation"])
     # PII/PHI guard: scan the story and every attachment (text, converted
     # Word/PDF, OCR text of images) before ANY model call, and halt on a match.
     # ON by default. Set false only when the input is known to be mocked test
@@ -738,7 +752,17 @@ class HarnessConfig:
 
         # Repo root for OpenAPI auto-detection (api_spec_files not set).
         cfg._repo_root = repo_root
+        if ANALYSIS_PHASE not in cfg.attachment_phases:
+            cfg.attachment_phases = list(cfg.attachment_phases) + [ANALYSIS_PHASE]
         return cfg
+
+    def file_scope_for_phase(self, phase_id: str) -> list:
+        """Instruction-file scope for a phase. bug_analysis uses the context
+        scope when a repo's phase_file_scope override predates analysis mode."""
+        scope = (self.phase_file_scope or {}).get(phase_id)
+        if scope is None and phase_id == ANALYSIS_PHASE:
+            scope = (self.phase_file_scope or {}).get("context")
+        return list(scope or [])
 
     # ---------------------------------------------------------------- B4: paths
     def _preset_paths(self) -> tuple:

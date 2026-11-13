@@ -54,6 +54,14 @@ class FakeAgentRunner:
             writes.append("docs/fullname.md")
             self.log("  (fake) would write docs/fullname.md")
 
+        elif phase.id == "bug_analysis":
+            f = repo_root / ".harness" / "bug-analysis.md"
+            f.write_text(f"# Bug analysis — {run.feature_id}\n\n## Root cause\n"
+                         "(fake) Owner.getFullName() drops the last name — "
+                         "src/main/java/.../Owner.java:42\n\n"
+                         "## Open questions and assumptions\nNone.\n", encoding="utf-8")
+            writes.append(".harness/bug-analysis.md")
+
         elif phase.id == "raise_pr":
             self.log("  (fake) would run: gh pr create ...")
 
