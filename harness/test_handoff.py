@@ -465,3 +465,47 @@ def test_no_near_miss_for_unrelated_story(tmp_path):
     repo = _repo(tmp_path)
     res = HO.check_dependencies(repo, _cfg(repo), "F-1", "**Title:** x\n**Owner:** y\n")
     assert not any("did you mean" in p for p in res.problems)
+
+
+# ------------------------------------------- store at any depth (OP018-6418 Story 2)
+def test_finalize_finds_a_nested_store_and_its_model(tmp_path):
+    repo = _repo(tmp_path, 'repo_stacks: ["angular-frontend"]\ntarget_module: "mpa-web"\n'
+                           'api_spec_files: []\n')
+    app = repo / "mpa-web/src/app/mpa"
+    files = {
+        "store/actions/visitsummary.actions.ts": "export const a = 1;\n",
+        "store/reducers/visitsummary.reducer.ts":
+            "import { VisitSummary } from '../../shared/data/model/visitsummary';\n",
+        "store/selectors/visitsummary.selectors.ts":
+            "import * as fromVs from '../reducers/visitsummary.reducer';\n",
+        "store/effects/visitsummary.effects.ts": "export class E {}\n",
+        "store/effects/visitsummary.effects.spec.ts": "describe()\n",
+        "store/README.md": "notes\n",
+        "shared/data/model/visitsummary.ts": "export interface VisitSummary { status: string }\n",
+        "shared/data/model/other.ts": "export interface Other {}\n",
+    }
+    for rel, text in files.items():
+        p = app / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    nm = repo / "mpa-web/node_modules/lib/store/x.ts"
+    nm.parent.mkdir(parents=True)
+    nm.write_text("x")
+    run = RunState(feature_id="OP-1", story="s", current_phase="documentation")
+    info = HO.finalize(repo, _cfg(repo), run,
+                       ["mpa-web/src/app/mpa/store/effects/visitsummary.effects.ts"],
+                       log=lambda *a: None)
+    assert info["status"] == "published"
+    assert info["files"] == [
+        "mpa-web/src/app/mpa/shared/data/model/visitsummary.ts",
+        "mpa-web/src/app/mpa/store/actions/visitsummary.actions.ts",
+        "mpa-web/src/app/mpa/store/effects/visitsummary.effects.ts",
+        "mpa-web/src/app/mpa/store/reducers/visitsummary.reducer.ts",
+        "mpa-web/src/app/mpa/store/selectors/visitsummary.selectors.ts",
+    ]
+
+
+def test_contract_missing_message_names_store_and_model(tmp_path):
+    repo = _repo(tmp_path)
+    res = HO.check_dependencies(repo, _cfg(repo), "F-1", f"{LINE} dx_mpa_responsive\n")
+    assert not res.ok and "model files it imports" in res.problems[0]

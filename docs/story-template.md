@@ -54,7 +54,7 @@ Write only the repo name.
 | The upstream story was… | Attach in `stories/<feature_id>/` |
 |---|---|
 | a **backend** story | that repo's **OpenAPI file** (e.g. `mex-coverage-service.yml`) |
-| an **Angular frontend** story | that repo's **NgRx store folder** (`src/app/store/`, with all its subfolders) |
+| an **Angular frontend** story | that repo's **NgRx store folder** (any folder named `store/`, e.g. `src/app/store/` or `mpa-web/src/app/mpa/store/`, with all its subfolders) **and the model files the store imports** (e.g. `shared/data/model/visitsummary.ts`) |
 
 - Take the files from the upstream branch that holds the change (e.g. the
   approved PR branch). A subfolder is optional.
