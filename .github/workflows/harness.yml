@@ -52,6 +52,20 @@ on:
         required: false
         default: ""
         type: string
+      mode:
+        description: >-
+          build (default): story -> context -> plan -> code -> review -> tests
+          -> PR with the code change. analysis: bug-fix analysis only — reads
+          the bug report (stories/<feature_id>.md plus its evidence in
+          stories/<feature_id>/) and the code, and opens a PR that holds ONE
+          file, the root-cause and impact document
+          (stories/<feature_id>/<feature_id>-bug-analysis.md). No code is
+          changed. A lead reviews and merges that PR; a later build run of the
+          same feature_id reads the document from the story folder. Fixed when
+          the run starts: a resume keeps the mode the run was started in.
+        required: false
+        default: "build"
+        type: string
       java-version:
         required: false
         default: "17"
@@ -236,6 +250,21 @@ jobs:
           fi
           echo "PII/PHI confirmation given by ${{ github.actor }} (run ${{ github.run_id }})."
 
+      # --- 0c. the run mode ---
+      # Checked before any checkout so a typo stops the run instead of quietly
+      # running the other mode. The engine checks it again at init.
+      - name: Check run mode
+        run: |
+          MODE="${{ inputs.mode }}"
+          case "$MODE" in
+            build|analysis) echo "Run mode: $MODE" ;;
+            *) echo "::error title=Unknown mode::mode must be 'build' or 'analysis' (got '$MODE'). The harness has not started."; exit 1 ;;
+          esac
+          if [ "$MODE" = "analysis" ] && [ "${{ inputs.contract_only }}" = "true" ]; then
+            echo "::error title=Mode conflict::mode 'analysis' cannot be combined with contract_only. The harness has not started."
+            exit 1
+          fi
+
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
       # That branch carries the source the agent wrote, any fix a human pushed on
@@ -306,7 +335,8 @@ jobs:
             exit 1
           fi
           echo "Resuming from harness-wip/${{ inputs.feature_id }}:"
-          python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
+          python3 -c "import json;d=json.load(open('.harness/run-state.json'));print('  mode:',d.get('mode') or 'build','| halted at:',d['current_phase'],'| completed:',d['completed_phases'])"
+          echo "A resume keeps the mode the run was started in; the mode input is ignored."
 
       # --- 2. THIS engine repo -> ./engine ---
       # TOKEN REQUIRED. The engine repo is private/internal inside an org (the BCBSM
@@ -567,7 +597,8 @@ jobs:
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py init \
             --repo ../../service \
-            --feature "${{ inputs.feature_id }}"
+            --feature "${{ inputs.feature_id }}" \
+            --mode "${{ inputs.mode }}"
 
       # Rewind the loaded state to the phase we are re-entering, and reset the
       # retry budgets that stopped the last run — otherwise the gate that halted
@@ -907,6 +938,56 @@ jobs:
           BRANCH="harness/${FEATURE}/${ACTOR}-$(date -u +%Y%m%d)-${{ github.run_id }}"
           git config user.name "harness-bot"
           git config user.email "harness-bot@users.noreply.github.com"
+
+          # ANALYSIS MODE: the PR holds exactly ONE file — the bug-analysis
+          # document the engine published to the story folder (run-state
+          # analysis_doc). Nothing else the run touched is carried, so an
+          # analysis run can never put code into a PR. The mode is read from
+          # the run's own state, so a resumed analysis run needs no extra input.
+          MODE=$(python3 -c "import json;print(json.load(open('.harness/run-state.json')).get('mode') or 'build')" 2>/dev/null || echo build)
+          if [ "$MODE" = "analysis" ]; then
+            DOC=$(python3 -c "import json;print(json.load(open('.harness/run-state.json')).get('analysis_doc') or '')" 2>/dev/null || true)
+            case "$DOC" in
+              ""|/*|*..*) DOC="" ;;
+              *-bug-analysis.md) ;;
+              *) DOC="" ;;
+            esac
+            if [ -z "$DOC" ] || [ ! -f "$DOC" ]; then
+              echo "::warning title=No analysis document::The run finished without a published analysis document; PR skipped, WIP branch kept."
+              echo "pr_raised=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            ATMP="$(mktemp -d)"
+            cp -a "$DOC" "$ATMP/doc.md"
+            if [ -f .harness/pr-body.md ]; then cp -a .harness/pr-body.md "$ATMP/pr-body.md"; fi
+            ABRANCH="harness/${FEATURE}/analysis-${ACTOR}-$(date -u +%Y%m%d)-${{ github.run_id }}"
+            git fetch origin "$PR_BASE"
+            git checkout -f -B "$ABRANCH" "origin/$PR_BASE"
+            mkdir -p "$(dirname "$DOC")"
+            cp -a "$ATMP/doc.md" "$DOC"
+            git add -f -- "$DOC"
+            if git diff --cached --quiet; then
+              echo "::warning title=Analysis unchanged::$DOC is identical to the copy on $PR_BASE; PR skipped, WIP branch kept."
+              echo "pr_raised=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "File carried into the PR:"
+              git diff --cached --name-only
+              git commit -m "Harness: $FEATURE — bug analysis for review (run ${{ github.run_id }})"
+              git push origin "$ABRANCH"
+              if [ -f "$ATMP/pr-body.md" ]; then
+                gh pr create --title "Harness analysis: $FEATURE" --body-file "$ATMP/pr-body.md" --base "$PR_BASE" --head "$ABRANCH" \
+                  && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
+              else
+                gh pr create --title "Harness analysis: $FEATURE" --body "Bug analysis for $FEATURE, for review. No code was changed." --base "$PR_BASE" --head "$ABRANCH" \
+                  && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
+              fi
+            fi
+            rm -rf "$ATMP"
+            # Back to the WIP branch: the "Delete working branch" step reads
+            # audit/*/run-summary.json from the working tree (see 6 below).
+            git checkout -f "harness-wip/${FEATURE}" 2>/dev/null || git checkout -f - 2>/dev/null || true
+            exit 0
+          fi
 
           # MULTI-MODULE SAFE. The previous version copied only a ROOT src/ and
           # docs/ onto the PR branch. In a multi-module repo (code under

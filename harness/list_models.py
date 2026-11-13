@@ -176,8 +176,8 @@ def print_config_check(rows, in_actions: bool) -> int:
 
 
 def _model_phase_ids() -> list:
-    from phases import PHASES, PhaseKind
-    return [p.id for p in PHASES if p.kind == PhaseKind.MODEL]
+    from phases import ALL_PHASES, PhaseKind
+    return [p.id for p in ALL_PHASES if p.kind == PhaseKind.MODEL]
 
 
 async def main(as_json: bool, repo: str | None):

@@ -71,6 +71,11 @@ class Phase:
     # and requires a verdict for every acceptance criterion. Distinct from
     # review_gate, which judges the code rather than the criteria.
     validation_gate: bool = False
+    # Run the ANALYSIS gate after this phase (analysis mode): an open
+    # [NEEDS CLARIFICATION] line in the analysis document halts the run;
+    # otherwise the harness stamps the document and copies it to the story
+    # folder for the document-only pull request. See analysis.py.
+    analysis_gate: bool = False
 
 
 # ---- THE SPINE ----------------------------------------------------------
@@ -209,14 +214,70 @@ PHASES = (
 )
 
 
+# ---- ANALYSIS MODE (bug-fix analysis) -------------------------------------
+# A second, much shorter spine, chosen per RUN (the workflow's `mode` input,
+# stored on RunState.mode). It produces one document — the root cause and the
+# impact of a bug — and nothing else: no code, no tests, no docs. A person
+# reviews that document in a pull request; a later, separate BUILD run reads it
+# from the story folder and makes the fix.
+#
+# The model may write exactly ONE file, the analysis document in the run
+# workspace. The harness, not the model, copies it to the story folder
+# (analysis.publish) and writes the PR body, so analysis mode cannot touch
+# source, tests, build files or the story.
+ANALYSIS_DOC = ".harness/bug-analysis.md"
+
+ANALYSIS_PHASES = (
+    Phase(
+        id="bug_analysis",
+        title="Bug analysis (root cause and impact)",
+        kind=PhaseKind.MODEL,
+        allowed_writes=(ANALYSIS_DOC,),
+        required_artifact=ANALYSIS_DOC,
+        # "The file exists" must mean "written this attempt" (same guard as
+        # design.md / review.md).
+        clear_before_run=(ANALYSIS_DOC,),
+        human_gate=False,                           # reviewed in the PR instead
+        # Like design: it must read the code before it can explain the defect.
+        max_iterations=12,
+        analysis_gate=True,
+    ),
+)
+
+MODE_BUILD = "build"
+MODE_ANALYSIS = "analysis"
+MODES = (MODE_BUILD, MODE_ANALYSIS)
+_SEQUENCES = {MODE_BUILD: PHASES, MODE_ANALYSIS: ANALYSIS_PHASES}
+# Every phase of every mode. Phase ids are unique across modes.
+ALL_PHASES = PHASES + ANALYSIS_PHASES
+
+
+def normalize_mode(mode) -> str:
+    """'build' for anything that is not a known mode (None, '', old run-state
+    files written before modes existed)."""
+    m = str(mode or "").strip().lower()
+    return m if m in MODES else MODE_BUILD
+
+
+def phases_for(mode=None) -> tuple:
+    """The phase sequence a run in `mode` walks."""
+    return _SEQUENCES[normalize_mode(mode)]
+
+
+def first_phase(mode=None) -> Phase:
+    return phases_for(mode)[0]
+
+
 def phase_by_id(pid: str) -> Phase:
-    for p in PHASES:
+    for p in ALL_PHASES:
         if p.id == pid:
             return p
     raise KeyError(pid)
 
 
-def next_phase(pid: str) -> Optional[Phase]:
-    ids = [p.id for p in PHASES]
+def next_phase(pid: str, mode=None) -> Optional[Phase]:
+    """The phase after `pid` in the sequence of `mode` (default: build)."""
+    seq = phases_for(mode)
+    ids = [p.id for p in seq]
     i = ids.index(pid)
-    return PHASES[i + 1] if i + 1 < len(PHASES) else None
+    return seq[i + 1] if i + 1 < len(seq) else None

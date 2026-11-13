@@ -45,7 +45,16 @@ def cmd_init(args):
     repo = Path(args.repo).resolve()
     hd = _harness_dir(repo)
     hd.mkdir(parents=True, exist_ok=True)
-    from phases import PHASES
+    from phases import MODES, first_phase
+
+    # build (story -> code -> PR) or analysis (bug report -> root-cause and
+    # impact document -> document-only PR). An unknown value stops the run here
+    # rather than silently running the other mode.
+    mode = str(getattr(args, "mode", None) or "build").strip().lower()
+    if mode not in MODES:
+        print(f"::error title=Unknown mode::mode must be one of {', '.join(MODES)} "
+              f"(got '{mode}').")
+        sys.exit(1)
 
     # Mandatory on a fresh run, like the story. A resume never comes through here.
     from reference_repos import fresh_run_problem
@@ -75,7 +84,8 @@ def cmd_init(args):
             print(f"::warning title=Shared story file::No story file named for "
                   f"{args.feature} - using {rel}. Make sure it holds this story.")
 
-    run = RunState(feature_id=args.feature, story=story, current_phase=PHASES[0].id)
+    run = RunState(feature_id=args.feature, story=story,
+                   current_phase=first_phase(mode).id, mode=mode)
     from story_source import story_hash
     run.story_path = story_rel
     run.story_sha256 = story_hash(story)
@@ -100,7 +110,7 @@ def cmd_init(args):
     except Exception as _e:
         print(f"  [gitignore] skipped ({type(_e).__name__}: {_e})")
 
-    print(f"Initialized run for '{args.feature}' at {hd}")
+    print(f"Initialized run for '{args.feature}' at {hd} (mode: {mode})")
     print(f"First phase: {run.current_phase}")
 
 
@@ -422,9 +432,11 @@ def cmd_collect_audit(args):
     # planning + audit files from the workspace
     # run-state.json and blocked.md are the resume state, kept here so ONE folder
     # holds everything about the run.
+    # bug-analysis.md: analysis mode's document (the published copy when the
+    # analysis gate passed, the draft with its open questions when it halted).
     for name in ("design.md", "prompt-steps.md", "review.md", "validation.md",
                  "validation-report.txt", "pr-body.md", "capability-manifest.json",
-                 "run-state.json", "blocked.md"):
+                 "run-state.json", "blocked.md", "bug-analysis.md"):
         src = hd / name
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)
@@ -483,6 +495,9 @@ def cmd_collect_audit(args):
         "run_id": run_id,
         "run_label": label,
         "status": run.status,
+        # build | analysis, and (analysis) the document the PR carries.
+        "mode": getattr(run, "mode", "build"),
+        "analysis_doc": getattr(run, "analysis_doc", None),
         # Compliance policy from the service repo's .harness/config.yaml. The
         # workflow reads this to decide whether to keep the per-run audit branch.
         "retain_audit_branch": retain_audit_branch,
@@ -593,6 +608,7 @@ def cmd_status(args):
 def _report(run: RunState):
     print("\n--- HARNESS STATUS ---")
     print(f"feature : {run.feature_id}")
+    print(f"mode    : {getattr(run, 'mode', 'build')}")
     print(f"phase   : {run.current_phase}")
     print(f"status  : {run.status}")
     print(f"done    : {run.completed_phases}")
@@ -663,6 +679,9 @@ def _report(run: RunState):
         print(">>>   or: python run.py reject  --repo <path> --feedback \"...\"")
     elif run.status == "halted":
         print("\n>>> HALTED by an interlock. Inspect the log above for the reason.")
+    elif run.status == "needs_input" and getattr(run, "mode", "build") == "analysis":
+        print("\n>>> NEEDS INPUT: the bug analysis has open [NEEDS CLARIFICATION] items.")
+        print(">>> Add the missing evidence to the bug report, then re-run with resume=true.")
     elif run.status == "needs_input":
         print("\n>>> NEEDS INPUT: the context has unresolved [NEEDS CLARIFICATION] items.")
         print(">>> Resolve them in the story, then re-run from the context phase.")
@@ -677,6 +696,9 @@ def main():
     pi = sub.add_parser("init"); pi.add_argument("--repo", required=True)
     pi.add_argument("--feature", required=True)
     pi.add_argument("--story", default=None, help="story text; if omitted, read from config.story_file")
+    pi.add_argument("--mode", default="build",
+                    help="build (default): story -> code -> PR. analysis: bug report -> "
+                         "root-cause and impact document -> document-only PR, no code.")
     pi.set_defaults(func=cmd_init)
 
     pr = sub.add_parser("run"); pr.add_argument("--repo", required=True)

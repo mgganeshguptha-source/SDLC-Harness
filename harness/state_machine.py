@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Protocol
 
 from contracts import ExitCode, label
-from phases import PHASES, Phase, PhaseKind, next_phase
+from phases import PHASES, Phase, PhaseKind, next_phase, phase_by_id
 from state import RunState
 import halt_gates as HG
 
@@ -348,10 +348,8 @@ class StateMachine:
         self._validator = validator
 
     def _phase(self, pid: str) -> Phase:
-        for p in PHASES:
-            if p.id == pid:
-                return p
-        raise KeyError(pid)
+        # Any mode's phase (build or analysis); ids are unique across modes.
+        return phase_by_id(pid)
 
     def step(self, run: RunState) -> RunState:
         """Execute exactly ONE phase and apply the resulting transition.
@@ -467,7 +465,7 @@ class StateMachine:
                     "manage_copilot_instructions is off — skipping."))
                 if phase.id not in run.completed_phases:
                     run.completed_phases.append(phase.id)
-                nxt = next_phase(phase.id)
+                nxt = next_phase(phase.id, getattr(run, "mode", None))
                 run.current_phase = nxt.id if nxt else run.current_phase
                 run.status = "running" if nxt else "done"
                 run.save(self.harness_dir)
@@ -493,7 +491,7 @@ class StateMachine:
                              "— skipping (context may predate the design phase).")
                 if phase.id not in run.completed_phases:
                     run.completed_phases.append(phase.id)
-                nxt = next_phase(phase.id)
+                nxt = next_phase(phase.id, getattr(run, "mode", None))
                 if nxt is None:
                     run.status = "done"
                 else:
@@ -1121,6 +1119,16 @@ class StateMachine:
                 self.log(f"  [harness] context gate: clarifications clear | "
                          f"feasibility {_v}")
 
+            # ---- ANALYSIS GATE (analysis mode) ----
+            # The model wrote the bug-analysis document. An open
+            # [NEEDS CLARIFICATION] line means the evidence did not establish a
+            # root cause: halt for the reporter rather than publish a guess.
+            # Otherwise the harness stamps the document with the source it read
+            # and copies it to the story folder for the document-only PR.
+            if getattr(phase, "analysis_gate", False):
+                if self._analysis_gate(run, phase):
+                    return run
+
             # ---- AC CONFORMANCE GATE ----
             # Distinct from the review gate directly below. Review asks whether
             # the code that EXISTS is correct; this asks whether every acceptance
@@ -1642,7 +1650,7 @@ class StateMachine:
                 return run
 
             # advance
-            nxt = next_phase(phase.id)
+            nxt = next_phase(phase.id, getattr(run, "mode", None))
             if nxt is None:
                 run.status = "done"
             else:
@@ -1706,6 +1714,63 @@ class StateMachine:
         run.halt_gate = HG.TEST_BUILD
         run.halt_detail = "test_build: tests written by this run still failing"
         run.save(self.harness_dir)
+
+    def _analysis_gate(self, run: RunState, phase: Phase) -> bool:
+        """Analysis mode: halt on open questions, else publish the document.
+        Returns True when it HALTED the run."""
+        import analysis as AN
+        from config import HarnessConfig as _HCan
+        doc = AN.workspace_doc(self.repo_root)
+        questions = AN.scan(doc)
+        if questions:
+            # The phase did not complete: its document is not reviewable yet.
+            run.completed_phases = [p for p in run.completed_phases if p != phase.id]
+            self.log(f"  ! NEEDS_CLARIFICATION — the analysis has {len(questions)} "
+                     f"open question(s); it was NOT published for review:")
+            for q in questions:
+                self.log("      • " + q)
+            _sp = getattr(run, "story_path", None) or "the bug report"
+            import os as _os
+            _bb = (_os.environ.get("HARNESS_BASE_BRANCH") or "").strip()
+            _where = f"on branch '{_bb}'" if _bb else "on the run's base branch"
+            self.log(
+                f"    The evidence was not enough to name a root cause. Add what is "
+                f"asked for to {_sp} {_where} (a stack trace, the log lines, exact "
+                f"reproduction steps, or the answer itself; files go in the story's "
+                f"folder), then re-run with resume=true and the SAME base. The draft "
+                f"is in this run's audit folder as bug-analysis.md.")
+            try:
+                from state import current_run_id
+                run.clarification_log.append({
+                    "run_id": current_run_id(),
+                    "story_sha256": getattr(run, "story_sha256", None),
+                    "questions": list(questions),
+                })
+            except Exception:
+                pass
+            run.status = "needs_input"
+            run.halt_gate = HG.CLARIFICATION
+            run.halt_detail = f"analysis: {len(questions)} open question(s)"
+            run.save(self.harness_dir)
+            return True
+        try:
+            cfg = _HCan.load(self.harness_dir)
+            rel = AN.publish(self.repo_root, cfg, run)
+            AN.write_pr_body(self.repo_root, run, rel)
+        except Exception as e:
+            msg = (f"analysis document could not be published "
+                   f"({type(e).__name__}: {e})")
+            self.log("  ! " + msg)
+            run.completed_phases = [p for p in run.completed_phases if p != phase.id]
+            run.status = "halted"
+            run.halt_gate = HG.ARTIFACT_MISSING
+            run.halt_detail = msg[:200]
+            run.save(self.harness_dir)
+            return True
+        run.analysis_doc = rel
+        self.log(f"  [analysis] no open questions — document published to {rel} "
+                 f"(reviewed in the pull request; no code was changed)")
+        return False
 
     def _dependency_gate(self, run: RunState, phase: Phase) -> bool:
         """The story's mandatory contract line and its attached upstream
@@ -1945,7 +2010,7 @@ class StateMachine:
                     stamp_approval(self.harness_dir / "prompt-steps.md", True)
                 except Exception:
                     pass
-            nxt = next_phase(phase.id)
+            nxt = next_phase(phase.id, getattr(run, "mode", None))
             if nxt is None:
                 run.status = "done"
             else:

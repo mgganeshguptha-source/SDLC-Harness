@@ -45,15 +45,21 @@ import argparse
 import sys
 from pathlib import Path
 
-from phases import PHASES
+from phases import PHASES, phases_for
 from state import RunState
 
 _PHASE_IDS = [p.id for p in PHASES]
 
 
-def _phase_index(phase_id: str) -> int:
+def _phase_ids(run=None) -> list:
+    """Phase ids of the sequence this run walks (build unless the run says
+    analysis). A resume keeps the mode the run was started in."""
+    return [p.id for p in phases_for(getattr(run, "mode", None))]
+
+
+def _phase_index(phase_id: str, run=None) -> int:
     try:
-        return _PHASE_IDS.index(phase_id)
+        return _phase_ids(run).index(phase_id)
     except ValueError:
         return -1
 
@@ -65,13 +71,15 @@ def rewind(run: RunState, start_phase: str, log=print) -> RunState:
     phase and everything after it are cleared, so they genuinely re-run rather
     than being skipped as already-done.
     """
-    idx = _phase_index(start_phase)
+    ids = _phase_ids(run)
+    idx = _phase_index(start_phase, run)
     if idx < 0:
         raise SystemExit(
-            f"Unknown phase '{start_phase}'. Valid phases: {', '.join(_PHASE_IDS)}"
+            f"Unknown phase '{start_phase}' for a {getattr(run, 'mode', 'build')} "
+            f"run. Valid phases: {', '.join(ids)}"
         )
 
-    keep = set(_PHASE_IDS[:idx])
+    keep = set(ids[:idx])
     dropped = [p for p in run.completed_phases if p not in keep]
 
     run.completed_phases = [p for p in run.completed_phases if p in keep]
@@ -147,10 +155,13 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
         return run
     new_hash = story_hash(text)
 
-    if _phase_index(run.current_phase) <= _phase_index("context"):
+    # The first story-reading phase: context in a build run, bug_analysis in an
+    # analysis run (where it is the only phase, so the story is always reloaded).
+    _reader = "bug_analysis" if getattr(run, "mode", "build") == "analysis" else "context"
+    if _phase_index(run.current_phase, run) <= _phase_index(_reader, run):
         if new_hash == old_hash:
             log(f"  [resume] story {path} on {base_ref} is UNCHANGED since the last "
-                f"attempt — the context phase will likely ask the same questions. "
+                f"attempt — the {_reader} phase will likely ask the same questions. "
                 f"Answer them in the story (as acceptance criteria) first.")
             print(f"::warning title=Story unchanged::{path} on {base_ref} has not "
                   f"changed since the last attempt.")

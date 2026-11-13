@@ -14,6 +14,17 @@ on:
         description: "Story branch: the harness reads the story, config and code from it and opens its PR into it *"
         required: true
         type: string
+      mode:
+        description: "build = make the change and open a code PR. analysis = bug-fix analysis only: opens a PR with one root-cause and impact document for review, no code change."
+        # After the analysis PR is reviewed and merged into the story branch,
+        # run again with mode: build and the same feature_id and base to make
+        # the fix. A resume keeps the mode the run was started in.
+        required: true
+        default: build
+        type: choice
+        options:
+          - build
+          - analysis
       resume:
         description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the story branch."
         # NOTE: a resume reads .harness/config.yaml from harness-wip/<feature_id>,
@@ -99,6 +110,7 @@ jobs:
       java-version: "17"     # used by backend (Maven) repos; harmless for frontend
       python-version: "3.13"
       node-version: "22"   # Node 20 is deprecated on GitHub runners
+      mode: ${{ inputs.mode }}
       resume: ${{ inputs.resume }}
       confirm_no_phi: ${{ inputs.confirm_no_phi }}
 #      contract_only: ${{ inputs.contract_only }}      # hidden — see the inputs above
