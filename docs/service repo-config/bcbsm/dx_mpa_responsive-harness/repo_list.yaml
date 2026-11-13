@@ -1,0 +1,13 @@
+# .harness/repo_list.yaml — other repos the context phase may ask to read.
+# Required on every fresh run. Repos are cloned only when context asks, at most
+# 3 per run, read-only, into .harness/reference-repos/. They are NOT scanned for
+# PII or secrets, so list only repos approved for this use.
+#
+# Story 2 (OP018-6418): the store reads the MEX API built in Story 1. Its
+# OpenAPI file is attached to the story; this entry lets context check the
+# backend code too, if it needs to.
+default_branch: master
+repos:
+  - name: BCBSM/dx_mex-coverage-service-Harness
+    branch: harness/OP018-6418/760822_bcbsm-20261030-41085829110   # Story 1 branch, not merged to master yet
+    purpose: MEX coverage API (visitSummary) that this repo's NgRx store calls

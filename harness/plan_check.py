@@ -280,7 +280,12 @@ def check_plan(repo_root, plan_file, target_module, log=print) -> PlanCheckResul
 # =============================================================================
 # External classes
 # =============================================================================
-_HALT_SOURCES = ("UNKNOWN", "NEW_DEPENDENCY")
+# COPY_FROM_REFERENCE: the classes exist in a reference repo (OP018-6434: MPA's
+# committed, generated Totals 2.0 SOAP classes) and a person copies them in
+# unchanged. No phase copies code out of a reference repo: only context reads
+# them, and what is copied is a decision someone signs off (2026-11-13).
+_HALT_SOURCES = ("UNKNOWN", "NEW_DEPENDENCY", "COPY_FROM_REFERENCE")
+_EVIDENCE_RX = re.compile(r"^`?(?P<repo>[A-Za-z0-9_./-]+?)(?:@(?P<branch>[A-Za-z0-9_./-]+))?:(?P<path>[^\s`;,]+)`?")
 
 
 @dataclass
@@ -302,7 +307,8 @@ def _external_section(plan_text: str) -> Optional[str]:
 
 
 def check_external(plan_file, log=print) -> List[ExternalClass]:
-    """Rows of the External Classes table marked UNKNOWN or NEW_DEPENDENCY."""
+    """Rows of the External Classes table marked UNKNOWN, NEW_DEPENDENCY or
+    COPY_FROM_REFERENCE."""
     try:
         plan_text = Path(plan_file).read_text(encoding="utf-8")
     except Exception as e:
@@ -334,29 +340,117 @@ def check_external(plan_file, log=print) -> List[ExternalClass]:
     return flagged
 
 
-def external_declaration(flagged: List[ExternalClass], repo_root, target_module):
-    """The manual-change declaration for flagged classes, so the developer gets
-    the same message and the same steps as a coding-phase halt."""
-    from blocked import BlockedDeclaration
-    repo_root = Path(repo_root)
-    target = ""
+@dataclass
+class CopyItem:
+    """One folder or file to copy, unchanged, from a reference repo."""
+    repo: str
+    branch: str
+    source: str
+    dest: str
+
+
+def _copy_dest(src: str, prefix: str) -> str:
+    """Where a copied path lands in this repo: the package path is kept, under
+    this repo's source root (src/main/java or src/main/resources)."""
+    src = src.strip("/")
+    base = f"{prefix}/" if prefix else ""
+    for root in ("java", "resources"):
+        marker = f"/{root}/"
+        if marker in f"/{src}":
+            rest = f"/{src}".rsplit(marker, 1)[1]
+            return f"{base}src/main/{root}/{rest}"
+    return f"{base}{src.rsplit('/', 1)[-1]}"
+
+
+def copy_items(flagged: List[ExternalClass], target_module, reference_repos=None) -> List[CopyItem]:
+    """COPY_FROM_REFERENCE rows as copy instructions. The branch comes from the
+    evidence (repo@branch:path), else from the reference repo the run read."""
+    branches = {}
+    for r in reference_repos or []:
+        name = str(r.get("repo", ""))
+        branches[name.lower()] = r.get("branch", "")
+        branches[name.lower().rsplit("/", 1)[-1]] = r.get("branch", "")
     prefix = _module_prefix(target_module)
+    out: List[CopyItem] = []
+    for c in flagged:
+        if c.source != "COPY_FROM_REFERENCE":
+            continue
+        m = _EVIDENCE_RX.match(c.evidence.strip())
+        if not m:
+            continue
+        repo, path = m.group("repo"), m.group("path")
+        branch = m.group("branch") or branches.get(repo.lower()) \
+            or branches.get(repo.lower().rsplit("/", 1)[-1], "")
+        item = CopyItem(repo, branch or "?", path, _copy_dest(path, prefix))
+        if all((i.repo, i.source) != (item.repo, item.source) for i in out):
+            out.append(item)
+    return out
+
+
+def _build_file(repo_root: Path, prefix: str) -> str:
     for folder in ([prefix] if prefix else []) + [""]:
         for name in ("pom.xml", "package.json", "build.gradle", "build.gradle.kts"):
             if (repo_root / folder / name).is_file():
-                target = f"{folder}/{name}" if folder else name
-                break
-        if target:
-            break
+                return f"{folder}/{name}" if folder else name
+    return ""
+
+
+def external_declaration(flagged: List[ExternalClass], repo_root, target_module,
+                         reference_repos=None):
+    """The manual-change declaration for flagged classes, so the developer gets
+    the same message and the same steps as a coding-phase halt. Classes found
+    in a reference repo come with the exact folders to copy and where to."""
+    from blocked import BlockedDeclaration
+    repo_root = Path(repo_root)
+    prefix = _module_prefix(target_module)
+    copies = copy_items(flagged, target_module, reference_repos)
+    others = [c for c in flagged if c.source != "COPY_FROM_REFERENCE"]
+    unparsed = [c for c in flagged if c.source == "COPY_FROM_REFERENCE"
+                and not _EVIDENCE_RX.match(c.evidence.strip())]
+    others += unparsed
+
+    files, why, needs = [], [], []
+    if copies:
+        files += sorted({i.dest for i in copies})
+        needs.append("classes that exist in a reference repo, copied in unchanged")
+        why.append("only the context phase can read reference repos, and no phase "
+                   "copies code out of them: a person checks and commits the copy")
+    if others:
+        bf = _build_file(repo_root, prefix)
+        if bf:
+            files.append(bf)
+        needs.append("classes with no confirmed source in this repo")
+        why.append("no phase may change a build file, and coding cannot work "
+                   "without these classes")
+
+    suggested = ""
+    if copies:
+        lines = ["Copy these, UNCHANGED, from a local clone of each repo on the "
+                 "branch shown, into this repo:"]
+        for i in copies:
+            lines.append(f"  - {i.repo} (branch {i.branch}): {i.source}")
+            lines.append(f"      -> {i.dest}")
+        lines.append("Commands (Git Bash, from this repo's root; set REF to your clone):")
+        last_repo = None
+        for i in copies:
+            parent = i.dest.rsplit("/", 1)[0] if "/" in i.dest else "."
+            short = i.repo.rsplit("/", 1)[-1]
+            if short != last_repo:
+                lines.append(f"  REF=<path to your {short} clone>")
+                last_repo = short
+            lines.append(f"  mkdir -p {parent} && cp -r \"$REF/{i.source}\" {parent}/")
+        lines.append("Keep the package names. Then commit, push and resume as below.")
+        suggested = "\n    ".join(lines)
+
     evidence = [f"{c.name}: {c.evidence}" for c in flagged if c.evidence]
     return BlockedDeclaration(
         declared=True,
-        needs="classes the plan needs, with no confirmed source in this repo",
+        needs="; ".join(needs),
         missing=", ".join(f"{c.name} ({c.source})" for c in flagged),
         searched="; ".join(evidence),
-        file=target,
-        why="no phase may change a build file, and coding cannot work without "
-            "these classes",
+        file=", ".join(files),
+        why="; ".join(why),
+        suggested=suggested,
     )
 
 
