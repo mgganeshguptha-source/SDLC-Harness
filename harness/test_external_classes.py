@@ -114,3 +114,74 @@ def test_placeholder_path_halts_before_coding(tmp_path: Path, monkeypatch):
     assert "coding" not in ex.calls
     assert "<MPA-totals-SOAP-interface>" in run.last_feedback
     assert "fresh run" in run.last_feedback
+
+
+# ------------------------------------- COPY_FROM_REFERENCE (OP018-6434, 2026-11-13)
+COPY_PLAN = """# Plan
+
+## External Classes
+| Class or import | Source | Evidence |
+|---|---|---|
+| com.bcbsm.totals2_0.schema.* | COPY_FROM_REFERENCE | `BCBSM/dx_mpa@master:mpa-app/mpa-data/src/generatedSources/java/com/bcbsm/totals2_0/schema` |
+| com.bcbsm.cs.service.totals2_0.TotalsService | **Copy from reference** | dx_mpa:mpa-app/mpa-data/src/generatedSources/java/com/bcbsm/cs/service/totals2_0 |
+| com.x.Mapper | DEPENDENCY | app/pom.xml |
+
+## Impacted Files
+| ID | Path | Role |
+"""
+
+
+def test_copy_rows_are_flagged_with_their_evidence(tmp_path: Path):
+    got = check_external(_plan(tmp_path, COPY_PLAN), log=lambda *a: None)
+    assert [c.source for c in got] == ["COPY_FROM_REFERENCE", "COPY_FROM_REFERENCE"]
+
+
+def test_copy_items_map_to_this_repos_source_root(tmp_path: Path):
+    from plan_check import copy_items
+    flagged = check_external(_plan(tmp_path, COPY_PLAN), log=lambda *a: None)
+    refs = [{"repo": "BCBSM/dx_mpa", "branch": "release-11"}]
+    items = copy_items(flagged, "mbp-coverage-service-application", refs)
+    assert [(i.repo, i.branch, i.dest) for i in items] == [
+        ("BCBSM/dx_mpa", "master",
+         "mbp-coverage-service-application/src/main/java/com/bcbsm/totals2_0/schema"),
+        ("dx_mpa", "release-11",       # branch from the reference repo the run read
+         "mbp-coverage-service-application/src/main/java/com/bcbsm/cs/service/totals2_0"),
+    ]
+
+
+def test_copy_halt_message_gives_the_commands(tmp_path: Path):
+    from blocked import halt_message
+    flagged = check_external(_plan(tmp_path, COPY_PLAN), log=lambda *a: None)
+    d = external_declaration(flagged, tmp_path, "mbp-coverage-service-application")
+    msg = halt_message("OP018-6434", "prompt_steps", d)
+    assert "UNCHANGED" in msg
+    assert ('cp -r "$REF/mpa-app/mpa-data/src/generatedSources/java/com/bcbsm/totals2_0/schema" '
+            "mbp-coverage-service-application/src/main/java/com/bcbsm/totals2_0/") in msg
+    assert "mbp-coverage-service-application/src/main/java/com/bcbsm/cs/service/totals2_0" in d.file
+    assert "pom.xml" not in d.file              # nothing for a build file here
+    assert "resume      = true" in msg
+
+
+def test_copy_and_unknown_together_name_both_fixes(tmp_path: Path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "pom.xml").write_text("<project/>")
+    text = COPY_PLAN.replace("| com.x.Mapper | DEPENDENCY |", "| com.x.Mapper | UNKNOWN |")
+    flagged = check_external(_plan(tmp_path, text), log=lambda *a: None)
+    d = external_declaration(flagged, tmp_path, "app")
+    assert "app/pom.xml" in d.file and "app/src/main/java/com/bcbsm/totals2_0/schema" in d.file
+    assert "copied in unchanged" in d.needs and "no confirmed source" in d.needs
+
+
+def test_copy_row_without_a_usable_path_is_treated_as_unknown(tmp_path: Path):
+    text = COPY_PLAN.replace("dx_mpa:mpa-app/mpa-data/src/generatedSources/java/com/bcbsm/cs/service/totals2_0",
+                             "somewhere in MPA")
+    flagged = check_external(_plan(tmp_path, text), log=lambda *a: None)
+    d = external_declaration(flagged, tmp_path, "")
+    assert "no confirmed source" in d.needs
+
+
+def test_copy_plan_halts_before_coding(tmp_path: Path, monkeypatch):
+    ex, run = _run_with_plan(tmp_path, monkeypatch, COPY_PLAN)
+    assert run.status == "halted" and run.halt_gate == "manual_change_required"
+    assert "coding" not in ex.calls
+    assert 'cp -r "$REF/' in run.last_feedback

@@ -795,7 +795,8 @@ class StateMachine:
                 _ext = check_external(_pf, log=self.log)
                 if _ext:
                     from blocked import halt_message as _blocked_msg
-                    _d = external_declaration(_ext, self.repo_root, _cfgp.target_module)
+                    _d = external_declaration(_ext, self.repo_root, _cfgp.target_module,
+                                              getattr(run, "reference_repos", None) or [])
                     _m = _blocked_msg(run.feature_id, phase.id, _d)
                     self.log(_m)
                     run.status = "halted"
