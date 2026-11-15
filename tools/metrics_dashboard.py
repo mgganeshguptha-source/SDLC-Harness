@@ -373,7 +373,7 @@ const DATA=/*__DATA__*/null;
 const META=DATA.meta, RUNS=DATA.runs, PH=META.phases;
 const LABEL={done:'Completed',halted:'Halted',needs_input:'Needs input'};
 const ICON={done:'✓',halted:'■',needs_input:'?'};
-const GATE={clarification:'Clarification',config_error:'Environment / config',coverage:'Coverage',scope:'Scope',review:'Review',ac:'Acceptance criteria',validation:'Tests',plan_path:'Plan path',blocker:'Blocker'};
+const GATE={clarification:'Clarification',baseline_build:'Base branch build',config_error:'Environment / config',coverage:'Coverage',scope:'Scope',review:'Review',ac:'Acceptance criteria',validation:'Tests',plan_path:'Plan path',blocker:'Blocker'};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short=r=>r.indexOf('/')>=0?r.split('/').slice(1).join('/'):r;

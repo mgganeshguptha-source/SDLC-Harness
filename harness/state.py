@@ -95,6 +95,13 @@ class RunState:
     # is routed to 'coding'. While set, the coding phase may not change those
     # files (contract freeze in a fix loop). Cleared when the build goes green.
     contract_snapshot: dict = field(default_factory=dict)
+    # Baseline build check (baseline.py): the result of building the untouched
+    # base code before the first AI phase. status pass | tolerated | failed |
+    # environment; failing_tests = '<class>#<method>' ids that already failed
+    # on the base branch and are ignored at the build gate; base_commit,
+    # store_commit, checked_at, reused (taken from harness-metrics, not built).
+    # Empty for runs started before the check existed or with runs_build false.
+    baseline: dict = field(default_factory=dict)
 
     # how many times the AC-conformance gate has failed and looped back
     # (independent of the review, validation and coverage budgets).

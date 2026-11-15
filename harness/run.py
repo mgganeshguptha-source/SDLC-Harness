@@ -161,8 +161,19 @@ def cmd_autorun(args):
         except Exception:
             credits_before = None
 
+    # BASELINE BUILD CHECK (baseline.py): with runs_build on, build the untouched
+    # base code once before the first AI phase. A base that does not build halts
+    # here, before any model call; tests that already fail are recorded and
+    # ignored at the build gate. A failure of the check itself never blocks a run.
+    _baseline_ok = True
+    try:
+        import baseline as _baseline
+        _baseline_ok = _baseline.ensure(run, repo, _harness_dir(repo), log=print)
+    except Exception as _e:
+        print(f"  [baseline] check skipped ({type(_e).__name__}: {_e})")
+
     max_cycles = 50
-    for _ in range(max_cycles):
+    for _ in range(max_cycles if _baseline_ok else 0):
         run = sm.run_until_pause(run)
         if run.status == "awaiting_approval":
             print(f"  [auto-approve] gate: {run.current_phase}")

@@ -58,6 +58,11 @@ CONTRACT_MISSING = "contract_missing"
 # .harness/repo_list.yaml, over the limit, or the clone failed.
 REFERENCE_REPO = "reference_repo"
 
+# The untouched base code does not build with the repo's test_command, before
+# any AI phase ran (baseline.py). Not the story's fault and not our plumbing:
+# the developer fixes the base branch and starts a fresh run.
+BASELINE_BUILD = "baseline_build"
+
 # --- gates that stopped the run because OUR PLUMBING failed ---
 SDK_ERROR = "sdk_error"              # auth, network, Copilot CLI
 CONFIG_ERROR = "config_error"        # bad config, missing wrapper, bad paths
@@ -69,7 +74,8 @@ HALT_GATES = frozenset({
     CLARIFICATION, FEASIBILITY, WRITE_BOUNDARY, SCOPE, CODE_REVIEW,
     COVERAGE, TEST_BUILD, AC_CONFORMANCE, ARTIFACT_MISSING, ITERATION_CAP,
     PHASE_RUN_CAP, MANUAL_CHANGE_REQUIRED, INPUT_GUARD, DEPENDENCIES_MISSING,
-    CONTRACT_MISSING, REFERENCE_REPO, SDK_ERROR, CONFIG_ERROR, OTHER,
+    CONTRACT_MISSING, REFERENCE_REPO, BASELINE_BUILD, SDK_ERROR, CONFIG_ERROR,
+    OTHER,
 })
 
 # Halts caused by our own plumbing rather than by the work being unacceptable.
@@ -94,6 +100,7 @@ LABELS = {
     DEPENDENCIES_MISSING: "Story has no 'Requires a new or changed contract from' line",
     CONTRACT_MISSING: "Upstream contract not attached (or wrong one attached)",
     REFERENCE_REPO: "Reference repo not listed, over the limit, or not cloned",
+    BASELINE_BUILD: "Base branch does not build (before any harness change)",
     SDK_ERROR: "Infrastructure or authentication failure",
     CONFIG_ERROR: "Configuration error",
     OTHER: "Unclassified halt",
