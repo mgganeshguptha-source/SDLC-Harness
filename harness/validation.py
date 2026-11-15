@@ -370,6 +370,35 @@ _TOOLCHAIN_SIGNATURES = (
 _NODE_MODULES_PATH_RX = re.compile(r"can't resolve '(?:\./)?node_modules/((?:@[^/']+/)?[^/']+)")
 
 
+# Maven names the artifacts it could not resolve as group:artifact:type[:classifier]:version,
+# after one of these phrases (Maven 3.8 / 3.9 wording). Used only to tell the
+# person WHAT to add to the library store and WHERE (OP018-6434, 2026-11-15:
+# mem-starter-parent 4.2.7-SNAPSHOT missing from dx_Artifactory).
+_MAVEN_MISSING_RX = re.compile(
+    r"(?:could not find artifact|failure to find|could not transfer artifact"
+    r"|following artifacts could not be resolved:)\s+"
+    r"((?:[\w.\-]+:){3,4}[\w.\-]+(?:\s*\(absent\))?(?:\s*,\s*(?:[\w.\-]+:){3,4}[\w.\-]+(?:\s*\(absent\))?)*)",
+    re.IGNORECASE)
+_MAVEN_COORD_RX = re.compile(r"(?:[\w.\-]+:){3,4}[\w.\-]+")
+
+
+def missing_maven_artifacts(output: str) -> list:
+    """[(coordinates, store-relative folder)] for artifacts Maven could not resolve.
+
+    The folder is the Maven-layout path under a library-store folder, e.g.
+    com/bcbsm/mem/pom/mem-starter-parent/4.2.7-SNAPSHOT/."""
+    seen, found = set(), []
+    for m in _MAVEN_MISSING_RX.finditer(output or ""):
+        for coord in _MAVEN_COORD_RX.findall(m.group(1)):
+            parts = coord.split(":")
+            group, artifact, version = parts[0], parts[1], parts[-1]
+            if coord in seen:
+                continue
+            seen.add(coord)
+            found.append((coord, f"{group.replace('.', '/')}/{artifact}/{version}/"))
+    return found
+
+
 def missing_node_modules_packages(output: str) -> list:
     """Package names from "Can't resolve 'node_modules/<pkg>/...'" lines."""
     seen = []
@@ -437,9 +466,13 @@ _HINTS = {
         "             - run the harness on a self-hosted runner inside the network\n"
         "               that normally builds this repo;\n"
         "             - if the build runs from a library store (maven_libs_repo),\n"
-        "               the artifact is missing from it: publish.sh it (internal\n"
-        "               library) or capture.sh the service (public library) in\n"
-        "               the store, then resume;\n"
+        "               the artifact is missing from it. Ask whoever maintains the\n"
+        "               store (BCBSM DevOps; during the PoC, add it by hand) to\n"
+        "               add it in Maven layout under the store's library folder:\n"
+        "               <libs-folder>/<group as folders>/<artifact>/<version>/\n"
+        "               (the path of each missing artifact is listed above).\n"
+        "               Check its parent POMs too - each must be in the store or\n"
+        "               on Maven Central. Then resume;\n"
         "             - or, if a NEW dependency is the cause, add it by hand.\n"
         "           Then resume from the phase that halted."),
     "network_auth": (
@@ -746,7 +779,18 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             _pk = missing_node_modules_packages(out)
             if _pk:
                 summary += f": {', '.join(_pk[:8])}"
+        _missing = missing_maven_artifacts(out) if _env == "dependency" else []
+        if _missing:
+            summary += f": {', '.join(c for c, _ in _missing[:8])}"
         log(f"  ! {summary}")
+        _hint = environment_hint(_env)
+        if _missing:
+            _hint = ("Missing artifact(s) and the library-store folder each belongs in:\n"
+                     + "".join(f"             - {c}\n               -> <libs-folder>/{f}\n"
+                               for c, f in _missing[:8])
+                     + "           " + _hint)
+        for _coord, _folder in _missing[:8]:
+            log(f"    missing: {_coord}  ->  store folder <libs-folder>/{_folder}")
         log("    This is an environment problem, not a code problem — no phase "
             "can fix it, so the harness will halt instead of looping.")
         report = harness_dir / "validation-report.txt"
@@ -761,7 +805,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             pass
         return ValidationResult(
             False, proc.returncode, summary, tail, failure_kind="environment",
-            env_reason=_env, env_hint=environment_hint(_env),
+            env_reason=_env, env_hint=_hint,
         )
 
     # Maven prints BUILD SUCCESS / BUILD FAILURE; use exit code as source of truth,
