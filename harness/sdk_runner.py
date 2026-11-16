@@ -1624,6 +1624,12 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         base += _BLb.prompt_block(run, phase.id)
     except Exception:
         pass
+    # Build-fix loop (fix_scope.py): which files coding may edit in this pass.
+    try:
+        import fix_scope as _FSb
+        base += _FSb.prompt_block(run, phase.id)
+    except Exception:
+        pass
 
     # Contract hand-off (handoff.py): when this change touches files that form
     # a contract other repos rely on, the documentation phase may add a short

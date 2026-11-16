@@ -33,6 +33,7 @@ from pathlib import Path
 _VERDICT = re.compile(r"^\s*VERDICT\s*:\s*(PASS|CHANGES_REQUESTED|FAIL|APPROVE|APPROVED)\b",
                       re.IGNORECASE | re.MULTILINE)
 _ISSUE = re.compile(r"^\s*(?:[-*>\s]*)?\[ISSUE\]\s*:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE)
+_NOTE = re.compile(r"^\s*(?:[-*>\s]*)?\[NOTE\]\s*:\s*(\S.*)$", re.IGNORECASE | re.MULTILINE)
 
 _PASS_TOKENS = {"pass", "approve", "approved"}
 
@@ -68,7 +69,24 @@ _CLASS_ALIASES = {
     "THREAD SAFETY": "CONCURRENCY",
     "API CONTRACT": "CONTRACT",
 }
-_CLASS_PREFIX = re.compile(r"^\(\s*([A-Za-z_/ ]+?)\s*\)\s*(.*)$", re.DOTALL)
+_CLASS_PREFIX = re.compile(r"^\(\s*([A-Za-z_/ -]+?)\s*\)\s*(.*)$", re.DOTALL)
+
+# Classes the reviewer may use to say "this is NOT a reason to block". Only a
+# finding that carries one of these (or is written as a [NOTE]) is advisory.
+#
+# Why this list exists (OP018-6434, 2026-11-15): the reviewer wrote
+# CHANGES_REQUESTED for a null inside a Flux.zip combinator, the finding did not
+# carry a recognised blocking class, and the gate turned the verdict into PASS
+# without a word in the log. Any finding that was not tagged with a blocking
+# class used to be advisory, so a real defect written in the wrong form went
+# through. Now a finding is advisory only when the reviewer SAID it is; anything
+# else under a CHANGES_REQUESTED verdict blocks.
+_ADVISORY_CLASSES = {
+    "STYLE", "NAMING", "CONSISTENCY", "PREFERENCE", "FORMATTING", "READABILITY",
+    "COSMETIC", "NIT", "NITPICK", "DOCUMENTATION", "COMMENT", "COMMENTS",
+    "MAINTAINABILITY", "TEST", "TESTS", "TESTING", "COVERAGE",
+}
+UNCLASSIFIED = "UNCLASSIFIED"
 
 
 def _classify(issue_text: str):
@@ -88,6 +106,17 @@ def _classify(issue_text: str):
     return None, issue_text.strip()
 
 
+def _is_advisory(issue_text: str) -> bool:
+    """True only when the reviewer tagged the finding with a class that says it
+    is not a reason to block, e.g. '(STYLE) ...'. No tag, or a tag this gate
+    does not know, is NOT advisory."""
+    m = _CLASS_PREFIX.match(issue_text.strip())
+    if not m:
+        return False
+    raw = m.group(1).strip().upper().replace("-", "_").replace(" ", "_")
+    return raw in _ADVISORY_CLASSES
+
+
 @dataclass
 class ReviewResult:
     passed: bool
@@ -99,9 +128,13 @@ class ReviewResult:
     # Findings the reviewer raised that are NOT in a blocking class (style,
     # naming, consistency, preference). Reported to the human, never looped on.
     advisory: list = field(default_factory=list)
-    # True when the reviewer said CHANGES_REQUESTED but named no blocking-class
-    # issue, so the gate downgraded the verdict to PASS.
+    # True when the reviewer said CHANGES_REQUESTED but labelled EVERY finding
+    # as non-blocking ([NOTE] lines, or [ISSUE] lines with an advisory class),
+    # so the gate downgraded the verdict to PASS. Always logged by the caller.
     downgraded: bool = False
+    # Findings under CHANGES_REQUESTED that carried no recognised class. They
+    # block (they are also in `issues`, prefixed "(UNCLASSIFIED)").
+    unclassified: list = field(default_factory=list)
 
 
 def parse_review(review_file: Path, written_after: float | None = None) -> ReviewResult:
@@ -158,31 +191,36 @@ def parse_review(review_file: Path, written_after: float | None = None) -> Revie
 
     issues = [i.strip() for i in _ISSUE.findall(text) if i.strip()]
 
+    notes = [n.strip() for n in _NOTE.findall(text) if n.strip()]
+
     # ---- SEVERITY FILTER ----
-    # Keep only findings the reviewer tagged with a blocking class. Untagged or
-    # non-blocking findings are retained as advisory so the human still sees them,
-    # but they do not loop the pipeline.
+    # Under CHANGES_REQUESTED every [ISSUE] falls in one of three groups:
+    #   blocking     - tagged with a blocking class            -> blocks
+    #   advisory     - tagged with an advisory class (STYLE..) -> never blocks
+    #   unclassified - no tag, or a tag this gate does not know -> BLOCKS
     #
-    # Untagged issues are treated as ADVISORY, not blocking. That is deliberate:
-    # the reviewer is explicitly instructed to tag anything it wants to block on,
-    # so an untagged finding means either (a) it is a style note the model wrote
-    # in the wrong bucket, or (b) the model ignored the format. Blocking on
-    # untagged text is what produced the cosmetic halt this filter exists to
-    # prevent. A real defect that is merely mistagged still surfaces in the
-    # advisory list and in review.md for a human to catch.
-    blocking, advisory = [], []
+    # A style opinion must not stop a run (run 31252416919), so a finding the
+    # reviewer LABELLED as style or a [NOTE] is advisory. But the gate no longer
+    # decides that for the reviewer: a finding without a recognised class under
+    # a CHANGES_REQUESTED verdict is treated as a real objection (OP018-6434 —
+    # see _ADVISORY_CLASSES). The loop is bounded by max_review_retries, after
+    # which a person decides.
+    blocking, advisory, unclassified = [], list(notes) if not passed else [], []
     if not passed:
         for raw in issues:
             cls, desc = _classify(raw)
             if cls:
                 blocking.append(f"({cls}) {desc}")
-            else:
+            elif _is_advisory(raw):
                 advisory.append(desc)
+            else:
+                unclassified.append(desc)
+                blocking.append(f"({UNCLASSIFIED}) {desc}")
 
-        if not blocking:
-            # Reviewer asked for changes but named nothing that may block. The
-            # code is correct by the reviewer's own account — advance, and carry
-            # the notes forward for the human.
+        if not blocking and advisory:
+            # The reviewer asked for changes but labelled every finding as
+            # non-blocking. By its own labels nothing may block — advance, and
+            # carry the notes forward for the human. The caller logs this.
             return ReviewResult(
                 passed=True, verdict="PASS",
                 issues=[],
@@ -191,11 +229,15 @@ def parse_review(review_file: Path, written_after: float | None = None) -> Revie
                 scanned_file=str(review_file), parse_ok=True)
         issues = blocking
 
-    # If the reviewer said CHANGES_REQUESTED but listed no [ISSUE] lines, keep a
-    # generic placeholder so the coding phase still gets actionable feedback.
+    # CHANGES_REQUESTED with no [ISSUE] and no [NOTE] line: the reviewer wrote
+    # its objection as prose. Do not pass it — hand the prose to the coding
+    # phase as the feedback.
     if not passed and not issues:
-        issues = ["Reviewer requested changes but did not enumerate [ISSUE] items; "
-                  "see review.md for prose notes."]
+        after = text[m.end():].strip()
+        prose = " ".join(after.split())[:1200]
+        issues = [f"({UNCLASSIFIED}) Reviewer requested changes but did not list "
+                  "[ISSUE] items. Its text: " + (prose or "(none — see review.md)")]
+        unclassified = [issues[0]]
     return ReviewResult(passed=passed, verdict=verdict, issues=issues,
-                        advisory=advisory,
+                        advisory=advisory, unclassified=unclassified,
                         scanned_file=str(review_file), parse_ok=True)

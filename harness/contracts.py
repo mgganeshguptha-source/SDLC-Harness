@@ -22,6 +22,7 @@ class ExitCode(IntEnum):
     VALIDATION_FAILED = 14   # mvn test (or other gate) did not pass
     NEEDS_CLARIFICATION = 15  # context has unresolved [NEEDS CLARIFICATION] markers
     SCOPE_VIOLATION = 16     # created NEW production files that the plan never approved
+    FIX_SCOPE_VIOLATION = 17  # build-fix loop edited a file outside its allowed set (fix_scope.py)
 
     # --- errors ---
     ARTIFACT_MISSING = 20  # required output file/section not produced
@@ -39,6 +40,7 @@ LABELS = {
     ExitCode.VALIDATION_FAILED: "VALIDATION_FAILED",
     ExitCode.NEEDS_CLARIFICATION: "NEEDS_CLARIFICATION",
     ExitCode.SCOPE_VIOLATION: "SCOPE_VIOLATION",
+    ExitCode.FIX_SCOPE_VIOLATION: "FIX_SCOPE_VIOLATION",
     ExitCode.ARTIFACT_MISSING: "ARTIFACT_MISSING",
     ExitCode.SDK_ERROR: "SDK_ERROR",
     ExitCode.CONFIG_ERROR: "CONFIG_ERROR",
