@@ -606,6 +606,13 @@ class StateMachine:
                 add_to_pr_body(self.repo_root, getattr(run, "reference_repos", None) or [])
             except Exception as _e:
                 self.log(f"  [reference] PR note skipped ({type(_e).__name__})")
+            # ... and which tests were already failing before the change.
+            try:
+                import baseline as _BLp
+                if _BLp.add_to_pr_body(self.repo_root, run):
+                    self.log("  [baseline] already-failing tests listed in the PR body")
+            except Exception as _e:
+                self.log(f"  [baseline] PR note skipped ({type(_e).__name__})")
 
         if _ri_before is not None:
             try:
@@ -1312,8 +1319,12 @@ class StateMachine:
                     vr = self._validator(self.repo_root, self.harness_dir, self.log)
                 else:
                     from validation import run_validation
+                    import baseline as _BL
+                    # Tests that already failed on the base branch before this
+                    # run changed anything (baseline.py) do not fail the gate.
                     vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
-                                        changed_files=run.changed_main_files)
+                                        changed_files=run.changed_main_files,
+                                        known_failing=_BL.known_failing(run) or None)
                 # A build may change files no phase may write (npm ci empties a
                 # committed node_modules/; npm install rewrites package-lock.json).
                 # Put them back so later phases and the commits never carry them
@@ -1330,6 +1341,11 @@ class StateMachine:
                 if vr.passed:
                     # The fix loop is over: lift the contract freeze.
                     run.contract_snapshot = {}
+                    # Which already-failing tests still fail on the final code
+                    # (the PR body marks the ones this change happened to fix).
+                    if (getattr(run, "baseline", None) or {}).get("status") == "tolerated":
+                        run.baseline["still_failing"] = list(
+                            getattr(vr, "tolerated_tests", None) or [])
                 if not vr.passed:
                     from config import HarnessConfig
                     cfg = HarnessConfig.load(self.harness_dir)

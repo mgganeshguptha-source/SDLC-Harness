@@ -81,6 +81,11 @@ test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-l
 # unit_testing, coverage and their loopbacks). false = the runner cannot build
 # this repo; the developer builds and tests locally before approving the PR.
 # This value wins over the caller workflow's old runs_build input.
+# true also turns on the baseline build check: before the first AI phase the
+# harness runs test_command once on the untouched base code. A base that does
+# not build halts there; tests that already fail are recorded and ignored at
+# the build gate (Maven). The result is reused until the base branch, the
+# library store or test_command changes.
 runs_build: true
 
 # Narrow the test run to a subset. Blank => run the whole suite.

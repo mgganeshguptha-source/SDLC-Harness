@@ -45,6 +45,13 @@ class ValidationResult:
     coverage_classes: list = field(default_factory=list)   # classes measured
     coverage_covered: int = 0
     coverage_missed: int = 0
+    # Baseline check (baseline.py). failing_tests: '<class>#<method>' ids read
+    # from the surefire reports of this build (filled only when the build ran
+    # with test failures ignored). tolerated_tests: the ones among them that
+    # already failed on the base branch and were ignored at the gate.
+    failing_tests: list = field(default_factory=list)
+    tolerated_tests: list = field(default_factory=list)
+    tests_seen: int = 0
 
 
 def _java_file_to_class_key(rel_path: str) -> tuple[str, str] | None:
@@ -252,8 +259,13 @@ def _root_causes(text: str) -> list:
     return list(dict.fromkeys(causes))
 
 
-def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str:
+def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000,
+                       only_classes: set | None = None) -> str:
     """Extract the failing-test detail from surefire .txt reports.
+
+    only_classes: when given, only the reports of these test classes (fully
+    qualified) are included — used to leave out tests that already failed on
+    the base branch (baseline.py).
 
     Module-aware via rglob, so it works for single-module and aggregator repos
     alike. Only reports that actually contain failures/errors are included, and
@@ -265,6 +277,8 @@ def _surefire_failures(repo_root: Path, log=print, max_chars: int = 4000) -> str
         return ""
     chunks: list[str] = []
     for rp in reports:
+        if only_classes is not None and rp.stem not in only_classes:
+            continue
         try:
             text = rp.read_text(encoding="utf-8", errors="replace")
         except Exception:
@@ -663,15 +677,34 @@ def _is_environment_failure(exit_code: int, output: str) -> bool:
 
 
 def run_validation(repo_root: Path, harness_dir: Path, log=print,
-                   changed_files: list | None = None) -> ValidationResult:
+                   changed_files: list | None = None,
+                   known_failing: list | None = None,
+                   baseline: bool = False) -> ValidationResult:
+    """Run the repo's test command and judge the result.
+
+    known_failing: tests that already failed on the base branch (baseline.py).
+        When given, Maven is told not to stop on test failures and the result
+        is judged per test: only a failing test that is NOT on the list fails
+        the gate.
+    baseline: this is the baseline check itself — the untouched base code. No
+        formatting step and no coverage gate; the failing tests are returned.
+    """
     cfg = HarnessConfig.load(harness_dir)
+    # Per-test judgement needs Maven to run every module even when tests fail.
+    _tolerant = baseline or bool(known_failing)
+    _build_env = None
+    if _tolerant:
+        import baseline as _BL
+        _build_env = _BL.tolerant_env()
+    import time as _time
+    _started = _time.time()
 
     # ---- DETERMINISTIC PRE-STEP: normalize formatting ----
     # The harness applies the project's required format (spring-javaformat) before
     # validating. This is a fixed, known goal run by trusted harness code — not the
     # agent, and not arbitrary execution. It turns a mechanical "format violation"
     # into a non-issue so validation tests true correctness, not whitespace.
-    if cfg.pre_validation_command:
+    if cfg.pre_validation_command and not baseline:
         log(f"  [harness] formatting: {cfg.pre_validation_command}")
         try:
             fmt = subprocess.run(
@@ -711,8 +744,11 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             log(f"  [harness] formatting step error: {type(e).__name__}: {e} (continuing)")
 
     cmd = cfg.resolved_test_command()
-    log(f"  [harness] running validation: {cmd}")
+    log(f"  [harness] running {'baseline build' if baseline else 'validation'}: {cmd}")
     log(f"  [harness] cwd: {repo_root}")
+    if _tolerant:
+        log(f"  [harness] test failures do not stop the build ({_BL.IGNORE_FLAG}); "
+            "results are read per test from the surefire reports")
 
     try:
         proc = subprocess.run(
@@ -722,6 +758,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             capture_output=True,
             text=True,
             timeout=cfg.test_timeout,
+            env=_build_env,
         )
     except subprocess.TimeoutExpired:
         return ValidationResult(False, -1, "TIMEOUT", f"test run exceeded {cfg.test_timeout}s")
@@ -752,6 +789,28 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             tail = tail + "\n\n--- FAILING TEST DETAIL (from surefire-reports) ---\n" + detail
 
     passed = proc.returncode == 0
+
+    # ---- PER-TEST JUDGEMENT (baseline.py) ----
+    # The build ran with test failures ignored, so exit 0 only says that
+    # everything compiled. Read the failing tests from this build's reports.
+    _failing_now, _tests_seen, _new, _tolerated = [], 0, [], []
+    if _tolerant:
+        _failing_now, _tests_seen = _BL.read_test_results(repo_root, since=_started)
+        if not baseline:
+            _new, _tolerated = _BL.split_new(_failing_now, known_failing or [])
+        if passed and _new:
+            # Tests that pass on the base branch (or are new) fail now.
+            passed = False
+            tail = _BL.failure_lines(_new, len(_tolerated), _tests_seen)
+            _detail = _surefire_failures(repo_root, log=log,
+                                         only_classes={_BL.class_of(t) for t in _new})
+            if _detail:
+                tail += "\n\n--- FAILING TEST DETAIL (from surefire-reports) ---\n" + _detail
+            log(f"  ! {len(_new)} test(s) fail that do not fail on the base branch; "
+                f"{len(_tolerated)} already-failing test(s) ignored")
+        elif passed and _tolerated:
+            log(f"  [harness] {len(_tolerated)} failing test(s) already fail on the base "
+                f"branch and are ignored; no other test fails")
     failure_kind = None if passed else "test"
 
     # ---- ENVIRONMENT FAILURE: the build never ran ----
@@ -759,7 +818,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     # isn't executable, isn't found, or the JVM couldn't launch. No code or test
     # phase can fix this, so mark it distinctly; the state machine halts on it
     # instead of looping coding/unit_testing against an unfixable error.
-    _env = None if passed else classify_environment_failure(proc.returncode, out)
+    _env = (None if (passed or proc.returncode == 0)
+            else classify_environment_failure(proc.returncode, out))
     if _env:
         failure_kind = "environment"
         _labels = {
@@ -816,13 +876,22 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         summary = "BUILD FAILURE"
     else:
         summary = f"exit {proc.returncode}"
+    if _new and proc.returncode == 0:
+        summary = (f"TESTS FAILED — {len(_new)} failing test(s) that do not fail on "
+                   f"the base branch")
+    elif baseline and passed and _failing_now:
+        summary = f"BUILD OK — {len(_failing_now)} test(s) fail on the base code"
+    elif passed and _tolerated:
+        summary += f" ({len(_tolerated)} test(s) already failing on the base ignored)"
 
     # ---- COVERAGE GATE (only if tests passed and a threshold is set) ----
     coverage_note = ""
     cov_pct = None
     cov_covered = cov_missed = 0
     cov_measured: list = []
-    if passed and cfg.min_coverage > 0 and cfg.resolved_coverage_format() == "istanbul":
+    if baseline:
+        pass          # the baseline check measures nothing: no coverage gate
+    elif passed and cfg.min_coverage > 0 and cfg.resolved_coverage_format() == "istanbul":
         # ---- ISTANBUL (Karma / Jest json-summary) — frontend, backlog B5 ----
         # The report is normally written by the TEST command itself (e.g.
         # ng test --code-coverage with a json-summary reporter); a separate
@@ -832,7 +901,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             log(f"  [harness] coverage: {cfg.coverage_command}")
             try:
                 _cov = subprocess.run(cfg.coverage_command, cwd=str(repo_root), shell=True,
-                                      capture_output=True, text=True, timeout=cfg.test_timeout)
+                                      capture_output=True, text=True, timeout=cfg.test_timeout,
+                                      env=_build_env)
                 cov_rc = _cov.returncode
                 cov_out = (_cov.stdout or "") + "\n" + (_cov.stderr or "")
             except Exception as e:
@@ -891,7 +961,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         cov_rc = None
         try:
             _cov = subprocess.run(cfg.coverage_command, cwd=str(repo_root), shell=True,
-                                  capture_output=True, text=True, timeout=cfg.test_timeout)
+                                  capture_output=True, text=True, timeout=cfg.test_timeout,
+                                  env=_build_env)
             cov_rc = _cov.returncode
             cov_out = (_cov.stdout or "") + "\n" + (_cov.stderr or "")
         except Exception as e:
@@ -996,4 +1067,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         coverage_classes=cov_measured,
         coverage_covered=cov_covered,
         coverage_missed=cov_missed,
+        failing_tests=_failing_now,
+        tolerated_tests=_tolerated,
+        tests_seen=_tests_seen,
     )

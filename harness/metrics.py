@@ -65,7 +65,9 @@ from pathlib import Path
 # v7: reference_repos (other repos the context phase read: repo, branch, commit).
 # v8: mode (build | analysis) and analysis_doc (the document an analysis run
 # published for review). Records written before v8 are build runs.
-SCHEMA_VERSION = 8
+# v9: baseline_status / baseline_failing_tests / baseline_reused (baseline.py)
+# and the baseline_build halt gate.
+SCHEMA_VERSION = 9
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -170,6 +172,16 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
         # --- contract hand-off (schema 6) ---
         "dependencies": dict(getattr(run, "dependencies", None) or {}) or None,
         "contract_output": dict(getattr(run, "contract_output", None) or {}) or None,
+
+        # --- baseline build check (schema 9) ---
+        # pass | tolerated | failed | environment, or null when the check did
+        # not run (runs_build false, analysis mode, older runs). Count only —
+        # test names stay in the run's audit folder.
+        "baseline_status": (getattr(run, "baseline", None) or {}).get("status"),
+        "baseline_failing_tests": (
+            len((getattr(run, "baseline", None) or {}).get("failing_tests") or [])
+            if (getattr(run, "baseline", None) or {}).get("status") else None),
+        "baseline_reused": (getattr(run, "baseline", None) or {}).get("reused"),
 
         # --- reference repos (schema 7) ---
         "reference_repos": list(getattr(run, "reference_repos", None) or []),

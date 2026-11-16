@@ -1617,6 +1617,14 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
         )
     base = base[phase.id]
 
+    # Baseline check (baseline.py): tests that already failed on the base branch
+    # before this run changed anything. Empty unless there are some.
+    try:
+        import baseline as _BLb
+        base += _BLb.prompt_block(run, phase.id)
+    except Exception:
+        pass
+
     # Contract hand-off (handoff.py): when this change touches files that form
     # a contract other repos rely on, the documentation phase may add a short
     # summary; the contract files themselves are published by the engine.

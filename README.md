@@ -176,6 +176,15 @@ Each gate sits between phases and is enforced by the engine, not the model.
   runs, so "the file exists" means "the reviewer wrote it this attempt." Blocking
   findings are limited to five classes: correctness, contract,
   reactive/concurrency, security, error handling. Style is downgraded to a note.
+- **Baseline build check** — with `runs_build: true`, before the first AI phase of a
+  fresh run the harness runs `test_command` once on the untouched base code. A
+  missing library or a compile error halts there, before any model call. Tests
+  that already fail are recorded and the run continues: the validation gate then
+  fails only on tests that are not on that list, the phases are told to leave
+  them alone, and the pull request lists them. The result is saved on
+  `harness-metrics` (`metrics/baseline/`), keyed by the base commit, the
+  library-store commit and the command, so the build is repeated only when one
+  of them changes. See `harness/baseline.py`.
 - **Validation gate** — after the `unit_testing` phase, the harness itself runs the
   configured test command (`test_command`, default `mvn test`). A non-zero exit is
   `VALIDATION_FAILED` and halts the run before it advances. The agent does not run
@@ -331,6 +340,11 @@ State these openly.
 - **A story needing a new dependency halts.** No phase may write `pom.xml`. The
   coding phase declares `.harness/blocked.md` and the run stops with instructions
   to add the dependency by hand and resume. Deliberate, but a real constraint.
+- **Already-failing tests are itemised for Maven only.** The baseline check reads
+  surefire/failsafe XML reports. A build that writes none (Angular/Karma, Gradle)
+  cannot say which tests fail, so a failing base build halts there. A test that
+  already fails cannot catch a fault in the code it covers, and a test that
+  fails only sometimes may be recorded as already failing.
 - **Bug-fix analysis is at its first step.** Analysis mode produces a reviewed
   root-cause and impact document (see "Analysis mode"). The engine does not yet
   collect caller evidence itself, read other repositories, or bind the later
