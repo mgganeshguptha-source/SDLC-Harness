@@ -259,6 +259,11 @@ def _report_sdk_cost(run: RunState):
     rows = [e for e in this_run_entries(run)
             if e.get("cost_source") or e.get("input_tokens") or e.get("output_tokens")]
     print()
+    if not this_run_entries(run):
+        # Nothing was sent to a model (e.g. the run stopped at the baseline
+        # build check): say so, rather than "not reported".
+        print("  AI usage: none — no AI phase ran in this run.")
+        return
     if not rows:
         print("  AI usage: not reported by the Copilot SDK for this run "
               "(token counts, where available, are shown above).")
@@ -564,53 +569,6 @@ def cmd_collect_audit(args):
         print(f"  - {c}")
 
 
-def cmd_contract(args):
-    """CONTRACT-ONLY MODE: publish this repo's contract files for a change that
-    is already on the checked-out branch (made by the harness or by hand). No
-    model call, no code change, no PR. Copies the OpenAPI file(s) (backend) or
-    src/app/store/ (Angular) plus contract_files, PII-scans them and stages them
-    for harness-metrics (handoff.py); collect-audit then publishes them.
-
-    Exit 0 when files were staged; 1 otherwise."""
-    import handoff as HO
-    from config import HarnessConfig
-
-    repo = Path(args.repo).resolve()
-    hd = _harness_dir(repo)
-    hd.mkdir(parents=True, exist_ok=True)
-    # The story is optional here: the run only needs an id for the folders.
-    try:
-        cmd_init(args)
-    except (FileNotFoundError, ValueError, SystemExit) as e:
-        print(f"  [contract] no story file ({e}) — continuing without one")
-        from phases import PHASES
-        RunState(feature_id=args.feature, story="(contract-only run)",
-                 current_phase=PHASES[0].id).save(hd)
-    run = _load(repo)
-    cfg = HarnessConfig.load(hd, repo_root=repo)
-    run.current_phase = "contract"
-
-    base = args.base or ""
-    base_ref = base if base.startswith("origin/") or not base else f"origin/{base}"
-    changed = HO.changed_files(repo, base_ref)
-    print(f"  [contract] {len(changed)} file(s) changed since {base_ref or '(no base)'}")
-    info = HO.finalize(repo, cfg, run, changed, log=print, force=True)
-    run.status = "done" if info.get("status") == "published" else "halted"
-    run.halt_gate = None if run.status == "done" else "other"
-    run.halt_detail = None if run.status == "done" else f"contract {info.get('status')}"
-    run.save(hd)
-    try:
-        import metrics as _metrics
-        _metrics.emit(run, repo, cfg)
-    except Exception:
-        pass
-    if run.status != "done":
-        print(f"::error title=Contract not published::{info.get('status')} — see the log above")
-        sys.exit(1)
-    print(f"::notice title=Contract published::{len(info['files'])} file(s) -> "
-          f"harness-metrics contracts/{run.feature_id}/")
-
-
 def cmd_status(args):
     repo = Path(args.repo).resolve()
     run = _load(repo)
@@ -702,6 +660,14 @@ def _report(run: RunState):
 
 
 def main():
+    # Print each line as it is written. In CI stdout is a pipe, which Python
+    # block-buffers: the log then arrives in bursts and shows nothing while a
+    # long build runs.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(line_buffering=True)
+        except Exception:
+            pass
     p = argparse.ArgumentParser(prog="harness")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -735,13 +701,6 @@ def main():
     par.add_argument("--model", default=None, help="override the model string")
     par.set_defaults(func=cmd_autorun)
 
-    pct = sub.add_parser("contract", help="contract-only: publish this repo's contract files (no model)")
-    pct.add_argument("--repo", required=True)
-    pct.add_argument("--feature", required=True)
-    pct.add_argument("--base", required=True,
-                     help="branch the change was made against (e.g. the story branch)")
-    pct.add_argument("--story", default=None)
-    pct.set_defaults(func=cmd_contract)
 
     pca = sub.add_parser("collect-audit"); pca.add_argument("--repo", required=True)
     pca.set_defaults(func=cmd_collect_audit)

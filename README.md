@@ -178,6 +178,10 @@ Each gate sits between phases and is enforced by the engine, not the model.
   `.harness/unplanned-edits.patch`) and the run halts for the developer. A
   failing test's stack trace does not count as naming a file. Loops ordered by
   the reviewer or the AC gate are not limited. See `harness/fix_scope.py`.
+- **`runs_build`** — set in the service repo's `.harness/config.yaml` only
+  (not set = `true`). The caller workflow's old `runs_build` input is accepted
+  and ignored. It switches the baseline build check, the compile check, the
+  build gate and the coverage gate on or off together.
 - **Compile check** — with `runs_build: true`, the harness compiles the
   production code right after `coding`, before `code_review`. A compile error
   goes straight back to `coding` (bounded by `max_validation_retries`). The
