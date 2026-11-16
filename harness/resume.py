@@ -108,6 +108,9 @@ def rewind(run: RunState, start_phase: str, log=print) -> RunState:
 
     # A contract freeze belongs to the halted fix loop, not to the new attempt.
     run.contract_snapshot = {}
+    # ... and so do the build-fix file limit and the compile-check budget.
+    run.fix_loop = ""
+    run.compile_attempts = 0
 
     # Approvals for re-run phases are stale — the artifact they approved is about
     # to be regenerated.

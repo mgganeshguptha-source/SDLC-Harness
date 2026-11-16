@@ -687,6 +687,16 @@ class StateMachine:
         # Loop back with the violation as explicit feedback — told plainly, the model
         # usually retreats to the authorised files. Bounded: if it keeps inventing
         # classes, that is a planning problem and a human must look.
+        # ---- FIX-LOOP FILE LIMIT (fix_scope.py) ----
+        # Coding, sent back to fix a red build, edited a file outside what a
+        # build-fix may touch. The executor reverted the edit and wrote the
+        # message; a person decides, so there is no redo.
+        if code == ExitCode.FIX_SCOPE_VIOLATION:
+            run.status = "halted"
+            run.halt_gate = HG.SCOPE
+            run.save(self.harness_dir)
+            return run
+
         if code == ExitCode.SCOPE_VIOLATION:
             from config import HarnessConfig as _HC
             cfg = _HC.load(self.harness_dir)
@@ -901,6 +911,18 @@ class StateMachine:
             run.last_feedback = msg
             run.save(self.harness_dir)
             return run
+
+        # ---- COMPILE CHECK (compile_check.py) ----
+        # After coding, before code review: the harness compiles the production
+        # code, because no phase can. A compile error goes straight back to
+        # coding instead of being reviewed and tested first.
+        if code == ExitCode.OK:
+            try:
+                import compile_check as _CC
+                if _CC.after_phase(self, run, phase):
+                    return run
+            except Exception as _e:
+                self.log(f"  [compile] check skipped ({type(_e).__name__}: {_e})")
 
         # ---- apply the transition ----
         if code in _HALTING:
@@ -1191,6 +1213,7 @@ class StateMachine:
                                 "code so each criterion below holds as written — do NOT "
                                 "reword or narrow a criterion to fit the code.\n"
                                 + _detail + "\n\nFull detail: .harness/validation.md")
+                            run.fix_loop = "ac"
                             run.iterations[_loop] = 0
                             run.approvals[_loop] = "rejected"
                             run.current_phase = _loop
@@ -1250,12 +1273,25 @@ class StateMachine:
                     return run
 
                 if rv.passed:
+                    if getattr(rv, "downgraded", False):
+                        # Never silent: the reviewer's verdict and the gate's
+                        # decision differ, and the log must show both.
+                        self.log("  ! code review: the reviewer wrote CHANGES_REQUESTED "
+                                 "but labelled every finding as non-blocking "
+                                 "([NOTE] or a style class) — gate: PASS. Findings "
+                                 "kept for the human reviewer:")
+                        for a in rv.advisory:
+                            self.log("      • " + a)
                     self.log("  [harness] code review gate: PASS")
                 else:
                     run.review_attempts += 1
                     loop = cfg.review_loopback_phase
                     reason = ("no parseable VERDICT in review.md"
                               if not rv.parse_ok else "reviewer requested changes")
+                    if getattr(rv, "unclassified", None):
+                        self.log(f"  [harness] code review: {len(rv.unclassified)} finding(s) "
+                                 "carry no recognised class — treated as blocking, not "
+                                 "as notes")
                     if loop and run.review_attempts <= cfg.max_review_retries:
                         self.log(f"  ! CODE_REVIEW_CHANGES_REQUESTED ({reason}) — looping "
                                  f"back to '{loop}' "
@@ -1264,6 +1300,9 @@ class StateMachine:
                             self.log("      • " + it)
                         issues_block = "\n".join(f"- {i}" for i in rv.issues) or "- (see review.md)"
                         run.halt_detail = "code_review: changes requested"
+                        # A reviewer-ordered fix is not a build-fix loop: the
+                        # file limit of fix_scope.py does not apply to it.
+                        run.fix_loop = "review"
                         run.last_feedback = (
                             "An INDEPENDENT code reviewer requested changes. Fix the "
                             "production code to address every issue below. Do not edit "
@@ -1341,6 +1380,7 @@ class StateMachine:
                 if vr.passed:
                     # The fix loop is over: lift the contract freeze.
                     run.contract_snapshot = {}
+                    run.fix_loop = ""
                     # Which already-failing tests still fail on the final code
                     # (the PR body marks the ones this change happened to fix).
                     if (getattr(run, "baseline", None) or {}).get("status") == "tolerated":
@@ -1619,6 +1659,8 @@ class StateMachine:
                         # Contract freeze for this fix loop: snapshot the API spec
                         # files now; the post-coding check halts if they change.
                         run.contract_snapshot = self._contract_hashes(cfg)
+                        # ... and limit which files the fix may edit (fix_scope.py).
+                        run.fix_loop = "build"
                     if loopback in (cfg.skip_phases or []):
                         # e.g. existing specs are broken and unit_testing is skipped:
                         # sending work to a skipped phase would only repeat the gate.

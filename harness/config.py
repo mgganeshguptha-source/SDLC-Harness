@@ -276,6 +276,9 @@ class HarnessConfig:
     # spring-javaformat:apply rewrites files to the project's required format.
     # Empty string => skip. This is a fixed, known goal — not arbitrary execution.
     pre_validation_command: str = "mvnw.cmd spring-javaformat:apply"
+    # Compile check after coding (compile_check.py). Blank => derived from a
+    # plain Maven test_command (the goal becomes `compile`); "off" => no check.
+    compile_command: str = ""
     # When validation fails, loop back to this phase to fix the code, carrying the
     # failure as feedback. Empty string => don't loop, just halt.
     validation_loopback_phase: str = "coding"
@@ -640,6 +643,7 @@ class HarnessConfig:
             model_rates=data.get("model_rates") or cls().model_rates,
             cache_write_rates=data.get("cache_write_rates") or cls().cache_write_rates,
             pre_validation_command=data.get("pre_validation_command", cls.pre_validation_command),
+            compile_command=str(data.get("compile_command", cls.compile_command) or ""),
             validation_loopback_phase=data.get("validation_loopback_phase", cls.validation_loopback_phase),
             test_failure_loopback_phase=data.get("test_failure_loopback_phase", cls.test_failure_loopback_phase),
             max_phase_runs=int(data.get("max_phase_runs", cls.max_phase_runs)),

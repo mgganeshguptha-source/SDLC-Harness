@@ -646,7 +646,8 @@ def _is_environment_failure(exit_code: int, output: str) -> bool:
 def run_validation(repo_root: Path, harness_dir: Path, log=print,
                    changed_files: list | None = None,
                    known_failing: list | None = None,
-                   baseline: bool = False) -> ValidationResult:
+                   baseline: bool = False,
+                   compile_command: str | None = None) -> ValidationResult:
     """Run the repo's test command and judge the result.
 
     known_failing: tests that already failed on the base branch (baseline.py).
@@ -655,6 +656,9 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         the gate.
     baseline: this is the baseline check itself — the untouched base code. No
         formatting step and no coverage gate; the failing tests are returned.
+    compile_command: run THIS command instead of the test command — the compile
+        check after coding (compile_check.py). No formatting step, no coverage
+        gate; the same environment-failure classification applies.
     """
     cfg = HarnessConfig.load(harness_dir)
     # Per-test judgement needs Maven to run every module even when tests fail.
@@ -671,7 +675,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     # validating. This is a fixed, known goal run by trusted harness code — not the
     # agent, and not arbitrary execution. It turns a mechanical "format violation"
     # into a non-issue so validation tests true correctness, not whitespace.
-    if cfg.pre_validation_command and not baseline:
+    if cfg.pre_validation_command and not (baseline or compile_command):
         log(f"  [harness] formatting: {cfg.pre_validation_command}")
         try:
             fmt = subprocess.run(
@@ -710,8 +714,10 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
         except Exception as e:
             log(f"  [harness] formatting step error: {type(e).__name__}: {e} (continuing)")
 
-    cmd = cfg.resolved_test_command()
-    log(f"  [harness] running {'baseline build' if baseline else 'validation'}: {cmd}")
+    cmd = compile_command or cfg.resolved_test_command()
+    _what = ("compile check" if compile_command
+             else "baseline build" if baseline else "validation")
+    log(f"  [harness] running {_what}: {cmd}")
     log(f"  [harness] cwd: {repo_root}")
     if _tolerant:
         log(f"  [harness] test failures do not stop the build ({_BL.IGNORE_FLAG}); "
@@ -845,8 +851,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     cov_pct = None
     cov_covered = cov_missed = 0
     cov_measured: list = []
-    if baseline:
-        pass          # the baseline check measures nothing: no coverage gate
+    if baseline or compile_command:
+        pass          # these checks measure nothing: no coverage gate
     elif passed and cfg.min_coverage > 0 and cfg.resolved_coverage_format() == "istanbul":
         # ---- ISTANBUL (Karma / Jest json-summary) — frontend, backlog B5 ----
         # The report is normally written by the TEST command itself (e.g.

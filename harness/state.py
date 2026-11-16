@@ -112,6 +112,13 @@ class RunState:
     # how many times the coding phase created production files the plan never
     # approved (scope gate). Bounded, then halt for a human.
     scope_attempts: int = 0
+    # how many times the compile check after coding failed and sent coding back
+    # (compile_check.py). Bounded by max_validation_retries, then halt.
+    compile_attempts: int = 0
+    # Which gate last sent work back to coding: "build" (build gate or compile
+    # check), "review", "ac", or "" (none). In a "build" loop coding may edit
+    # only a limited set of files (fix_scope.py).
+    fix_loop: str = ""
     # cumulative token usage across all phases (for credit estimation)
     total_tokens: dict = field(default_factory=dict)
     # per-phase token usage + the model used, in execution order, for the

@@ -171,11 +171,28 @@ Each gate sits between phases and is enforced by the engine, not the model.
   `SCOPE_VIOLATION`. A second check independently rejects **duplicate classes**
   (the same class name at two paths), which is the symptom that a bad plan or a
   workaround produces.
+- **Fix-loop file limit** — when the build gate or the compile check sends
+  `coding` back, it may edit only the plan's files, files this run had already
+  changed, and a file the compiler names in a compile error. An edit to any
+  other existing production file is reverted (kept as
+  `.harness/unplanned-edits.patch`) and the run halts for the developer. A
+  failing test's stack trace does not count as naming a file. Loops ordered by
+  the reviewer or the AC gate are not limited. See `harness/fix_scope.py`.
+- **Compile check** — with `runs_build: true`, the harness compiles the
+  production code right after `coding`, before `code_review`. A compile error
+  goes straight back to `coding` (bounded by `max_validation_retries`). The
+  command is `compile_command`, or is derived from a plain Maven `test_command`;
+  for any other build set `compile_command`, or the check is skipped. See
+  `harness/compile_check.py`.
 - **Review gate** — the independent reviewer's verdict must be present and parse.
   A stale verdict file from a previous attempt is deleted before the reviewer
   runs, so "the file exists" means "the reviewer wrote it this attempt." Blocking
   findings are limited to five classes: correctness, contract,
-  reactive/concurrency, security, error handling. Style is downgraded to a note.
+  reactive/concurrency, security, error handling. A finding the reviewer labels
+  as style (or writes as a `[NOTE]`) never blocks. A `CHANGES_REQUESTED` verdict
+  is turned into PASS only when every finding is labelled that way, and the log
+  says so; a finding with no recognised class, or an objection written as
+  prose, blocks.
 - **Baseline build check** — with `runs_build: true`, before the first AI phase of a
   fresh run the harness runs `test_command` once on the untouched base code. A
   missing library or a compile error halts there, before any model call. Tests

@@ -447,7 +447,8 @@ def cmd_collect_audit(args):
     # analysis gate passed, the draft with its open questions when it halted).
     for name in ("design.md", "prompt-steps.md", "review.md", "validation.md",
                  "validation-report.txt", "pr-body.md", "capability-manifest.json",
-                 "run-state.json", "blocked.md", "bug-analysis.md"):
+                 "run-state.json", "blocked.md", "bug-analysis.md",
+                 "unplanned-edits.patch"):
         src = hd / name
         if src.exists():
             shutil.copy2(src, audit_dir / name); copied.append(name)

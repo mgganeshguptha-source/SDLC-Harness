@@ -257,6 +257,18 @@ class PhaseExecutor:
             except Exception as e:
                 self.log(f"  [harness] scope snapshot failed (gate will not fire): {e}")
 
+        # FIX-LOOP FILE LIMIT (fix_scope.py): note, before the agent runs, whether
+        # this pass is a redo ordered by the build gate or the compile check, what
+        # the run had already changed, and the failure it was sent back with.
+        _build_fix, _changed_before, _entry_feedback = False, set(), ""
+        try:
+            import fix_scope as _FS
+            _build_fix = _FS.is_build_fix(run, phase.id)
+            _changed_before = set(run.changed_main_files or [])
+            _entry_feedback = run.last_feedback or ""
+        except Exception:
+            pass
+
         result = self.runner.run(phase, prompt, run, self.repo_root)
 
         run.iterations[phase.id] = used + result.iterations_used
@@ -417,6 +429,27 @@ class PhaseExecutor:
                     split = classify_scope_additions(
                         summary["scope_additions"], _pre_existing_sources,
                         source_roots=self._source_roots())
+
+                    # In a build-fix loop an unplanned edit is allowed only to a
+                    # file the run already changed or the compiler named (OP018-6434:
+                    # coding, sent back with failing tests, edited five unlisted
+                    # files and removed a membership check).
+                    if split["modified"] and _build_fix:
+                        _blocked = _FS.blocked_edits(split["modified"], _changed_before,
+                                                     _entry_feedback)
+                        if _blocked:
+                            _rev = _FS.revert(self.repo_root, self.harness_dir,
+                                              _blocked, log=self.log)
+                            if _rev:
+                                run.changed_main_files = [
+                                    f for f in run.changed_main_files if f not in _blocked]
+                            _msg = _FS.halt_message(phase.id, run.feature_id, _blocked,
+                                                    _rev, sorted(_changed_before))
+                            self.log(_msg)
+                            run.last_feedback = _msg
+                            run.halt_detail = ("fix loop: unplanned edit to "
+                                               + ", ".join(_blocked))[:200]
+                            return ExitCode.FIX_SCOPE_VIOLATION
 
                     if split["modified"]:
                         self.log("  [harness] ⚠ SCOPE ADDITION (unplanned edit to an "
