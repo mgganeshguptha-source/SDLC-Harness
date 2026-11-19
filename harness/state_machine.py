@@ -375,7 +375,8 @@ class StateMachine:
         _cfg_cap = None
         try:
             from config import HarnessConfig as _HCcap
-            _cfg_cap = _HCcap.load(self.harness_dir).max_phase_runs
+            from unit_test_mode import apply_overrides as _UTo
+            _cfg_cap = _UTo(_HCcap.load(self.harness_dir), run).max_phase_runs
         except Exception:
             _cfg_cap = None
         if _cfg_cap and _cfg_cap > 0:
@@ -563,7 +564,8 @@ class StateMachine:
         # that is the build gate: compile, the repo's existing tests, coverage.
         try:
             from config import HarnessConfig as _HCsk
-            _skip = phase.id in (_HCsk.load(self.harness_dir).skip_phases or [])
+            from unit_test_mode import apply_overrides as _UTsk
+            _skip = phase.id in (_UTsk(_HCsk.load(self.harness_dir), run).skip_phases or [])
         except Exception:
             _skip = False
         # ---- INPUT GUARD: before ANY model call ----
@@ -613,6 +615,14 @@ class StateMachine:
                     self.log("  [baseline] already-failing tests listed in the PR body")
             except Exception as _e:
                 self.log(f"  [baseline] PR note skipped ({type(_e).__name__})")
+            # Unit-test mode: the measured before/after coverage table, the
+            # files left for a later batch and any suspected defects.
+            try:
+                import unit_test_mode as _UTp
+                if _UTp.add_to_pr_body(self.repo_root, run):
+                    self.log("  [unit-test] coverage table added to the PR body")
+            except Exception as _e:
+                self.log(f"  [unit-test] PR note skipped ({type(_e).__name__})")
 
         if _ri_before is not None:
             try:
@@ -1236,7 +1246,8 @@ class StateMachine:
             if getattr(phase, "review_gate", False):
                 from review import parse_review
                 from config import HarnessConfig as _HC
-                cfg = _HC.load(self.harness_dir)
+                from unit_test_mode import apply_overrides as _UTr
+                cfg = _UTr(_HC.load(self.harness_dir), run)
                 rv = parse_review(self.repo_root / ".harness" / "review.md",
                                   written_after=_phase_started)
 
@@ -1292,6 +1303,7 @@ class StateMachine:
                         self.log(f"  [harness] code review: {len(rv.unclassified)} finding(s) "
                                  "carry no recognised class — treated as blocking, not "
                                  "as notes")
+                    import unit_test_mode as _UTm
                     if loop and run.review_attempts <= cfg.max_review_retries:
                         self.log(f"  ! CODE_REVIEW_CHANGES_REQUESTED ({reason}) — looping "
                                  f"back to '{loop}' "
@@ -1309,6 +1321,11 @@ class StateMachine:
                             "tests. Do not argue with the review — implement the fixes.\n"
                             f"Reviewer issues:\n{issues_block}"
                         )
+                        if _UTm.is_unit_test(run):
+                            # Unit-test mode: the reviewer judged the TESTS and the
+                            # loop goes to unit_testing; production stays frozen.
+                            run.fix_loop = ""
+                            run.last_feedback = _UTm.review_feedback(issues_block)
                         run.iterations[loop] = 0
                         run.approvals[loop] = "rejected"
                         run.current_phase = loop
@@ -1361,9 +1378,17 @@ class StateMachine:
                     import baseline as _BL
                     # Tests that already failed on the base branch before this
                     # run changed anything (baseline.py) do not fail the gate.
+                    import unit_test_mode as _UTv
+                    # Unit-test mode measures this run's batch against the
+                    # unit_test coverage target; build mode the changed classes.
+                    _ovr = None
+                    if _UTv.is_unit_test(run):
+                        from config import HarnessConfig as _HCv
+                        _ovr = _UTv.apply_overrides(_HCv.load(self.harness_dir), run)
                     vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
-                                        changed_files=run.changed_main_files,
-                                        known_failing=_BL.known_failing(run) or None)
+                                        changed_files=_UTv.coverage_targets(run),
+                                        known_failing=_BL.known_failing(run) or None,
+                                        config_override=_ovr)
                 # A build may change files no phase may write (npm ci empties a
                 # committed node_modules/; npm install rewrites package-lock.json).
                 # Put them back so later phases and the commits never carry them
@@ -1381,6 +1406,12 @@ class StateMachine:
                     # The fix loop is over: lift the contract freeze.
                     run.contract_snapshot = {}
                     run.fix_loop = ""
+                    try:
+                        import unit_test_mode as _UTa
+                        if _UTa.is_unit_test(run):
+                            _UTa.record_after(run, self.repo_root, self.harness_dir, self.log)
+                    except Exception as _e:
+                        self.log(f"  [unit-test] coverage-after skipped ({type(_e).__name__})")
                     # Which already-failing tests still fail on the final code
                     # (the PR body marks the ones this change happened to fix).
                     if (getattr(run, "baseline", None) or {}).get("status") == "tolerated":
@@ -1388,7 +1419,9 @@ class StateMachine:
                             getattr(vr, "tolerated_tests", None) or [])
                 if not vr.passed:
                     from config import HarnessConfig
-                    cfg = HarnessConfig.load(self.harness_dir)
+                    import unit_test_mode as _UTf
+                    cfg = _UTf.apply_overrides(HarnessConfig.load(self.harness_dir), run)
+                    _ut_mode = _UTf.is_unit_test(run)
 
                     kind = getattr(vr, "failure_kind", None) or "test"
 
@@ -1428,7 +1461,12 @@ class StateMachine:
                         _fp = zlib.crc32((_err or vr.output_tail or "").encode("utf-8", "replace"))
                         _prev_fp = run.iterations.get("__validation_fp__")
                         run.iterations["__validation_fp__"] = int(_fp)
-                        if (_prev_fp is not None and int(_prev_fp) == int(_fp)
+                        # A coverage miss is never an environment fault: the
+                        # build ran and the tests passed. An unchanged figure
+                        # after a retry is the coverage gate's to judge (its own
+                        # retry budget), not a reason to call the setup broken.
+                        if (kind != "coverage" and _prev_fp is not None
+                                and int(_prev_fp) == int(_fp)
                                 and not is_code_attributable(vr.output_tail)):
                             from validation import environment_hint as _ehint
                             self._halt_environment(run, phase, vr, "unattributable",
@@ -1456,8 +1494,8 @@ class StateMachine:
                         # operator looking at JaCoCo rather than at the story.
                         #
                         # Halt immediately with the actual cause.
-                        _changed = getattr(run, "changed_main_files", None) or []
-                        if not _changed:
+                        _changed = _UTf.coverage_targets(run)
+                        if not _changed and not _ut_mode:
                             self.log("\n  ============ NO PRODUCTION CHANGES ============\n")
                             self.log("  The coding phase produced no changes under the "
                                      "application module's main source.")
@@ -1517,6 +1555,21 @@ class StateMachine:
                                 + (f"Classes measured: {', '.join(measured)}. " if measured else "")
                                 + "Coverage detail:\n" + vr.output_tail
                             )
+                            if _ut_mode:
+                                # Per-class figures, so the next attempt knows where
+                                # the missing lines are, not just the batch total.
+                                try:
+                                    _s = _UTf.settings(cfg)
+                                    _ok, _pf = _UTf.measure(self.repo_root, cfg, _changed, _s)
+                                    if _ok:
+                                        run.last_feedback += (
+                                            "\nCoverage per class now (lowest first — add "
+                                            "tests where it is lowest):\n" + "\n".join(
+                                                f"  - {f}: {(_pf[f]['pct'] if _pf[f]['pct'] is not None else 0):.1f}% "
+                                                f"({_pf[f]['covered']}/{_pf[f]['total']})"
+                                                for f in sorted(_changed, key=lambda x: (_pf[x]['pct'] or 0))))
+                                except Exception:
+                                    pass
                             # reset ONLY the unit_testing iteration budget so it can act
                             # Recorded so a later PHASE_RUN_CAP halt can name the gate
                             # that kept sending work back, instead of a generic message.
@@ -1541,7 +1594,7 @@ class StateMachine:
                             f"coverage = {pct_str}, required = {target:.1f}% "
                             f"(NOT met).\n"
                             f"  Changed class(es)  : "
-                            f"{', '.join(run.changed_main_files) if run.changed_main_files else '(none recorded)'}\n"
+                            f"{', '.join(_changed) if _changed else '(none recorded)'}\n"
                             f"  Measured in report : "
                             f"{', '.join(measured) if measured else '(none matched JaCoCo rows)'}\n"
                             "  The tests that DO exist are green; only the coverage "
@@ -1604,7 +1657,11 @@ class StateMachine:
                     _prev = getattr(run, "last_validation_loopback", "") or ""
                     _would_be = (cfg.test_failure_loopback_phase if test_side
                                  else cfg.validation_loopback_phase)
-                    if _prev and _prev == _would_be and run.validation_attempts > 1:
+                    if _ut_mode:
+                        # Production code is frozen: every red build is the
+                        # tests' to fix, and there is no other side to try.
+                        test_side = True
+                    elif _prev and _prev == _would_be and run.validation_attempts > 1:
                         # NEVER flip from the test side to production when every
                         # failing test is one this run wrote. The test author has
                         # already had a go; sending the failure to 'coding' tells
@@ -1623,7 +1680,10 @@ class StateMachine:
                                  f"build is still red — routing to the other side instead")
                     _methods = _failing_test_methods(vr.output_tail)
                     _names = ", ".join(_methods or _failing) or "(see output below)"
-                    if test_side:
+                    if _ut_mode:
+                        loopback = cfg.test_failure_loopback_phase
+                        fix_instruction = _UTf.RED_BUILD_INSTRUCTION.format(names=_names)
+                    elif test_side:
                         loopback = cfg.test_failure_loopback_phase
                         fix_instruction = (
                             "The build FAILED while compiling or running the TESTS. "
@@ -1834,6 +1894,9 @@ class StateMachine:
         """The story's mandatory contract line and its attached upstream
         contracts (handoff.py). Returns True when it HALTED the run."""
         import handoff as HO
+        # Unit-test mode has no story and changes no contract: nothing to check.
+        if (getattr(run, "mode", None) or "") == "unit-test":
+            return False
         try:
             from config import HarnessConfig as _HCdg
             cfg = _HCdg.load(self.harness_dir)

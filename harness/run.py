@@ -50,11 +50,22 @@ def cmd_init(args):
     # build (story -> code -> PR) or analysis (bug report -> root-cause and
     # impact document -> document-only PR). An unknown value stops the run here
     # rather than silently running the other mode.
+    from phases import normalize_mode
     mode = str(getattr(args, "mode", None) or "build").strip().lower()
+    if mode.replace("_", "-") in ("unit-test", "unittest"):
+        mode = normalize_mode(mode)
     if mode not in MODES:
         print(f"::error title=Unknown mode::mode must be one of {', '.join(MODES)} "
               f"(got '{mode}').")
         sys.exit(1)
+
+    # UNIT-TEST MODE: tests for existing code (unit_test_mode.py). No story is
+    # needed and no other repo is read; what to test comes from the workflow's
+    # test_targets input or the repo's `unit_test:` config. Checked here, before
+    # any build or model call.
+    if mode == "unit-test":
+        _init_unit_test(args, repo, hd)
+        return
 
     # Mandatory on a fresh run, like the story. A resume never comes through here.
     from reference_repos import fresh_run_problem
@@ -111,6 +122,51 @@ def cmd_init(args):
         print(f"  [gitignore] skipped ({type(_e).__name__}: {_e})")
 
     print(f"Initialized run for '{args.feature}' at {hd} (mode: {mode})")
+    print(f"First phase: {run.current_phase}")
+
+
+def _init_unit_test(args, repo: Path, hd: Path) -> None:
+    import os
+    from datetime import datetime, timezone
+    import unit_test_mode as UT
+    from config import HarnessConfig
+    from story_source import story_hash
+    requested = (getattr(args, "test_targets", None) or "").strip()
+    problem, files, note = UT.init_problem(repo, hd, requested)
+    if note:
+        print(f"  [unit-test] {note}")
+    if problem:
+        print(f"::error title=Unit-test scope::{problem}")
+        print(f"  [harness] HALTED before any build or model call: {problem}")
+        sys.exit(1)
+    cfg = HarnessConfig.load(hd, repo_root=repo)
+    s = UT.settings(cfg)
+    notes, notes_rel = UT.task_notes(repo, args.feature, cfg.story_file)
+    if notes_rel:
+        print(f"Read task notes from {notes_rel}")
+    story = getattr(args, "story", None) or UT.story_text(args.feature, requested, s, notes)
+    run = RunState(feature_id=args.feature, story=story,
+                   current_phase="unit_testing", mode="unit-test")
+    run.story_path = notes_rel
+    run.story_sha256 = story_hash(story)
+    run.unit_test = {"requested": requested, "candidates": files,
+                     "min_coverage": s.min_coverage, "metric": s.coverage_metric}
+    run.started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    run.actor = os.environ.get("GITHUB_ACTOR")
+    run.save(hd)
+    try:
+        if cfg.manage_gitignore:
+            from gitignore import ensure as _ensure_gitignore
+            _added = _ensure_gitignore(repo)
+            if _added:
+                print(f"::notice title=.gitignore updated::Added {', '.join(_added)} "
+                      f"to .gitignore — review it in the harness PR.")
+    except Exception as _e:
+        print(f"  [gitignore] skipped ({type(_e).__name__}: {_e})")
+    print(f"Initialized run for '{args.feature}' at {hd} (mode: unit-test)")
+    print(f"  [unit-test] {len(files)} production file(s) in scope; target "
+          f"{s.min_coverage:.1f}% {s.coverage_metric}; batch of up to "
+          f"{s.max_classes_per_run} chosen after the baseline build")
     print(f"First phase: {run.current_phase}")
 
 
@@ -171,6 +227,23 @@ def cmd_autorun(args):
         _baseline_ok = _baseline.ensure(run, repo, _harness_dir(repo), log=print)
     except Exception as _e:
         print(f"  [baseline] check skipped ({type(_e).__name__}: {_e})")
+
+    # UNIT-TEST MODE: measure coverage on the baseline build's report and pick
+    # this run's batch (unit_test_mode.prepare). No model call. Stops the run
+    # here when everything in scope already meets the target.
+    if _baseline_ok:
+        try:
+            import unit_test_mode as _UT
+            if _UT.is_unit_test(run):
+                _baseline_ok = _UT.prepare(run, repo, _harness_dir(repo), log=print)
+        except Exception as _e:
+            print(f"::error title=Unit-test scope::could not choose the batch "
+                  f"({type(_e).__name__}: {_e})")
+            run.status = "halted"
+            run.halt_gate = "other"
+            run.halt_detail = f"unit-test scope: {type(_e).__name__}"
+            run.save(_harness_dir(repo))
+            _baseline_ok = False
 
     max_cycles = 50
     for _ in range(max_cycles if _baseline_ok else 0):
@@ -710,7 +783,12 @@ def main():
     pi.add_argument("--story", default=None, help="story text; if omitted, read from config.story_file")
     pi.add_argument("--mode", default="build",
                     help="build (default): story -> code -> PR. analysis: bug report -> "
-                         "root-cause and impact document -> document-only PR, no code.")
+                         "root-cause and impact document -> document-only PR, no code. "
+                         "unit-test: unit tests for existing code until the coverage "
+                         "target is met -> test-only PR.")
+    pi.add_argument("--test-targets", dest="test_targets", default="",
+                    help="unit-test mode only: packages, classes or paths to cover, comma "
+                         "separated. Blank = the repo's unit_test config.")
     pi.set_defaults(func=cmd_init)
 
     pr = sub.add_parser("run"); pr.add_argument("--repo", required=True)

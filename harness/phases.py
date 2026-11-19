@@ -244,10 +244,25 @@ ANALYSIS_PHASES = (
     ),
 )
 
+# ---- UNIT-TEST MODE (tests for existing code) -------------------------------
+# For repos, packages or classes that have little or no unit-test coverage — a
+# sprint task "add unit tests to X", not a story. No context, plan or coding
+# phase: production code is FROZEN for the whole run (unit_testing may write
+# test files only). The harness itself picks the classes (unit_test_mode.py),
+# measures their coverage before the first model call, and the build gate after
+# unit_testing loops back to it until the coverage target is met (bounded). The
+# reviewer then judges the TESTS, not the production code, and sends findings
+# back to unit_testing. The phases are the build-mode Phase objects themselves,
+# so their write boundaries and gates are identical.
+_BY_ID = {p.id: p for p in PHASES}
+UNIT_TEST_PHASES = (_BY_ID["unit_testing"], _BY_ID["code_review"], _BY_ID["raise_pr"])
+
 MODE_BUILD = "build"
 MODE_ANALYSIS = "analysis"
-MODES = (MODE_BUILD, MODE_ANALYSIS)
-_SEQUENCES = {MODE_BUILD: PHASES, MODE_ANALYSIS: ANALYSIS_PHASES}
+MODE_UNIT_TEST = "unit-test"
+MODES = (MODE_BUILD, MODE_ANALYSIS, MODE_UNIT_TEST)
+_SEQUENCES = {MODE_BUILD: PHASES, MODE_ANALYSIS: ANALYSIS_PHASES,
+              MODE_UNIT_TEST: UNIT_TEST_PHASES}
 # Every phase of every mode. Phase ids are unique across modes.
 ALL_PHASES = PHASES + ANALYSIS_PHASES
 
@@ -255,7 +270,9 @@ ALL_PHASES = PHASES + ANALYSIS_PHASES
 def normalize_mode(mode) -> str:
     """'build' for anything that is not a known mode (None, '', old run-state
     files written before modes existed)."""
-    m = str(mode or "").strip().lower()
+    m = str(mode or "").strip().lower().replace("_", "-")
+    if m == "unittest":
+        m = MODE_UNIT_TEST
     return m if m in MODES else MODE_BUILD
 
 

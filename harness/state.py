@@ -26,6 +26,13 @@ class RunState:
     # review analysis document to (the story folder). The PR step carries
     # exactly this file. None until the analysis gate passes.
     analysis_doc: Optional[str] = None
+    # Unit-test mode (unit_test_mode.py): what the run is adding tests for and
+    # how coverage moved. Keys: requested (the workflow's test_targets text),
+    # candidates (count of eligible production files), targets (repo-relative
+    # files in THIS batch), coverage_before / coverage_after ({file: pct|None}),
+    # remaining (below-target files left for a later run), metric, min_coverage.
+    # Empty in build and analysis runs.
+    unit_test: dict = field(default_factory=dict)
     # Where the story text came from and a hash of it, so a resume can tell
     # whether the developer has edited the story since the run started.
     story_path: Optional[str] = None

@@ -9,7 +9,7 @@ tests that have nothing to do with the story were red, the failure was sent to
 access check on the way — to make them pass. A missing library was also found
 only after the model phases had run.
 
-WHAT IT DOES (only when runs_build is true, build mode)
+WHAT IT DOES (only when runs_build is true; build and unit-test modes)
 Before the first AI phase of a fresh run, the harness runs the repo's own
 test_command once on the untouched base code:
 
@@ -224,7 +224,9 @@ def save(repo_root, key: str, rec: dict, log=print) -> None:
 def needed(run, harness_dir) -> tuple[bool, str]:
     """(run the check?, why not)."""
     from config import harness_runs_build
-    if (getattr(run, "mode", None) or "build") != "build":
+    from phases import normalize_mode
+    _mode = normalize_mode(getattr(run, "mode", None))
+    if _mode not in ("build", "unit-test"):
         return False, "analysis mode does not build"
     if not harness_runs_build(harness_dir):
         return False, "runs_build is false"
@@ -292,11 +294,15 @@ def ensure(run, repo_root, harness_dir, log=print) -> bool:
     # commit: never read or write the saved result for it.
     resumed = os.environ.get("HARNESS_RESUMED", "").strip().lower() == "true"
     use_saved = bool(i["base_commit"]) and not resumed
+    # Unit-test mode measures coverage BEFORE the run from this build's own
+    # report, so it always builds (a saved result has no report with it). It
+    # still saves the result for later build-mode runs.
+    _unit_test = (getattr(run, "mode", None) or "") == "unit-test"
 
     log("\n=== Baseline build check (before any AI phase) ===")
     log(f"  [baseline] base commit {i['base_commit'][:12] or '(unknown)'}, library store "
         f"{i['store_commit'][:12] or '(none)'}, command: {cmd}")
-    rec = load_saved(repo_root, key, log) if use_saved else None
+    rec = load_saved(repo_root, key, log) if (use_saved and not _unit_test) else None
     reused = rec is not None
     if reused:
         log(f"  [baseline] already checked on {rec.get('checked_at', '?')} for this base "

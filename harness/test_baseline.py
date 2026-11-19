@@ -322,7 +322,7 @@ def test_metrics_record_carries_the_baseline_result():
     run = new_run()
     run.baseline = {"status": "tolerated", "failing_tests": ["a#b", "c#d"], "reused": True}
     rec = metrics.build_record(run, Path("."), None, log=quiet)
-    assert rec["schema_version"] == 9
+    assert rec["schema_version"] == 10
     assert rec["baseline_status"] == "tolerated"
     assert rec["baseline_failing_tests"] == 2 and rec["baseline_reused"] is True
     assert metrics.build_record(new_run(), Path("."), None, log=quiet)["baseline_status"] is None

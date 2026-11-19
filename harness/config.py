@@ -488,6 +488,14 @@ class HarnessConfig:
     # repos without a maintained unit-test suite. Empty => no phase skipped.
     skip_phases: list = field(default_factory=list)
 
+    # --- unit-test mode (unit_test_mode.py) ---
+    # Read only by a run started with mode: unit-test. Raw mapping from the
+    # service repo's `unit_test:` block; unit_test_mode.settings() applies the
+    # defaults and validates it. Keys: scope (repo | packages | classes),
+    # packages, classes, exclude, use_default_excludes, min_coverage,
+    # coverage_metric, max_classes_per_run, max_phase_runs.
+    unit_test: dict = field(default_factory=dict)
+
     # --- coverage report format (backlog B5) ---
     #   "auto"     => jacoco for backend stacks, istanbul for frontend stacks
     #   "jacoco"   => JaCoCo CSV at coverage_csv (Java)
@@ -753,6 +761,9 @@ class HarnessConfig:
             glob = f"{gm}/**"
             if glob not in cfg.write_exclude:
                 cfg.write_exclude.append(glob)
+
+        _ut = data.get("unit_test")
+        cfg.unit_test = dict(_ut) if isinstance(_ut, dict) else {}
 
         # Repo root for OpenAPI auto-detection (api_spec_files not set).
         cfg._repo_root = repo_root

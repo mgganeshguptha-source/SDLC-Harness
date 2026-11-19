@@ -102,6 +102,45 @@ changed since, and that the fix stays inside the approved scope. Until then the
 build run treats the document as input, not as a binding constraint. Do not use
 analysis mode on real client bugs before those controls exist.
 
+## Unit-test mode (tests for existing code)
+
+`mode: unit-test` adds unit tests to code that has little or no coverage — a
+sprint task such as "add unit tests for the claims package", not a story. No
+story file is needed: `feature_id` is the task id, and a story file named for it,
+if present, is passed to the test author as task notes.
+
+Flow: **baseline build + coverage before** (no AI) → `unit_testing` → build +
+coverage gate → `code_review` (of the tests) → `raise_pr`.
+
+- **What to test** — the workflow's `test_targets` input (packages, classes or
+  repo-relative paths, comma separated) or, when blank, the `unit_test:` block in
+  `.harness/config.yaml` (`scope: repo | packages | classes`). Configuration,
+  DTO, `*Application` and similar files are excluded by default (Angular: modules,
+  routing, models, environments); `exclude` adds more.
+- **Batches** — the harness measures each file's coverage on the baseline build
+  and takes at most `max_classes_per_run` (default 5), lowest coverage first. The
+  PR lists the files still below target; a later run with a new task id takes the
+  next batch. Files already at target are skipped; if all are, the run ends
+  without any AI phase.
+- **Coverage gate and loopback** — after `unit_testing` the harness builds, runs
+  the tests and measures the batch (taken together) against
+  `unit_test.min_coverage` (default 90). Below target, or red tests, loop back to
+  `unit_testing` with per-class figures, bounded by `max_coverage_retries`,
+  `max_validation_retries` and `unit_test.max_phase_runs` (default 5); then halt
+  for a person.
+- **Production code is frozen** — `unit_testing` may write test files only, and
+  every loopback (red build, coverage, review) goes to `unit_testing`. Behaviour
+  that looks wrong is not asserted and not fixed: the test author lists it in
+  `.harness/suspected-defects.md` and the harness copies it into the PR.
+- **Review** — the reviewer judges the tests: no-assertion tests (`ASSERTION`),
+  wrong expectations (`CORRECTNESS`), real network/DB/files/sleeps (`ISOLATION`),
+  real-looking personal data (`SECURITY`), reflection or weakened existing tests
+  (`CONTRACT`). Coverage itself is never a review finding.
+- **PR** — test files only, titled `Harness unit tests: <id>`, with a measured
+  before/after coverage table appended by the harness.
+- Requires `runs_build: true` (the run cannot measure coverage otherwise). In
+  this mode `skip_phases: [unit_testing]` is ignored.
+
 ### Answering clarifications, and learning from the answers
 
 - **Answer in the story, then resume.** When the context gate halts on
@@ -287,6 +326,7 @@ Flat package under `harness/`.
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
 | `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap. Also the analysis-mode sequence and the helpers that pick a sequence by run mode |
+| `unit_test_mode.py` | Unit-test mode: scope resolution and excludes, per-file coverage from JaCoCo / Istanbul, batch selection, the config overrides that send every loopback to `unit_testing`, its prompts, review dossier and PR coverage table |
 | `analysis.py` | Analysis mode: the analysis gate (open questions halt), the analysed-source stamp, publishing the document to the story folder, the PR body |
 | `reference_repos.py` | Reads `.harness/repo_list.yaml`; clones a listed repo when the context phase asks for it, read-only, for that phase only |
 | `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY, and halts on `<placeholder>` file paths |
