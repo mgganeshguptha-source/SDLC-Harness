@@ -317,7 +317,7 @@ def test_finalize_skips_file_with_pii(tmp_path):
     p.parent.mkdir(parents=True)
     p.write_text("// call 313-555-0142", encoding="utf-8")
     run = RunState(feature_id="F-2", story="s", current_phase="documentation")
-    info = HO.finalize(repo, _cfg(repo), run, [], log=lambda *a: None, force=True)
+    info = HO.finalize(repo, _cfg(repo), run, ["src/app/store/state/a.ts"], log=lambda *a: None)
     assert info["status"] == "missing" and info["skipped"][0]["file"] == "src/app/store/state/a.ts"
     assert "555-0142" not in json.dumps(info)
 
@@ -334,34 +334,6 @@ def test_summary_is_stamped(tmp_path):
     info = HO.finalize(repo, _cfg(repo), run, ["src/app/store/a.ts"], log=lambda *a: None)
     assert info["summary"] == md.name
     assert HO.parse_header(md.read_text())["repo"] == "dx_this-repo"
-
-
-def test_contract_only_mode_end_to_end(tmp_path, monkeypatch):
-    """No model: the contract command copies the OpenAPI file and collect-audit
-    places it under contracts/<feature>/."""
-    import run as R
-    repo = _repo(tmp_path)
-    _multimodule(repo)
-    (repo / "stories").mkdir()
-    (repo / "stories/F-1.md").write_text(f"Title\n{LINE} None\n")
-    _gitrepo(repo)
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "base")
-    _git(repo, "update-ref", "refs/remotes/origin/story", "HEAD")
-    _git(repo, "checkout", "-q", "-b", "pr")
-    (repo / "svc-app/src/main/java/a/VisitSummaryResponse.java").write_text("class V{}")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "change")
-    monkeypatch.setattr(sys, "argv", ["run.py", "contract", "--repo", str(repo),
-                                      "--feature", "F-1", "--base", "story"])
-    R.main()
-    monkeypatch.setattr(sys, "argv", ["run.py", "collect-audit", "--repo", str(repo)])
-    R.main()
-    out = repo / "contracts/F-1"
-    assert (out / "files/svc-openapi-code/src/main/resources/svc.yml").is_file()
-    assert json.loads((out / "manifest.json").read_text())["files"] == [
-        "svc-openapi-code/src/main/resources/svc.yml"]
-    assert list((repo / "audit/F-1").glob("*/contract/manifest.json"))
 
 
 # ------------------------------------------------------------------ machine

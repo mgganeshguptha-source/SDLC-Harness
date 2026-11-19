@@ -73,7 +73,7 @@ target_module: "mpa-web"
 # Remove it once the repo's peer dependencies match, or a lock file / .npmrc is
 # committed.
 # dx_mpa_responsive: the harness runs this from the repo root, so it moves into
-# mpa-web first. Only used when the run's runs_build input is ticked.
+# mpa-web first. Only used when runs_build below is true.
 # - npm install, NOT npm ci: this repo commits mpa-js under mpa-web/node_modules/,
 #   and npm ci deletes node_modules/ first (OP018-6418, 2026-11-11).
 # - --configuration production: angular.json defines only "production" (no
@@ -82,8 +82,7 @@ test_command: "cd mpa-web && npm install --no-audit --no-fund --legacy-peer-deps
 
 # The runner cannot build this repo yet (mpa-js is committed under
 # node_modules/ and the build setup differs from the micro-frontends), so the
-# developer builds and tests locally. Wins over the caller's runs_build input
-# (engine PR #51 and later).
+# developer builds and tests locally. This is the only place runs_build is set.
 runs_build: false
 
 # Narrow the test run to a subset. Blank => run the whole suite.

@@ -47,8 +47,6 @@ model; plus contract_files from config) to
 run, commit, base, files) and an optional model-written summary
 (contract-<repo>.md). collect-audit and the workflow publish them to the
 harness-metrics branch only — the run's audit folder and contracts/<feature_id>/.
-Contract-only mode does the same copy for a change made outside the harness,
-with no model call.
 
 SAMPLES
 Mocked samples are made in the DOWNSTREAM run, from an attached OpenAPI file,
@@ -694,9 +692,9 @@ def prompt_block(repo_root: Path, boundary: list) -> str:
     )
 
 
-def finalize(repo_root: Path, cfg, run, changed: list, log=print, force: bool = False) -> dict:
+def finalize(repo_root: Path, cfg, run, changed: list, log=print) -> dict:
     """Stage this repo's contract files for publishing. Never raises.
-    force=True (contract-only mode) publishes even when no contract file changed.
+    Nothing is published when no contract file changed.
     Returns {status: published|none|missing, ...}; stored on run.contract_output."""
     import attachments as AT
     root = Path(repo_root)
@@ -713,7 +711,7 @@ def finalize(repo_root: Path, cfg, run, changed: list, log=print, force: bool = 
                 f"file ({', '.join(specs)}) was not updated")
             print(f"::warning title=OpenAPI not updated::API files changed but "
                   f"{', '.join(specs)} did not. Update the OpenAPI file with the API change.")
-        if not boundary and not force:
+        if not boundary:
             log("  [contract] no contract files changed — nothing to hand off")
             return _store(run, info)
 

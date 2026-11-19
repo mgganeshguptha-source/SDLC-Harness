@@ -800,6 +800,37 @@ def _build_review_dossier(repo_root: Path, log=print,
     return dossier
 
 
+_TEST_NAME_FORMS = ("{0}Test", "{0}Tests", "{0}IT", "{0}ITCase", "{0}TestCase", "Test{0}")
+
+
+def _existing_tests_for(repo_root: Path, test_root: Path, changed: list) -> list:
+    """Existing test files for the changed production classes, anywhere under
+    the test tree: files named after a changed class (FooTest, FooTests, FooIT,
+    TestFoo ...) and test files the plan names that already exist."""
+    names = set()
+    for rel in changed:
+        stem = Path(rel).stem
+        if str(rel).endswith(".java") and stem:
+            names.update(form.format(stem) for form in _TEST_NAME_FORMS)
+    found: list[Path] = []
+    try:
+        for f in sorted(test_root.rglob("*.java")):
+            if f.stem in names and f not in found:
+                found.append(f)
+    except Exception:
+        pass
+    try:
+        plan = (repo_root / ".harness" / "prompt-steps.md").read_text(encoding="utf-8")
+        test_rel = test_root.relative_to(repo_root).as_posix()
+        for m in re.finditer(r"[\w./\-]*" + re.escape(test_rel) + r"/[\w./\-]+\.java", plan):
+            f = repo_root / m.group(0).lstrip("./")
+            if f.is_file() and f not in found:
+                found.append(f)
+    except Exception:
+        pass
+    return found
+
+
 def _build_unittest_dossier(repo_root: Path, log=print,
                             changed_hint: list | None = None) -> str | None:
     """Inline EVERYTHING the test author needs, so it never explores the repo.
@@ -901,10 +932,34 @@ def _build_unittest_dossier(repo_root: Path, log=print,
             if cand and cand.is_dir() and cand not in pkg_dirs:
                 pkg_dirs.append(cand)
 
+        # The test class(es) that ALREADY exist for a changed class, wherever
+        # they live. They are often NOT in the same package folder: in
+        # petclinic-rest-api the controller is in rest/controller/v1/ and its
+        # test in rest/controller/. Without the file inline (and reads denied)
+        # the agent could not extend it and wrote a parallel test class instead
+        # (PC-203, 2026-11-16). These come first and do not count against the
+        # sibling budget.
+        own_tests = _existing_tests_for(repo_root, test_root, changed)
+        for f in own_tests[:4]:
+            try:
+                text = f.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if len(text) > _DOSSIER_FILE_CAP:
+                text = text[:_DOSSIER_FILE_CAP] + "\n... [TRUNCATED by harness — file cap reached]"
+            rel_f = f.relative_to(repo_root).as_posix()
+            parts.append(
+                f"--- EXISTING TEST CLASS FOR THE CODE UNDER TEST (add your tests to THIS "
+                f"file; full current content): {rel_f} ---\n{text}"
+            )
+        if own_tests:
+            log("  [unit_testing] existing test class(es) for the changed code inlined: "
+                + ", ".join(f.relative_to(repo_root).as_posix() for f in own_tests[:4]))
+
         sibling_tests: list[Path] = []
         for d in pkg_dirs:
             for f in sorted(d.glob("*.java")):
-                if f not in sibling_tests:
+                if f not in sibling_tests and f not in own_tests:
                     sibling_tests.append(f)
 
         budget = 6  # cap: enough to convey conventions, not the whole suite
@@ -986,6 +1041,38 @@ def _generated_naming_block(repo_root: Path) -> str:
             "\nA new schema you add to the OpenAPI file produces a new class with the "
             "same naming rule. Reference generated classes only by these names, and "
             "never hand-write a class that the generator produces.")
+
+
+def _run_changes_block(repo_root: Path, run) -> str:
+    """The files this run changed or added, listed by the harness from git, for
+    the AC check. Without it the validator looked only in the test class it
+    expected, found it unchanged and ruled a "tests exist" criterion NOT_MET
+    while the tests sat in a NEW test class (PC-203, 2026-11-16). '' when the
+    list cannot be worked out."""
+    try:
+        import handoff as _HO
+        files = _HO.changed_files(repo_root, _HO.base_ref_from_env())
+        if not files:
+            out = _run_git(repo_root, "status", "--porcelain", "--untracked-files=all")
+            files = sorted({ln[3:].strip().split(" -> ")[-1] for ln in out.splitlines()
+                            if ln[3:].strip() and not ln[3:].strip().startswith(".harness/")})
+        files = [f for f in files if not f.startswith((".harness/", "audit/", "metrics/"))]
+        if not files:
+            return ""
+        tests = [f for f in files if "/test/" in f"/{f}" or f.endswith((".spec.ts", ".test.ts"))]
+        other = [f for f in files if f not in tests]
+        lines = ["FILES THIS RUN CHANGED OR ADDED (listed by the harness from git):"]
+        lines += [f"  production / other: {f}" for f in other[:60]]
+        lines += [f"  test: {f}" for f in tests[:60]]
+        if len(files) > 120:
+            lines.append(f"  ... and {len(files) - 120} more")
+        lines.append(
+            "Tests for a criterion may be in ANY test file on this list, including a "
+            "new test class. Read every test file listed before ruling that a test "
+            "is missing; do not look only in the test class you expect.")
+        return "\n".join(lines) + "\n"
+    except Exception:
+        return ""
 
 
 def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
@@ -1148,11 +1235,18 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write unit tests under {src_test} that verify:\n  STORY: {story}\n"
             f"Do NOT modify application code under {src_main}. Tests only.\n"
             f"EVERYTHING you need is provided INLINE below: the production code under "
-            f"test, the implementation plan, existing tests in the same package (follow "
-            f"their conventions, imports, and fixtures), and a listing of the whole test "
-            f"tree. Do NOT read, open, list, glob, or search any file — file-read access "
-            f"is DISABLED for this phase and any read attempt will be denied. Do not ask "
-            f"for more files; nothing else is in scope. Write the test file immediately.\n\n"
+            f"test, the implementation plan, the existing test class for that code when "
+            f"one exists, existing tests in the same package (follow their conventions, "
+            f"imports, and fixtures), and a listing of the whole test tree.\n"
+            f"WHERE THE TESTS GO: when a section below is headed 'EXISTING TEST CLASS "
+            f"FOR THE CODE UNDER TEST', add your tests to THAT file and keep everything "
+            f"already in it; do not create a second test class for the same code. "
+            f"Create a new test class only when no such section is present, or the "
+            f"plan names a new one.\n"
+            f"Do NOT read, list, glob, or search other files — exploratory reads are "
+            f"DENIED in this phase. The one exception: you may open a test file under "
+            f"{src_test} that you are about to edit. Do not ask for more files; "
+            f"nothing else is in scope. Write the tests immediately.\n\n"
             f"================ TEST CONTEXT (inlined by harness) ================\n\n"
             f"{unittest_dossier}\n\n"
             f"================ END TEST CONTEXT ================\n"
@@ -1207,7 +1301,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     except Exception:
         pass
 
-    # Build/test gate off (HARNESS_RUNS_BUILD=false): nothing was compiled or
+    # Build/test gate off (runs_build: false in .harness/config.yaml): nothing was compiled or
     # run, so validation judges by reading code and the PR must not claim green.
     # On (default): the harness gate already built and tested — add nothing.
     if harness_runs_build(repo_root / ".harness"):
@@ -1574,6 +1668,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"unknown, not satisfied, and is the one most likely to be broken "
             f"because nothing has ever exercised it.\n"
             f"{build_status_validation}"
+            f"{_run_changes_block(repo_root, run)}"
             f"Write the result to this EXACT file (its parent .harness ALREADY "
             f"EXISTS, do not mkdir, shell is disallowed): {validation_file}\n"
             f"The verdict line is machine-read and its form is fixed — emit exactly "

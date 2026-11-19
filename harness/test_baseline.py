@@ -246,10 +246,11 @@ def test_missing_library_halts_as_environment_and_is_not_saved(repo):
 def test_check_is_skipped_when_it_does_not_apply(repo, monkeypatch):
     hd = repo / ".harness"
     run = new_run()
-    monkeypatch.setenv("HARNESS_RUNS_BUILD", "false")
+    _cfg = (hd / "config.yaml").read_text()
+    (hd / "config.yaml").write_text(_cfg + "\nruns_build: false\n")
     assert BL.needed(run, hd) == (False, "runs_build is false")
     assert BL.ensure(run, repo, hd, log=quiet) is True and builds(repo) == 0
-    monkeypatch.delenv("HARNESS_RUNS_BUILD")
+    (hd / "config.yaml").write_text(_cfg)
     run.mode = "analysis"
     assert BL.needed(run, hd)[0] is False
     run.mode = "build"

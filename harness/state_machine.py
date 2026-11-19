@@ -33,7 +33,7 @@ import halt_gates as HG
 # ---- HARNESS BUILD/TEST GATE ----
 # On by default: after 'unit_testing' the harness builds the code, runs the
 # tests and the coverage gate, and loops back on red / low coverage. Switch off
-# with HARNESS_RUNS_BUILD=false (see config.harness_runs_build) when the runner
+# with runs_build: false in .harness/config.yaml (see config.harness_runs_build) when the runner
 # cannot build the repo; the AC conformance phase then judges by reading code.
 from config import harness_runs_build
 
