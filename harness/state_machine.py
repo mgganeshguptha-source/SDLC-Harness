@@ -808,11 +808,20 @@ class StateMachine:
                 # External classes: same stage, same reason. Finding a missing
                 # dependency in coding costs a full phase (OP018-6434).
                 _ext = check_external(_pf, log=self.log)
+                _ev = ""
+                if _ext:
+                    # The table is the planning model's judgement and it reads
+                    # only the module's own POM. Before halting a person, ask
+                    # Maven whether the class is really off the classpath
+                    # (OP018-6434: CXF was inherited from the root POM).
+                    import classpath_check as _CP
+                    _vr = _CP.verify(_ext, self.repo_root, _cfgp, log=self.log)
+                    _ext, _ev = _vr.still_flagged, _CP.evidence_note(_vr)
                 if _ext:
                     from blocked import halt_message as _blocked_msg
                     _d = external_declaration(_ext, self.repo_root, _cfgp.target_module,
                                               getattr(run, "reference_repos", None) or [])
-                    _m = _blocked_msg(run.feature_id, phase.id, _d)
+                    _m = _blocked_msg(run.feature_id, phase.id, _d, verified=_ev)
                     self.log(_m)
                     run.status = "halted"
                     run.halt_gate = HG.MANUAL_CHANGE_REQUIRED

@@ -294,6 +294,7 @@ Flat package under `harness/`.
 | `analysis.py` | Analysis mode: the analysis gate (open questions halt), the analysed-source stamp, publishing the document to the story folder, the PR body |
 | `reference_repos.py` | Reads `.harness/repo_list.yaml`; clones a listed repo when the context phase asks for it, read-only, for that phase only |
 | `plan_check.py` | The plan-path gate; after `prompt_steps`, verifies each planned path sits under a real package root before coding runs, halts on external classes the plan marks UNKNOWN or NEW_DEPENDENCY, and halts on `<placeholder>` file paths |
+| `classpath_check.py` | Checks a flagged external class against the module's real compile classpath before the run halts. A class inherited from a parent POM or pulled in transitively is cleared and the run continues; only a class genuinely absent halts. Needs `runs_build: true`; when the classpath cannot be resolved nothing is cleared |
 | `contracts.py` | The pinned exit-code contract the orchestrator speaks |
 | `executor.py` | The PhaseExecutor: builds the prompt, runs the agent, enforces the write boundary, iteration cap, artifact and scope checks |
 | `boundaries.py` | The write-boundary interlock as a pure function (`is_write_allowed`) |
