@@ -28,6 +28,21 @@ coverage_command: "./mvnw jacoco:report"
 coverage_loopback_phase: "unit_testing"
 max_coverage_retries: 2
 
+# --- unit-test mode (workflow mode: unit-test) ---
+# Read ONLY by a run started with mode: unit-test — tests for EXISTING code, no
+# story. The workflow's test_targets input, when filled, replaces scope /
+# packages / classes for that run. Production code is never changed.
+unit_test:
+  scope: repo                  # repo | packages | classes
+  packages: []                 # scope: packages, e.g. [com.bcbsm.member.claims]
+  classes: []                  # scope: classes, e.g. [com.bcbsm.member.claims.ClaimService]
+  exclude: []                  # extra globs to leave out, added to the defaults
+  use_default_excludes: true   # *Application, *Config*, config/, dto/, *Dto, package-info
+  min_coverage: 90             # target for the batch taken together (0.90 also accepted)
+  coverage_metric: LINE        # LINE | BRANCH | INSTRUCTION | METHOD
+  max_classes_per_run: 5       # batch size; lowest coverage first; the PR lists the rest
+  max_phase_runs: 5            # cap on unit_testing runs (first pass + loopbacks)
+
 # ---------------------------------------------------------------- write boundary
 write_exclude:                          # deny-wins; the -openapi-code module is
   - "**/generated/**"                   # auto-excluded too

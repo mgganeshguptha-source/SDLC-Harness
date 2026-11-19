@@ -1257,14 +1257,25 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Do NOT modify application code under {src_main}. Tests only."
         )
 
+    # Unit-test mode (unit_test_mode.py): tests for EXISTING code, judged as
+    # tests. The build-mode prompts talk about a story and a change, and the
+    # build-mode reviewer is told never to look at tests — neither fits.
+    import unit_test_mode as _UTp
+    _ut_mode = _UTp.is_unit_test(run)
+    if _ut_mode:
+        unit_testing_task = _UTp.unit_testing_task(run, rr, src_main, src_test,
+                                                   unittest_dossier)
+        code_review_task = _UTp.review_task(run, rr, review_dossier, src_main, src_test)
+
     # Test resources for API payloads: mocked only (handoff / Swagger standard).
-    unit_testing_task += (
-        "\nIf this change adds or changes an API request or response, create or update "
-        "the JSON request/response test resources the tests need under the test "
-        "resources folder (e.g. src/test/resources). Build their values from the "
-        "OpenAPI schema / DTO types with invented values ('sample-<field>', 1, false, "
-        "'2026-01-01'); NEVER copy values from existing test resource files — they may "
-        "hold real member data.\n")
+    if not _ut_mode:
+        unit_testing_task += (
+            "\nIf this change adds or changes an API request or response, create or update "
+            "the JSON request/response test resources the tests need under the test "
+            "resources folder (e.g. src/test/resources). Build their values from the "
+            "OpenAPI schema / DTO types with invented values ('sample-<field>', 1, false, "
+            "'2026-01-01'); NEVER copy values from existing test resource files — they may "
+            "hold real member data.\n")
 
     # coding prompt: state the APPROVED file list explicitly. The scope gate will
     # halt the phase if it creates production files the plan never listed, so it is
@@ -1699,13 +1710,13 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
             f"above) {_repo_instr}."
         ),
-        "raise_pr": (
+        "raise_pr": (_UTp.raise_pr_task(run, pr_body, build_status_pr) if _ut_mode else (
             f"Summarize the change for a pull request body and write it to "
             f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
             f"{pr_body}\n  STORY: {story}\n"
             f"{build_status_pr}"
             f"Write ONLY {pr_body}."
-        ),
+        )),
     }
 
     # A phase added to phases.py but not here previously died with a bare
@@ -1815,6 +1826,7 @@ class SdkAgentRunner:
         # sample-book-service-application/src/main/**) was denied live — the agent
         # thrashed and aborted before the executor's correct check ever ran.
         # Resolve here, close over (eff_allowed, eff_exclude) in the callback.
+        _cfgb = None
         try:
             from config import HarnessConfig as _HCb
             _cfgb = _HCb.load(repo_root / ".harness", repo_root=repo_root)
@@ -1836,12 +1848,24 @@ class SdkAgentRunner:
         # Make the folders the approved plan needs before the session starts.
         if phase.id in ("coding", "unit_testing"):
             ensure_planned_dirs(repo_root, phase.id, eff_allowed, eff_exclude, log=self.log)
+        import unit_test_mode as _UT
+        _ut_mode = _UT.is_unit_test(run)
+        _cfg_ut = _cfgb
+        if _ut_mode and phase.id == "unit_testing" and _cfg_ut is not None:
+            # No plan in this mode: make the test-package folders of the batch.
+            _UT.ensure_test_dirs(repo_root, _cfg_ut, run, log=self.log)
 
         # PUSH-MODE REVIEW: build the dossier deterministically BEFORE the SDK
         # call (zero LLM tokens). If it builds, the reviewer gets everything
         # inline and read access is disabled below; if not, legacy pull mode.
         review_dossier: str | None = None
-        if phase.id == "code_review":
+        if phase.id == "code_review" and _ut_mode and _cfg_ut is not None:
+            # Unit-test mode reviews the TESTS this run wrote.
+            review_dossier = _UT.review_dossier(repo_root, run, _cfg_ut, log=self.log)
+            if review_dossier is None:
+                self.log("  [review] no test files found for the unit-test review — "
+                         "falling back to pull-mode review (reads allowed)")
+        elif phase.id == "code_review":
             review_dossier = _build_review_dossier(
                 repo_root, log=self.log,
                 changed_hint=getattr(run, "changed_main_files", None))
@@ -1857,11 +1881,14 @@ class SdkAgentRunner:
         if phase.id == "unit_testing":
             unittest_dossier = _build_unittest_dossier(
                 repo_root, log=self.log,
-                changed_hint=getattr(run, "changed_main_files", None))
+                changed_hint=_UT.coverage_targets(run))
             if unittest_dossier is None:
                 self.log("  [unit_testing] dossier unavailable — falling back to "
                          "story-only prompt (reads allowed)")
-        unittest_push_mode = unittest_dossier is not None
+        # Unit-test mode writes tests for code nobody just changed: the test
+        # author needs the collaborators, DTOs and interfaces of the classes
+        # under test, which the dossier cannot know in advance. Reads stay on.
+        unittest_push_mode = unittest_dossier is not None and not _ut_mode
         # Reads are denied whenever a phase runs in push mode: everything in scope
         # is already inline, so a read is exploration we are paying for twice.
         push_mode = review_push_mode or unittest_push_mode

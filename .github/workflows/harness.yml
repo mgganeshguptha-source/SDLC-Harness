@@ -61,10 +61,26 @@ on:
           file, the root-cause and impact document
           (stories/<feature_id>/<feature_id>-bug-analysis.md). No code is
           changed. A lead reviews and merges that PR; a later build run of the
-          same feature_id reads the document from the story folder. Fixed when
-          the run starts: a resume keeps the mode the run was started in.
+          same feature_id reads the document from the story folder.
+          unit-test: unit tests for EXISTING code (no story needed). The harness
+          picks the classes (test_targets, else the repo's unit_test config),
+          measures their coverage, then unit_testing -> build + coverage gate
+          (loops back until the target is met, bounded) -> review of the tests
+          -> a PR with test files only. Production code is never changed.
+          Fixed when the run starts: a resume keeps the mode the run was
+          started in.
         required: false
         default: "build"
+        type: string
+      test_targets:
+        description: >-
+          unit-test mode only. What to write tests for, comma separated:
+          packages (com.x.claims), classes (com.x.claims.ClaimService or
+          ClaimService) or repo-relative paths (src/app/claims). Blank = the
+          service repo's `unit_test:` config (scope repo | packages | classes).
+          Ignored in other modes and on a resume.
+        required: false
+        default: ""
         type: string
       java-version:
         required: false
@@ -253,16 +269,21 @@ jobs:
         run: |
           MODE="${{ inputs.mode }}"
           case "$MODE" in
-            build|analysis) echo "Run mode: $MODE" ;;
-            *) echo "::error title=Unknown mode::mode must be 'build' or 'analysis' (got '$MODE'). The harness has not started."; exit 1 ;;
+            build|analysis|unit-test) echo "Run mode: $MODE" ;;
+            *) echo "::error title=Unknown mode::mode must be 'build', 'analysis' or 'unit-test' (got '$MODE'). The harness has not started."; exit 1 ;;
           esac
           if [ "${{ inputs.contract_only }}" = "true" ]; then
             echo "::error title=Contract-only mode removed::contract_only is no longer supported. Remove contract_only and contract_branch from the caller workflow. The harness has not started."
             exit 1
           fi
           if [ "${{ inputs.runs_build }}" != "true" ]; then
-            echo "::warning title=runs_build input ignored::The caller passes runs_build=false, which is no longer read. Set 'runs_build: false' in .harness/config.yaml instead; without it the harness builds the code."
+            echo "::warning title=runs_build input ignored::The caller passes runs_build=false, which is no longer read. Set 'runs_build: false' in .harness/config.yaml instead."
           fi
+          if [ "$MODE" = "unit-test" ]; then
+            echo "Test targets: ${TEST_TARGETS:-(from .harness/config.yaml unit_test)}"
+          fi
+        env:
+          TEST_TARGETS: ${{ inputs.test_targets }}
 
       # --- 1. the CALLER's service repo -> ./service ---
       # On resume, check out the WORKING BRANCH rather than the default branch.
@@ -591,12 +612,16 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
+          # Passed through env, not pasted into the script, so free text from
+          # the form cannot become shell.
+          TEST_TARGETS: ${{ inputs.mode == 'unit-test' && inputs.test_targets || '' }}
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
           python run.py init \
             --repo ../../service \
             --feature "${{ inputs.feature_id }}" \
-            --mode "${{ inputs.mode }}"
+            --mode "${{ inputs.mode }}" \
+            --test-targets "$TEST_TARGETS"
 
       # Rewind the loaded state to the phase we are re-entering, and reset the
       # retry budgets that stopped the last run — otherwise the gate that halted
@@ -756,7 +781,8 @@ jobs:
           # ON ITS OWN: `git add -f a b` aborts entirely when one path is missing,
           # and blocked.md does not exist on every halt (e.g. an environment
           # failure) — which is how run-state.json went missing before.
-          for f in .harness/run-state.json .harness/blocked.md; do
+          # suspected-defects.md: unit-test mode's list for the PR body.
+          for f in .harness/run-state.json .harness/blocked.md .harness/suspected-defects.md; do
             if [ -f "$f" ]; then git add -f "$f"; fi
           done
           # The phase artifacts later phases read — the context file(s), the
@@ -1038,11 +1064,13 @@ jobs:
           # failed PR create leaves pr_raised=false, so the WIP branch is KEPT and
           # the change is never lost.
           PR_BODY="$WORKTREE/pr-body.md"
+          PR_TITLE="Harness: $FEATURE"
+          if [ "$MODE" = "unit-test" ]; then PR_TITLE="Harness unit tests: $FEATURE"; fi
           if [ -f "$PR_BODY" ]; then
-            gh pr create --title "Harness: $FEATURE" --body-file "$PR_BODY" --base "$PR_BASE" --head "$BRANCH" \
+            gh pr create --title "$PR_TITLE" --body-file "$PR_BODY" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           else
-            gh pr create --title "Harness: $FEATURE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" \
+            gh pr create --title "$PR_TITLE" --body "Automated harness change for $FEATURE" --base "$PR_BASE" --head "$BRANCH" \
               && echo "pr_raised=true" >> "$GITHUB_OUTPUT" || { echo "PR create skipped"; echo "pr_raised=false" >> "$GITHUB_OUTPUT"; }
           fi
           rm -rf "$WORKTREE"

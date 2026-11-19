@@ -58,6 +58,10 @@ _BLOCKING_CLASSES = {
     "CONCURRENCY",      # thread-safety, resource leaks
     "SECURITY",         # injection, secret exposure, missing authz
     "ERROR_HANDLING",   # errors swallowed or surfaced wrongly
+    # Unit-test mode only (the reviewer judges TESTS there, unit_test_mode.py).
+    # A build-mode reviewer is never told about these two classes.
+    "ASSERTION",        # a test that checks nothing (coverage without assertions)
+    "ISOLATION",        # real network/DB/files/sleeps in a unit test: flaky
 }
 # Tolerate the spellings a model naturally produces for the same class.
 _CLASS_ALIASES = {
@@ -68,6 +72,10 @@ _CLASS_ALIASES = {
     "CONCURRENCY SAFETY": "CONCURRENCY",
     "THREAD SAFETY": "CONCURRENCY",
     "API CONTRACT": "CONTRACT",
+    "ASSERTIONS": "ASSERTION",
+    "NO ASSERTION": "ASSERTION",
+    "FLAKY": "ISOLATION",
+    "FLAKINESS": "ISOLATION",
 }
 _CLASS_PREFIX = re.compile(r"^\(\s*([A-Za-z_/ -]+?)\s*\)\s*(.*)$", re.DOTALL)
 

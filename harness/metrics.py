@@ -67,7 +67,10 @@ from pathlib import Path
 # published for review). Records written before v8 are build runs.
 # v9: baseline_status / baseline_failing_tests / baseline_reused (baseline.py)
 # and the baseline_build halt gate.
-SCHEMA_VERSION = 9
+# v10: mode may be "unit-test"; unit_test_targets / unit_test_remaining /
+# unit_test_min_coverage / unit_test_metric / unit_test_coverage_before /
+# unit_test_coverage_after (unit_test_mode.metrics_fields) on those runs only.
+SCHEMA_VERSION = 10
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -277,6 +280,12 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
             v = m.get(metric)
             if isinstance(v, (int, float)):
                 rec[f"usage_{key}_{metric}"] = v
+
+    try:
+        from unit_test_mode import metrics_fields
+        rec.update(metrics_fields(run))
+    except Exception:
+        pass
 
     _add_context_metrics(rec, repo_root, cfg, log)
     _add_validation_metrics(rec, repo_root, log)

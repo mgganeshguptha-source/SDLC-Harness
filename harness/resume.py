@@ -160,7 +160,8 @@ def refresh_story(run: RunState, repo: Path, base_ref: str, story_file: str,
 
     # The first story-reading phase: context in a build run, bug_analysis in an
     # analysis run (where it is the only phase, so the story is always reloaded).
-    _reader = "bug_analysis" if getattr(run, "mode", "build") == "analysis" else "context"
+    _reader = phases_for(getattr(run, "mode", None))[0].id if getattr(run, "mode", "build") != "build" \
+        else "context"
     if _phase_index(run.current_phase, run) <= _phase_index(_reader, run):
         if new_hash == old_hash:
             log(f"  [resume] story {path} on {base_ref} is UNCHANGED since the last "
@@ -254,7 +255,12 @@ def main(argv=None) -> int:
 
     target = args.phase or run.current_phase
     rewind(run, target)
-    if args.base_ref:
+    if args.base_ref and (getattr(run, "mode", None) or "") == "unit-test":
+        # Unit-test runs have no story to refresh: the batch and the task text
+        # were fixed when the run started, and the shared story file belongs to
+        # some other story.
+        print("  [resume] unit-test run — task and batch kept as started")
+    elif args.base_ref:
         from config import HarnessConfig
         _cfg = HarnessConfig.load(harness_dir)
         refresh_story(run, repo, args.base_ref, _cfg.story_file)

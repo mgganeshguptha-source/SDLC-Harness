@@ -711,7 +711,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
                    changed_files: list | None = None,
                    known_failing: list | None = None,
                    baseline: bool = False,
-                   compile_command: str | None = None) -> ValidationResult:
+                   compile_command: str | None = None,
+                   config_override=None) -> ValidationResult:
     """Run the repo's test command and judge the result.
 
     known_failing: tests that already failed on the base branch (baseline.py).
@@ -723,8 +724,11 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     compile_command: run THIS command instead of the test command — the compile
         check after coding (compile_check.py). No formatting step, no coverage
         gate; the same environment-failure classification applies.
+    config_override: an already-loaded HarnessConfig to use instead of loading
+        .harness/config.yaml — unit-test mode passes one with its own coverage
+        target and metric applied (unit_test_mode.apply_overrides).
     """
-    cfg = HarnessConfig.load(harness_dir)
+    cfg = config_override if config_override is not None else HarnessConfig.load(harness_dir)
     # Per-test judgement needs Maven to run every module even when tests fail.
     _tolerant = baseline or bool(known_failing)
     _build_env = None

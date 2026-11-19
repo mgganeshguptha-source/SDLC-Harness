@@ -15,7 +15,7 @@ on:
         required: true
         type: string
       mode:
-        description: "build = make the change and open a code PR. analysis = bug-fix analysis only: opens a PR with one root-cause and impact document for review, no code change."
+        description: "build = make the change and open a code PR. analysis = bug-fix analysis only: opens a PR with one root-cause and impact document for review, no code change. unit-test = add unit tests to existing code until the coverage target is met: opens a PR with test files only."
         # After the analysis PR is reviewed and merged into the story branch,
         # run again with mode: build and the same feature_id and base to make
         # the fix. A resume keeps the mode the run was started in.
@@ -25,6 +25,15 @@ on:
         options:
           - build
           - analysis
+          - unit-test
+      test_targets:
+        description: "unit-test mode only: packages, classes or paths to test, comma separated (e.g. com.bcbsm.claims, ClaimService, src/app/claims). Blank = unit_test in .harness/config.yaml."
+        # No story file is needed in unit-test mode; feature_id is the sprint
+        # task id. A story file named for it (stories/<feature_id>.md), if
+        # present, is passed to the test author as task notes.
+        required: false
+        default: ""
+        type: string
       resume:
         description: "Continue a halted run from harness-wip/<feature_id>. Use this after answering clarification questions too: the story is re-read from the story branch."
         # NOTE: a resume reads .harness/config.yaml from harness-wip/<feature_id>,
@@ -98,6 +107,7 @@ jobs:
       python-version: "3.13"
       node-version: "22"   # Node 20 is deprecated on GitHub runners
       mode: ${{ inputs.mode }}
+      test_targets: ${{ inputs.test_targets }}
       resume: ${{ inputs.resume }}
       confirm_no_phi: ${{ inputs.confirm_no_phi }}
 #      start_phase: ${{ inputs.start_phase }}
