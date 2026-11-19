@@ -254,7 +254,14 @@ h1{font-size:24px;line-height:1.2;margin:0 0 4px;color:var(--navy)}
 select{font:14px var(--font);color:var(--ink);background:#fff;border:1px solid var(--axis);border-radius:6px;padding:6px 10px;min-width:170px}
 select:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:20px 0}
-.tile{background:var(--panel);border-radius:8px;padding:14px 16px;border-left:4px solid var(--accent)}
+.tile{background:var(--panel);border-radius:8px;padding:14px 16px;border:0;border-left:4px solid var(--accent);font:inherit;text-align:left;cursor:pointer;display:block;width:100%}
+.tile:hover{filter:brightness(.97)} .tile:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tile.sel{outline:2px solid var(--navy);outline-offset:1px;background:#fff}
+.tile.wait{border-left-color:var(--wait)}
+section.full{margin-bottom:16px}
+td.reason{overflow-wrap:anywhere;min-width:32ch}
+.showing{font-size:13px;color:var(--ink-2);margin:0 0 12px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.showing button{font:12.5px var(--font);color:var(--accent);background:#fff;border:1px solid var(--accent);border-radius:999px;padding:2px 10px;cursor:pointer}
 .tile.good{border-left-color:var(--good)} .tile.bad{border-left-color:var(--bad)}
 .tile b{display:block;font-size:30px;line-height:1.1;color:var(--ink)}
 .tile span{font-size:13px;color:var(--ink-2)}
@@ -317,8 +324,6 @@ button.tog span{display:inline-block;width:14px}
     <h2>Where runs stop</h2>
     <p class="sub">Runs that did not finish, by the gate that stopped them.</p>
     <div class="bars" id="halts"></div>
-    <h3>Reasons recorded</h3>
-    <div class="scroll"><table id="haltTable"></table></div>
   </section>
   <section>
     <h2>Story readiness</h2>
@@ -326,6 +331,12 @@ button.tog span{display:inline-block;width:14px}
     <div class="bars" id="clar"></div>
   </section>
 </div>
+
+<section class="full">
+  <h2>Reasons recorded</h2>
+  <p class="sub">Every run that did not finish, with the reason the harness recorded. These are past runs: a story listed here may have been completed by a later run.</p>
+  <div class="scroll"><table id="haltTable"></table></div>
+</section>
 
 <div class="grid">
   <section>
@@ -353,14 +364,15 @@ button.tog span{display:inline-block;width:14px}
   </section>
   <section>
     <h2>Time by phase</h2>
-    <p class="sub">Average minutes per run, for each phase the run executed.</p>
+    <p class="sub">Average time one run spends in each phase it executed.</p>
     <div class="bars" id="time"></div>
   </section>
 </div>
 
-<section>
+<section id="storiesSec">
   <h2>Stories</h2>
-  <p class="sub">One row per story. Open a row to see each run behind it.</p>
+  <p class="sub">One row per story. Open a row to see each run behind it. Select a tile at the top to list only the stories or runs it counts.</p>
+  <div class="showing" id="showing"></div>
   <div class="scroll"><table id="stories"></table></div>
 </section>
 
@@ -373,7 +385,7 @@ const DATA=/*__DATA__*/null;
 const META=DATA.meta, RUNS=DATA.runs, PH=META.phases;
 const LABEL={done:'Completed',halted:'Halted',needs_input:'Needs input'};
 const ICON={done:'✓',halted:'■',needs_input:'?'};
-const GATE={clarification:'Clarification',baseline_build:'Base branch build',config_error:'Environment / config',coverage:'Coverage',scope:'Scope',review:'Review',ac:'Acceptance criteria',validation:'Tests',plan_path:'Plan path',blocker:'Blocker'};
+const GATE={clarification:'Clarification',feasibility:'Not feasible in this repo',write_boundary:'Write outside allowed paths',scope:'Scope',code_review:'Code review',review:'Code review',coverage:'Coverage',test_build:'Build or tests',validation:'Build or tests',ac_conformance:'Acceptance criteria',ac:'Acceptance criteria',artifact_missing:'Phase produced no artifact',iteration_cap:'Turn budget used up',phase_run_cap:'Phase re-entered too often',manual_change_required:'Manual change needed',input_guard:'Input guard (PII, type, size)',dependencies_missing:'Contract line missing in story',contract_missing:'Upstream contract missing',reference_repo:'Reference repo',baseline_build:'Base branch build',sdk_error:'SDK or sign-in failure',config_error:'Environment / config',plan_path:'Plan path',blocker:'Blocker',other:'Unclassified'};
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short=r=>r.indexOf('/')>=0?r.split('/').slice(1).join('/'):r;
@@ -383,7 +395,21 @@ const gateOf=r=>r.gate||(r.st==='needs_input'?'clarification':'not recorded');
 const gateName=g=>GATE[g]||g;
 const pill=r=>`<span class="pill ${kind(r.st)}" title="status: ${esc(r.st)}">${ICON[kind(r.st)]} ${LABEL[kind(r.st)]}</span>`;
 const plural=(v,w)=>v+' '+w+(v===1?'':'s');
+// Durations in words: 42 sec, 1 min 30 sec, 1 h 5 min.
+const dur=s=>{s=Math.round(Number(s)||0);if(s<60)return s+' sec';const m=Math.floor(s/60),x=s%60;
+  if(m<60)return m+' min'+(x?' '+x+' sec':'');return Math.floor(m/60)+' h'+(m%60?' '+(m%60)+' min':'')};
 const openRows=new Set();
+// The tile the reader selected: it limits the Stories table to what the tile counts.
+// story: a test on a story (its latest run decides). run: a test on a single run.
+const TILES={
+  all:{label:'Stories attempted',story:s=>true},
+  done:{label:'Stories completed',story:s=>s.last.st==='done'},
+  open:{label:'Stories not finished yet',story:s=>s.last.st!=='done'},
+  runs:{label:'Runs',run:r=>true},
+  halted:{label:'Runs halted by a gate',run:r=>kind(r.st)==='halted'},
+  clar:{label:'Runs that stopped for clarification',run:r=>kind(r.st)==='needs_input'}
+};
+let sel='';
 
 function fill(sel,opts){sel.innerHTML=opts.map(o=>`<option value="${esc(o[0])}">${esc(o[1])}</option>`).join('')}
 const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -419,17 +445,23 @@ function render(){
   const days=runs.map(r=>r.d).filter(Boolean).sort();
   $('meta').textContent='Generated '+META.generated+(runs.length&&days.length?' · runs from '+days[0]+' to '+days[days.length-1]:'')+' · '+plural(new Set(runs.map(r=>r.repo)).size,'repository').replace('repositorys','repositories');
 
+  // Story tiles describe where each story stands NOW (its latest run). Run tiles
+  // count every run, including earlier attempts of stories completed since.
+  const open=stories.filter(s=>s.last.st!=='done');
+  const waitNow=open.filter(s=>kind(s.last.st)==='needs_input').length, haltNow=open.length-waitNow;
+  const nHalt=stopped.filter(r=>kind(r.st)==='halted').length, nClar=stopped.filter(r=>kind(r.st)==='needs_input').length;
   $('tiles').innerHTML=[
-    ['',stories.length,'Stories attempted',''],
-    ['good',done,'Stories completed',stories.length?done+' of '+stories.length+' (latest run finished)':''],
-    ['',runs.length,'Runs',stories.length?f1(runs.length/stories.length)+' per story on average':''],
-    ['bad',stopped.filter(r=>kind(r.st)==='halted').length,'Runs halted by a gate',''],
-    ['',stopped.filter(r=>kind(r.st)==='needs_input').length,'Runs waiting on clarification','']
-  ].map(t=>`<div class="tile ${t[0]}"><b>${t[1]}</b><span>${t[2]}</span><small>${t[3]}</small></div>`).join('');
+    ['all','',stories.length,'Stories attempted',''],
+    ['done','good',done,'Stories completed',stories.length?done+' of '+stories.length+' (latest run finished)':''],
+    ['open','wait',open.length,'Stories not finished yet',open.length?waitNow+' waiting on clarification, '+haltNow+' halted':'latest run of every story finished'],
+    ['runs','',runs.length,'Runs',stories.length?f1(runs.length/stories.length)+' per story on average':''],
+    ['halted','bad',nHalt,'Runs halted by a gate','all attempts, including stories completed later'],
+    ['clar','',nClar,'Runs that stopped for clarification','all attempts, including stories completed later']
+  ].map(t=>`<button type="button" class="tile ${t[1]}${sel===t[0]?' sel':''}" data-tile="${t[0]}" aria-pressed="${sel===t[0]}" title="List these in the Stories table"><b>${t[2]}</b><span>${t[3]}</span><small>${t[4]}</small></button>`).join('');
 
   const g={}; stopped.forEach(r=>{const k=gateOf(r);g[k]=(g[k]||0)+1});
   bars($('halts'),Object.keys(g).map(k=>({k:gateName(k),v:g[k]})).sort((a,b)=>b.v-a.v),v=>plural(v,'run'));
-  $('haltTable').innerHTML=stopped.length?'<tr><th>Story</th><th>Date</th><th>Gate</th><th>Phase</th><th>Reason</th></tr>'+stopped.map(r=>`<tr><td class="nw">${esc(r.f)}</td><td class="nw">${esc(r.d)}</td><td>${esc(gateName(gateOf(r)))}</td><td>${esc(r.phase)}</td><td>${esc(r.detail)}</td></tr>`).join(''):'';
+  $('haltTable').innerHTML=stopped.length?'<tr><th>Story</th><th>Date</th><th>Gate</th><th>Phase</th><th>Reason</th></tr>'+stopped.map(r=>`<tr><td class="nw">${esc(r.f)}</td><td class="nw">${esc(r.d)}</td><td>${esc(gateName(gateOf(r)))}</td><td>${esc(r.phase)}</td><td class="reason">${esc(r.detail)}</td></tr>`).join(''):'<tr><td class="empty">Every run in this selection finished.</td></tr>';
 
   bars($('clar'),stories.filter(s=>s.cl).map(s=>({k:name(s),v:s.cl})).sort((a,b)=>b.v-a.v),v=>plural(v,'question'));
 
@@ -449,17 +481,22 @@ function render(){
     if(r.pm[p]){mc[p]=mc[p]||{};mc[p][r.pm[p]]=(mc[p][r.pm[p]]||0)+1}
   }));
   bars($('usage'),PH.filter(p=>u[p]).map(p=>({k:p,v:u[p],note:topKey(mc[p]||{})})),v=>f1(v));
-  bars($('time'),PH.filter(p=>tc[p]).map(p=>({k:p,v:tm[p]/tc[p]/60})),v=>f1(v)+' min');
+  bars($('time'),PH.filter(p=>tc[p]).map(p=>({k:p,v:tm[p]/tc[p]})),v=>dur(v));
 
-  $('stories').innerHTML=stories.length?'<tr><th>Story</th><th>Repository</th><th>Latest status</th><th>AC verdict</th><th class="n">Runs</th><th class="n">Questions</th><th class="n">Criteria met</th><th class="n">Loopbacks</th><th class="n">Usage</th><th>Last run</th></tr>'+stories.map(s=>{
-    const o=openRows.has(s.k);
+  const T=TILES[sel]||null, runF=T&&T.run||null;
+  const shown=!T?stories:(T.story?stories.filter(T.story):stories.filter(s=>s.rs.some(runF)));
+  const shownRuns=runF?shown.reduce((a,s)=>a+s.rs.filter(runF).length,0):0;
+  $('showing').innerHTML=T?`<span>Showing: <b>${esc(T.label)}</b> — ${runF?plural(shownRuns,'run')+' in '+plural(shown.length,'story').replace('storys','stories'):plural(shown.length,'story').replace('storys','stories')}${runF?' (only the matching runs are listed under each story)':''}</span><button type="button" id="clearSel">Show all stories</button>`:'';
+  $('stories').innerHTML=shown.length?'<tr><th>Story</th><th>Repository</th><th>Latest status</th><th>AC verdict</th><th class="n">Runs</th><th class="n">Questions</th><th class="n">Criteria met</th><th class="n">Loopbacks</th><th class="n">Usage</th><th>Last run</th></tr>'+shown.map(s=>{
+    const o=openRows.has(s.k)||!!runF, rows=runF?s.rs.filter(runF):s.rs;
     return `<tr><td class="nw"><button class="tog" data-k="${esc(s.k)}" aria-expanded="${o}"><span>${o?'▾':'▸'}</span>${esc(s.f)}</button></td><td>${esc(short(s.repo))}</td><td>${pill(s.last)}</td><td>${esc(s.verdict)}</td><td class="n">${s.rs.length}</td><td class="n">${s.cl}</td><td class="n">${s.ac?s.ac[0]+' of '+(s.ac[0]+s.ac[1]+s.ac[2]):''}</td><td class="n">${s.lb}</td><td class="n">${f1(s.aiu)}</td><td class="nw">${esc(s.last.d)}</td></tr>`+
-    (o?`<tr class="runs"><td colspan="10"><table><tr><th>Started (UTC)</th><th>Status</th><th>By</th><th>Stopped at</th><th>Reason</th><th>Phases executed</th><th class="n">Usage</th><th class="n">Wall clock</th></tr>${s.rs.map(r=>`<tr><td class="nw">${esc(r.t.replace('T',' ').replace('Z','').slice(0,16))}</td><td>${pill(r)}${r.resumed?' <span title="resumed run">↻</span>':''}</td><td>${esc(r.actor)}</td><td>${r.st!=='done'?esc(gateName(gateOf(r))):''}</td><td>${r.st!=='done'?esc(r.detail):''}</td><td>${esc(r.ph.join(', '))}</td><td class="n">${f1(r.aiu)}${r.ok===false?' *':''}</td><td class="n">${Math.round(r.dur/60)} min</td></tr>`).join('')}</table></td></tr>`:'');
+    (o?`<tr class="runs"><td colspan="10"><table><tr><th>Started (UTC)</th><th>Status</th><th>By</th><th>Stopped at</th><th>Reason</th><th>Phases executed</th><th class="n">Usage</th><th class="n">Wall clock</th></tr>${rows.map(r=>`<tr><td class="nw">${esc(r.t.replace('T',' ').replace('Z','').slice(0,16))}</td><td>${pill(r)}${r.resumed?' <span title="resumed run">↻</span>':''}</td><td>${esc(r.actor)}</td><td>${r.st!=='done'?esc(gateName(gateOf(r))):''}</td><td>${r.st!=='done'?esc(r.detail):''}</td><td>${esc(r.ph.join(', '))}</td><td class="n">${f1(r.aiu)}${r.ok===false?' *':''}</td><td class="n nw">${dur(r.dur)}</td></tr>`).join('')}</table></td></tr>`:'');
   }).join(''):'<tr><td class="empty">No stories in this selection.</td></tr>';
 
   const bad=runs.filter(r=>r.ok===false).length, nototal=runs.filter(r=>r.ok===null).length;
   const notes=[
     'Usage is in units reported by the Copilot SDK. It is comparable between runs but is not a dollar or AI-credit figure until reconciled with the organisation billing report.',
+    'Story tiles count stories by their latest run. Run tiles count every run, so a run that halted or stopped for clarification stays counted after a later run completed the story.',
     'Story usage is the sum of its runs. A story is completed when its latest run finished with status done; the AC verdict is shown separately. ↻ marks a resumed run.',
     'Wall clock is the whole workflow run and is longer than the sum of phase times.',
     'Figures describe pilot runs and are observations, not benchmarks.',
@@ -470,6 +507,10 @@ function render(){
   $('notes').innerHTML=notes.map(n=>'<li>'+esc(n)+'</li>').join('');
 }
 
+$('tiles').addEventListener('click',e=>{const b=e.target.closest('[data-tile]');if(!b)return;
+  sel=sel===b.dataset.tile?'':b.dataset.tile;render();
+  if(sel){$('storiesSec').scrollIntoView({behavior:'smooth',block:'start'})}});
+$('showing').addEventListener('click',e=>{if(e.target.id==='clearSel'){sel='';render()}});
 $('fRepo').addEventListener('change',render);
 $('fMonth').addEventListener('change',render);
 $('stories').addEventListener('click',e=>{const b=e.target.closest('button.tog');if(!b)return;const k=b.dataset.k;if(openRows.has(k)){openRows.delete(k)}else{openRows.add(k)}render()});

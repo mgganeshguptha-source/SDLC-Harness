@@ -61,10 +61,8 @@ Write only the repo name.
 - If the upstream story ran through the harness, the same files are already on
   that repo's `harness-metrics` branch under `contracts/<upstream feature_id>/files/`
   (with `manifest.json` showing the commit they came from).
-- If the upstream story was done by hand, run the workflow on the upstream repo
-  with `contract_only: true`, `contract_branch: <branch with the change>` and
-  `base: <the branch it was made against>`. It copies the same files to
-  `harness-metrics` — no AI, no code change, no PR.
+- If the upstream story was done by hand, attach the files from the branch
+  that holds the change.
 
 The harness halts if no contract file is attached (`.yml`, `.yaml`, `.json`,
 `.ts`, or a `## Upstream contract: <repo>` section in the story). It warns when the

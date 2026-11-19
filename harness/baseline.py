@@ -261,7 +261,7 @@ def build(repo_root, harness_dir, log=print) -> tuple[dict, object]:
         "record_type": "baseline",
         "baseline_schema": RECORD_SCHEMA,
         "status": _classify(vr),
-        "summary": vr.summary,
+        "summary": str(vr.summary or "").replace("http://", "hxxp://"),
         "exit_code": vr.exit_code,
         "failing_tests": list(vr.failing_tests or []),
         "tests_seen": int(getattr(vr, "tests_seen", 0) or 0),
@@ -350,6 +350,13 @@ def ensure(run, repo_root, harness_dir, log=print) -> bool:
 
 def _halt(run, rec: dict, harness_dir: Path, log, reused: bool) -> None:
     import halt_gates as HG
+    if str(rec.get("summary") or "").strip() == "BUILD FAILURE":
+        # A result saved before the summary carried its cause.
+        try:
+            from validation import with_cause
+            rec = dict(rec, summary=with_cause("BUILD FAILURE", rec.get("detail") or ""))
+        except Exception:
+            pass
     env = rec.get("status") == "environment"
     base = os.environ.get("HARNESS_BASE_BRANCH") or "the base branch"
     ft = list(rec.get("failing_tests") or [])
@@ -446,11 +453,15 @@ def add_to_pr_body(repo_root, run) -> bool:
     b = getattr(run, "baseline", None) or {}
     still = b.get("still_failing")
     lines = ["", "", PR_MARKER, "## Tests already failing before this change", "",
-             f"These {len(ft)} test(s) failed on the base branch "
+             (f"This test failed" if len(ft) == 1 else f"These {len(ft)} tests failed")
+             + " on the base branch "
              f"(commit `{str(b.get('base_commit') or '')[:12] or 'unknown'}`) before the "
-             "harness changed anything. The build gate ignored them; every other test "
-             "passed. They cannot catch a fault in the code they cover until they are "
-             "fixed.", ""]
+             "harness changed anything. The build gate ignored "
+             + ("it" if len(ft) == 1 else "them") + "; every other test passed. "
+             + ("It cannot catch a fault in the code it covers until it is fixed."
+                if len(ft) == 1 else
+                "They cannot catch a fault in the code they cover until they are fixed."),
+             ""]
     for t in ft[:200]:
         mark = ""
         if isinstance(still, list) and t not in still:

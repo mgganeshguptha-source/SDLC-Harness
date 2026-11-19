@@ -80,7 +80,8 @@ test_command: "npm install --registry=https://registry.npmjs.org/ --no-package-l
 # Whether the harness builds and tests the code itself (the build gate after
 # unit_testing, coverage and their loopbacks). false = the runner cannot build
 # this repo; the developer builds and tests locally before approving the PR.
-# This value wins over the caller workflow's old runs_build input.
+# This is the ONLY place it is set (the caller workflow's old runs_build input
+# is no longer read). Not set = true.
 # true also turns on the baseline build check: before the first AI phase the
 # harness runs test_command once on the untouched base code. A base that does
 # not build halts there; tests that already fail are recorded and ignored at

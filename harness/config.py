@@ -59,29 +59,24 @@ def runs_build_source(harness_dir=None) -> str:
     """Where harness_runs_build() took its value from, for the log."""
     if _config_runs_build(harness_dir) is not None:
         return ".harness/config.yaml"
-    if os.environ.get("HARNESS_RUNS_BUILD", "").strip():
-        return "caller workflow (runs_build input)"
-    return "default"
+    return "default (not set in .harness/config.yaml)"
 
 
 def harness_runs_build(harness_dir=None) -> bool:
     """True when the harness builds the code and runs the unit tests itself.
 
-    Controls the deterministic validation gate after 'unit_testing' (build +
-    tests), the coverage gate and its loopback. Set it false when the runner
-    cannot build the repo — the developer then builds and runs the tests locally
-    before approving the PR, and the validation and raise_pr prompts say so.
+    Controls the baseline build check, the compile check after coding, the
+    deterministic validation gate after 'unit_testing' (build + tests), the
+    coverage gate and its loopback. Set it false when the runner cannot build
+    the repo — the developer then builds and runs the tests locally before
+    approving the PR, and the validation and raise_pr prompts say so.
 
-    Precedence (backlog #8, 2026-11-11): `runs_build` in the service's
-    .harness/config.yaml, next to test_command, when it is set; otherwise the
-    HARNESS_RUNS_BUILD env var (the caller workflow's `runs_build` input, kept
-    for repos that have not moved it yet); otherwise ON.
+    ONE place sets it: `runs_build` in the service's .harness/config.yaml, next
+    to test_command. Not set there = ON. The caller workflow's `runs_build`
+    input and the HARNESS_RUNS_BUILD env var are no longer read (2026-11-16).
     """
     from_config = _config_runs_build(harness_dir)
-    if from_config is not None:
-        return from_config
-    v = os.environ.get("HARNESS_RUNS_BUILD", "").strip().lower()
-    return v not in ("false", "0", "no", "off")
+    return True if from_config is None else from_config
 
 try:
     import yaml  # pyyaml

@@ -144,9 +144,10 @@ def test_missing_library_at_the_compile_check_is_an_environment_halt(repo, tmp_p
 def test_compile_check_is_skipped_when_it_does_not_apply(repo, tmp_path, monkeypatch):
     _compile_setup(repo, tmp_path, "error")
     sm, run = _after_coding(repo)
-    monkeypatch.setenv("HARNESS_RUNS_BUILD", "false")
+    _cfg = (repo / ".harness" / "config.yaml").read_text()
+    (repo / ".harness" / "config.yaml").write_text(_cfg + "\nruns_build: false\n")
     assert sm.step(run).compile_attempts == 0
-    monkeypatch.delenv("HARNESS_RUNS_BUILD")
+    (repo / ".harness" / "config.yaml").write_text(_cfg)
     # "off" disables it; a non-Maven test_command with no compile_command skips it.
     (repo / ".harness" / "config.yaml").write_text(
         'test_command: "mvn test"\ncompile_command: "off"\nmin_coverage: 0\n')

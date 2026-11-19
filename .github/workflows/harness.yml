@@ -149,10 +149,10 @@ on:
         type: string
       runs_build:
         description: >-
-          Harness builds the code, runs the unit tests and the coverage gate
-          after unit_testing (looping back on red or low coverage). Set false
-          when the runner cannot build the repo; the developer then builds and
-          tests locally before approving the PR.
+          NO LONGER USED (2026-11-16). Set runs_build in the service repo's
+          .harness/config.yaml — that is the only place the engine reads it.
+          Kept as an accepted input so callers that still pass it keep
+          starting; delete the line from the caller.
         required: false
         default: true
         type: boolean
@@ -167,19 +167,15 @@ on:
         type: boolean
       contract_only:
         description: >-
-          CONTRACT-ONLY run (handoff.py): publish this repo's contract files
-          (OpenAPI file for a backend repo, src/app/store/ for an Angular repo,
-          plus contract_files) from contract_branch — a change made by the harness
-          OR by hand — to harness-metrics contracts/<feature_id>/. No model call,
-          no code change, no PR, no working branch. base = the branch that change
-          was made against (the story branch).
+          REMOVED (2026-11-16): contract-only mode no longer exists. Kept as an
+          accepted input so callers that still pass it keep starting; a run
+          with contract_only=true stops at its first step. Delete the line
+          from the caller.
         required: false
         default: false
         type: boolean
       contract_branch:
-        description: >-
-          contract_only only: the branch holding the finished change (e.g.
-          harness/<feature>/<actor>-<date>-<run>).
+        description: "REMOVED with contract_only (2026-11-16). Accepted and ignored."
         required: false
         default: ""
         type: string
@@ -276,9 +272,12 @@ jobs:
             build|analysis|unit-test) echo "Run mode: $MODE" ;;
             *) echo "::error title=Unknown mode::mode must be 'build', 'analysis' or 'unit-test' (got '$MODE'). The harness has not started."; exit 1 ;;
           esac
-          if [ "$MODE" != "build" ] && [ "${{ inputs.contract_only }}" = "true" ]; then
-            echo "::error title=Mode conflict::mode '$MODE' cannot be combined with contract_only. The harness has not started."
+          if [ "${{ inputs.contract_only }}" = "true" ]; then
+            echo "::error title=Contract-only mode removed::contract_only is no longer supported. Remove contract_only and contract_branch from the caller workflow. The harness has not started."
             exit 1
+          fi
+          if [ "${{ inputs.runs_build }}" != "true" ]; then
+            echo "::warning title=runs_build input ignored::The caller passes runs_build=false, which is no longer read. Set 'runs_build: false' in .harness/config.yaml instead."
           fi
           if [ "$MODE" = "unit-test" ]; then
             echo "Test targets: ${TEST_TARGETS:-(from .harness/config.yaml unit_test)}"
@@ -296,7 +295,7 @@ jobs:
         with:
           path: service
           fetch-depth: 0
-          ref: ${{ (inputs.contract_only && inputs.contract_branch) || (inputs.resume && format('harness-wip/{0}', inputs.feature_id)) || (inputs.base != '' && inputs.base) || github.ref }}
+          ref: ${{ (inputs.resume && format('harness-wip/{0}', inputs.feature_id)) || (inputs.base != '' && inputs.base) || github.ref }}
 
       # A FRESH run force-pushes harness-wip/<feature> at its end, replacing
       # whatever was there. That is harmless when the branch holds only the
@@ -308,7 +307,7 @@ jobs:
       # commit not made by harness-bot.
       - name: Guard manual changes on the working branch (fresh runs only)
         id: wip_guard
-        if: ${{ !inputs.resume && !inputs.contract_only }}
+        if: ${{ !inputs.resume }}
         working-directory: service
         run: |
           FEATURE="${{ inputs.feature_id }}"
@@ -583,7 +582,6 @@ jobs:
       # (continue-on-error). Same credential as the phases below (see step 6),
       # because the list differs per credential / organisation. No credits spent.
       - name: List available models
-        if: ${{ !inputs.contract_only }}
         continue-on-error: true
         working-directory: engine/harness
         env:
@@ -609,7 +607,7 @@ jobs:
       # `init` WIPES run-state.json, so it must not run when resuming — that was
       # the whole reason a halted run could only ever start over.
       - name: Initialize run (fresh runs only)
-        if: ${{ !inputs.resume && !inputs.contract_only }}
+        if: ${{ !inputs.resume }}
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -632,7 +630,7 @@ jobs:
       # clarifications: on a resume at context the edited story replaces the one
       # captured when the run started (otherwise the same questions come back).
       - name: Rewind state (resume only)
-        if: ${{ inputs.resume && !inputs.contract_only }}
+        if: ${{ inputs.resume }}
         working-directory: engine/harness
         run: |
           export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
@@ -669,30 +667,7 @@ jobs:
             echo "No image attachments to scan (or OCR/scan off) — OCR not installed."
           fi
 
-      # Contract-only mode: copy the repo's contract files from contract_branch,
-      # PII-scan them and stage them (handoff.py) — no model call; collect-audit
-      # and the publish step put them on harness-metrics.
-      - name: Contract only (contract_only)
-        if: inputs.contract_only
-        working-directory: engine/harness
-        env:
-          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
-          COPILOT_MODEL_TOKEN: ${{ secrets.COPILOT_MODEL_TOKEN || github.token }}
-          HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
-          HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
-          HARNESS_CONFIRM_NO_PHI: ${{ inputs.confirm_no_phi }}
-          HARNESS_BASE_BRANCH: ${{ inputs.base != '' && inputs.base || github.ref_name }}
-        run: |
-          export PYTHONPATH="$GITHUB_WORKSPACE/engine/harness"
-          if [ -z "${{ inputs.contract_branch }}" ] || [ -z "${{ inputs.base }}" ]; then
-            echo "::error title=Contract-only run::Set contract_branch (the branch with the finished change) and base (the branch it was made against)."
-            exit 1
-          fi
-          python run.py contract --repo ../../service \
-            --feature "${{ inputs.feature_id }}" --base "${{ inputs.base }}"
-
       - name: Autorun (all phases)
-        if: ${{ !inputs.contract_only }}
         working-directory: engine/harness
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -708,7 +683,6 @@ jobs:
           HARNESS_ENGINE_REF: ${{ inputs.engine_ref }}
           HARNESS_TOOLKIT_REF: ${{ inputs.toolkit_ref }}
           HARNESS_RESUMED: ${{ inputs.resume }}
-          HARNESS_RUNS_BUILD: ${{ inputs.runs_build }}
           HARNESS_TOOLKIT_PROPOSALS: ${{ inputs.toolkit_proposals }}
           # The developer's PII/PHI checkbox — re-checked by the engine's input
           # guard before every model call, and recorded in the metrics record.
@@ -771,7 +745,7 @@ jobs:
       - name: Push working branch (always)
         # Never after the manual-changes guard stopped the run: pushing would
         # overwrite the very commits it protected.
-        if: always() && hashFiles('engine/harness/run.py') != '' && !inputs.contract_only && steps.wip_guard.outcome != 'failure'
+        if: always() && hashFiles('engine/harness/run.py') != '' && steps.wip_guard.outcome != 'failure'
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -946,7 +920,7 @@ jobs:
       # changed, against the branch it will merge into — nothing else.
       - name: Open pull request with the change (success only)
         id: raise_pr
-        if: success() && !inputs.contract_only
+        if: success()
         working-directory: service
         env:
           GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
@@ -1118,7 +1092,7 @@ jobs:
       # PR already touches the same files, the proposal is added to it as a
       # comment instead of opening another PR.
       - name: Propose toolkit change (optional)
-        if: success() && inputs.toolkit_proposals && !inputs.contract_only
+        if: success() && inputs.toolkit_proposals
         continue-on-error: true
         env:
           TOOLKIT_PR_TOKEN: ${{ secrets.TOOLKIT_PR_TOKEN || secrets.COPILOT_GITHUB_TOKEN }}
@@ -1213,4 +1187,13 @@ jobs:
       - name: Explain how to resume (halt only)
         if: failure() && hashFiles('engine/harness/run.py') != ''
         run: |
-          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on branch '${{ inputs.base != '' && inputs.base || github.ref_name }}' (this run's base) instead, then resume with the same base; the resume re-reads the story from there."
+          # The gate the run halted at, from its own state file. A base branch
+          # that does not build cannot be fixed on the working branch, so that
+          # halt gets its own instruction instead of the resume one.
+          GATE=$(python3 -c "import json; print(json.load(open('service/.harness/run-state.json')).get('halt_gate') or '')" 2>/dev/null || echo "")
+          BASE="${{ inputs.base != '' && inputs.base || github.ref_name }}"
+          if [ "$GATE" = "baseline_build" ]; then
+            echo "::notice title=How to continue::The code on '$BASE' does not build before any change by the harness, so no AI phase ran and there is nothing to resume. Fix the build on '$BASE', then start a FRESH run (resume=false)."
+            exit 0
+          fi
+          echo "::notice title=How to resume::This run halted. Fix the code on harness-wip/${{ inputs.feature_id }}, push, then re-run this workflow with resume=true. The phases that already passed will not re-run. If it halted on clarification questions, answer them in the story file on branch '$BASE' (this run's base) instead, then resume with the same base; the resume re-reads the story from there."

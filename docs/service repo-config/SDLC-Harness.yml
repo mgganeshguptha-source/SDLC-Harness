@@ -42,19 +42,6 @@ on:
         required: false
         default: false
         type: boolean
-      # Contract-only mode — hidden from the form for now (under review). To
-      # show it again, uncomment these two inputs AND the two matching lines
-      # under `with:` below. The engine keeps the feature; nothing else changes.
-#      contract_only:
-#        description: "Contract only: publish this repo's contract files (OpenAPI file / src/app/store/) from contract_branch to harness-metrics. No AI, no code, no PR. base = the branch that change was made against."
-#        required: false
-#        default: false
-#        type: boolean
-#      contract_branch:
-#        description: "Contract only: branch holding the finished change (e.g. the approved harness PR branch)."
-#        required: false
-#        default: ""
-#        type: string
       confirm_no_phi:
         description: "I confirm the story and all attachments contain no real PII or PHI (mocked test data only). Required — the harness will not start without it. *"
         # Shown as a checkbox, unticked by default. Must be ticked on EVERY run,
@@ -123,8 +110,6 @@ jobs:
       test_targets: ${{ inputs.test_targets }}
       resume: ${{ inputs.resume }}
       confirm_no_phi: ${{ inputs.confirm_no_phi }}
-#      contract_only: ${{ inputs.contract_only }}      # hidden — see the inputs above
-#      contract_branch: ${{ inputs.contract_branch }}
 #      start_phase: ${{ inputs.start_phase }}
       # Engine + toolkit locations. engine_repo / engine_ref MUST match the
       # repo and @ref in `uses:` above — they are the engine code the job checks
@@ -134,12 +119,7 @@ jobs:
       toolkit_repo: BCBSM/dx_copilot-standards-workspace
       # Toolkit's default branch. All BCBSM repos use 'master' (no 'main').
       toolkit_ref: master
-      # DEPRECATED: set runs_build in .harness/config.yaml instead; that value
-      # wins. This input is only used when config.yaml does not set it.
-      # Harness builds the code, runs unit tests + the coverage gate after
-      # unit_testing (loops back on red / low coverage). false = skip; the
-      # developer builds and tests locally before approving the PR.
-      runs_build: true
+      # runs_build is set in .harness/config.yaml only (not here).
       # Git library store, for runners that cannot reach the company artifact
       # repository. Internal libraries come from the store's repository folders
       # (e.g. bcbsm-libs/, Maven layout); public libraries come from Maven

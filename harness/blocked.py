@@ -105,8 +105,22 @@ def looks_like_build_file(paths) -> str | None:
     return None
 
 
+def _wrap(text: str, width: int = 72):
+    """Fold a sentence onto lines that fit the halt message's box."""
+    words, lines, cur = str(text).split(), [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
 def halt_message(feature_id: str, phase_id: str, decl: BlockedDeclaration,
-                 detected_path: str | None = None) -> str:
+                 detected_path: str | None = None, verified: str = "") -> str:
     """The message a developer reads. It must answer three questions: what do I
     change, why could the harness not do it, and how do I continue."""
     needs = decl.needs or (
@@ -131,9 +145,16 @@ def halt_message(feature_id: str, phase_id: str, decl: BlockedDeclaration,
     if decl.suggested:
         m += f"\n  Suggested change:\n    {decl.suggested}\n"
     m += "\n  Check first:\n"
-    m += "    This is the agent's finding, not a confirmed fact. It may not see\n"
-    m += "    classes inside library JARs or classes generated during the build.\n"
-    m += "    Ask a developer who knows this code whether the change is needed.\n"
+    if verified:
+        # The harness resolved the real classpath, so this is no longer a guess.
+        for _ln in _wrap(verified):
+            m += f"    {_ln}\n"
+        m += ("    A class the build GENERATES (wsdl2java, MapStruct, protobuf) is not\n"
+              "    on the classpath yet, so it can still show here wrongly.\n")
+    else:
+        m += "    This is the agent's finding, not a confirmed fact. It may not see\n"
+        m += "    classes inside library JARs or classes generated during the build.\n"
+        m += "    Ask a developer who knows this code whether the change is needed.\n"
     m += "\n  If the change is needed:\n"
     m += f"    1. git fetch && git checkout harness-wip/{feature_id}\n"
     m += "    2. make the change above, commit and push\n"

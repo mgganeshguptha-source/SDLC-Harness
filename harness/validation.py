@@ -597,6 +597,37 @@ def maven_error_summary(output: str, max_lines: int = 40) -> str:
     return "\n".join(keep[:max_lines])
 
 
+# Lines of maven_error_summary() that name a build but not its cause.
+_CAUSE_SKIP = ("failed to execute goal", "compilation error", "compilation failure",
+               "build failure", "there are test failures", "tests run:", "failures:",
+               "errors:", "please refer to", "see dump files")
+
+
+def first_cause(output: str, limit: int = 180) -> str:
+    """The first line of a failed build's output that says WHY it failed (a
+    compiler error, a missing library, a failed test) — "" when none is found.
+    Workspace paths are shortened to the file name."""
+    lines = [re.sub(r"^\[ERROR\]\s*", "", ln.strip())
+             for ln in maven_error_summary(output or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    pick = next((ln for ln in lines
+                 if not any(s in ln.lower() for s in _CAUSE_SKIP)), "")
+    if not pick:
+        # Only the "Failed to execute goal ...: <reason>" line is left: keep
+        # the reason after the plugin coordinates.
+        goal = next((ln for ln in lines if ln.lower().startswith("failed to execute goal")), "")
+        pick = goal.split(": ", 1)[1].strip() if ": " in goal else ""
+    pick = re.sub(r"(?:[A-Za-z]:)?[/\\][^\s:\[\]]*[/\\]([^/\\\s:\[\]]+)", r"\1", pick)
+    pick = re.sub(r"\s+", " ", pick).strip()
+    return pick if len(pick) <= limit else pick[:limit - 3].rstrip() + "..."
+
+
+def with_cause(summary: str, output: str) -> str:
+    """`summary`, followed by the first cause found in the build output."""
+    cause = first_cause(output)
+    return f"{summary} — {cause}" if cause else summary
+
+
 def _lifecycle_started(low: str) -> bool:
     """True when Maven clearly got far enough to build or test something.
 
@@ -756,6 +787,8 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
              else "baseline build" if baseline else "validation")
     log(f"  [harness] running {_what}: {cmd}")
     log(f"  [harness] cwd: {repo_root}")
+    log(f"  [harness] build output is collected and shown when the command ends "
+        f"(time limit {cfg.test_timeout}s) ...")
     if _tolerant:
         log(f"  [harness] test failures do not stop the build ({_BL.IGNORE_FLAG}); "
             "results are read per test from the surefire reports")
@@ -883,7 +916,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
     if "BUILD SUCCESS" in out:
         summary = "BUILD SUCCESS"
     elif "BUILD FAILURE" in out:
-        summary = "BUILD FAILURE"
+        summary = with_cause("BUILD FAILURE", out)
     else:
         summary = f"exit {proc.returncode}"
     if _new and proc.returncode == 0:
