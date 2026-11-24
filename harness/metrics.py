@@ -70,7 +70,11 @@ from pathlib import Path
 # v10: mode may be "unit-test"; unit_test_targets / unit_test_remaining /
 # unit_test_min_coverage / unit_test_metric / unit_test_coverage_before /
 # unit_test_coverage_after (unit_test_mode.metrics_fields) on those runs only.
-SCHEMA_VERSION = 10
+# v11: already-failing tests (failing_tests.metrics_fields): baseline_failing_edited
+# (build and unit-test runs with a baseline), unit_test_failing_in_scope /
+# unit_test_repair_failing / unit_test_failing_repaired / unit_test_failing_restored
+# (unit-test runs).
+SCHEMA_VERSION = 11
 
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -284,6 +288,11 @@ def build_record(run, repo_root: Path, cfg=None, log=print) -> dict:
     try:
         from unit_test_mode import metrics_fields
         rec.update(metrics_fields(run))
+    except Exception:
+        pass
+    try:
+        from failing_tests import metrics_fields as _ft_fields
+        rec.update(_ft_fields(run))
     except Exception:
         pass
 

@@ -168,6 +168,8 @@ unit_test:
   coverage_metric: LINE        # LINE | BRANCH | INSTRUCTION | METHOD
   max_classes_per_run: 5       # batch size; lowest coverage first; the PR lists the rest
   max_phase_runs: 5            # cap on unit_testing runs (first pass + loopbacks)
+  # Already-failing tests: Karma/Jest builds cannot list them per test, so a
+  # failing base build halts before any phase; repair_failing does not apply.
 
 # How many loopbacks a RED build (compile error or failing test) gets before
 # halting for a human. Engine default 3. Each loopback is a full AI phase run,
