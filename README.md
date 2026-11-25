@@ -140,6 +140,20 @@ coverage gate → `code_review` (of the tests) → `raise_pr`.
   before/after coverage table appended by the harness.
 - Requires `runs_build: true` (the run cannot measure coverage otherwise). In
   this mode `skip_phases: [unit_testing]` is ignored.
+- **Tests that already fail on the base branch** (Maven; see the baseline check)
+  are never changed by default. The test author triages each one that belongs
+  to a class in the batch — `STALE` (the expectation is out of date), `DEFECT`
+  (the code looks wrong) or `FLAKY` — in `.harness/failing-tests-triage.md`,
+  and the PR lists them with that triage. An edit to any already-failing test
+  is put back by the harness; deleting one sends `unit_testing` back.
+- **Opt-in repair** — `unit_test.repair_failing: true` lets the test author fix
+  a test it marked `STALE`, for a class in the batch (those classes go first in
+  the batch). The test is kept under its name, the repair must pass at the
+  build gate (it is no longer ignored there), and the reviewer sees it before
+  and after: a repair that just copies what the code does, or that removes,
+  loosens or disables a check, is blocking. `DEFECT` and `FLAKY` tests are
+  never repaired. Build mode has no repair: an edit there to an
+  already-failing test is kept (the story may need it) and marked in the PR.
 
 ### Answering clarifications, and learning from the answers
 
@@ -330,6 +344,7 @@ Flat package under `harness/`.
 | `run.py` | The CLI entry point (`init`, run) |
 | `state_machine.py` | The deterministic engine; walks the phases in order, advances only on pinned exit codes |
 | `phases.py` | The ten-phase spine, declared: each phase's name, allowed writes, artifact, iteration cap. Also the analysis-mode sequence and the helpers that pick a sequence by run mode |
+| `failing_tests.py` | Tests that already fail on the base branch: which belong to the batch, the triage file, the guard that puts back edits to them (unit-test mode) or marks them in the PR (build mode), the opt-in repair of `STALE` ones, and the reviewer's before/after view |
 | `unit_test_mode.py` | Unit-test mode: scope resolution and excludes, per-file coverage from JaCoCo / Istanbul, batch selection, the config overrides that send every loopback to `unit_testing`, its prompts, review dossier and PR coverage table |
 | `analysis.py` | Analysis mode: the analysis gate (open questions halt), the analysed-source stamp, publishing the document to the story folder, the PR body |
 | `reference_repos.py` | Reads `.harness/repo_list.yaml`; clones a listed repo when the context phase asks for it, read-only, for that phase only |
@@ -406,7 +421,11 @@ State these openly.
   surefire/failsafe XML reports. A build that writes none (Angular/Karma, Gradle)
   cannot say which tests fail, so a failing base build halts there. A test that
   already fails cannot catch a fault in the code it covers, and a test that
-  fails only sometimes may be recorded as already failing.
+  fails only sometimes may be recorded as already failing. They stay red until
+  a person fixes them or a unit-test run with `repair_failing: true` repairs a
+  stale one; the triage and the PR list keep them visible meanwhile. The guard
+  compares Java method text: it finds a test method by name, so an overloaded
+  test method is matched by its first declaration.
 - **Bug-fix analysis is at its first step.** Analysis mode produces a reviewed
   root-cause and impact document (see "Analysis mode"). The engine does not yet
   collect caller evidence itself, read other repositories, or bind the later

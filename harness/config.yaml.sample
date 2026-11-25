@@ -42,6 +42,11 @@ unit_test:
   coverage_metric: LINE        # LINE | BRANCH | INSTRUCTION | METHOD
   max_classes_per_run: 5       # batch size; lowest coverage first; the PR lists the rest
   max_phase_runs: 5            # cap on unit_testing runs (first pass + loopbacks)
+  # Tests that already fail on the base branch: always triaged and listed in
+  # the PR, never changed by default (an edit is put back). true = a test of a
+  # class in the batch that the test author marks STALE may be repaired; its
+  # class goes first in the batch, the repair must pass and is reviewed.
+  repair_failing: false
 
 # ---------------------------------------------------------------- write boundary
 write_exclude:                          # deny-wins; the -openapi-code module is

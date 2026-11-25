@@ -580,6 +580,18 @@ class StateMachine:
             if self._prepare_reference_repos(run, phase):
                 return run
 
+        # Tests that already failed on the base branch: snapshot their methods
+        # before a phase that may edit tests (failing_tests.py).
+        _ft_before = None
+        if not _skip:
+            try:
+                import baseline as _BLg
+                import failing_tests as _FTg
+                _ft_before = _FTg.before_phase(run, self.repo_root, phase.id,
+                                               _BLg.known_failing(run))
+            except Exception as _e:
+                self.log(f"  [failing-tests] snapshot skipped ({type(_e).__name__})")
+
         if _skip:
             self.log(f"  [harness] '{phase.id}' skipped by config (skip_phases) — "
                      f"no AI work; its gates still run.")
@@ -587,6 +599,28 @@ class StateMachine:
         else:
             code = self.executor.run_phase(phase, run)
         self.log(f"--> exit {int(code)} ({label(code)})")
+
+        # ---- ALREADY-FAILING TEST GUARD (failing_tests.py) ----
+        # Unit-test mode: an edit to an already-failing test that is not an
+        # allowed repair is put back; a deleted one sends the phase back.
+        # Build mode: edits are recorded and marked in the PR, nothing reverted.
+        if _ft_before and code == ExitCode.OK:
+            try:
+                import failing_tests as _FTa
+                _fb = _FTa.after_phase(run, self.repo_root, phase.id, _ft_before, self.log)
+            except Exception as _e:
+                _fb = ""
+                self.log(f"  [failing-tests] guard skipped ({type(_e).__name__})")
+            if _fb:
+                self.log(f"  ! ALREADY-FAILING TEST DELETED — looping back to "
+                         f"'{phase.id}' to restore it")
+                run.iterations[phase.id] = 0
+                run.approvals[phase.id] = "rejected"
+                run.last_feedback = _fb
+                run.current_phase = phase.id
+                run.status = "running"
+                run.save(self.harness_dir)
+                return run
 
         # Contract hand-off: the documentation phase wrote the contract for the
         # next story (when the change touched contract files). Stamp, PII-scan
@@ -1396,7 +1430,7 @@ class StateMachine:
                         _ovr = _UTv.apply_overrides(_HCv.load(self.harness_dir), run)
                     vr = run_validation(self.repo_root, self.harness_dir, log=self.log,
                                         changed_files=_UTv.coverage_targets(run),
-                                        known_failing=_BL.known_failing(run) or None,
+                                        known_failing=_BL.gate_known_failing(run) or None,
                                         config_override=_ovr)
                 # A build may change files no phase may write (npm ci empties a
                 # committed node_modules/; npm install rewrites package-lock.json).

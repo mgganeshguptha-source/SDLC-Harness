@@ -83,6 +83,10 @@ class Settings:
     coverage_metric: str = "LINE"
     max_classes_per_run: int = 5
     max_phase_runs: int = 5
+    # Opt-in: tests of classes in the batch that already fail on the base
+    # branch and that the test author marks STALE may be repaired
+    # (failing_tests.py). Off: they are triaged, never changed.
+    repair_failing: bool = False
 
 
 def _pct(v, default: float) -> float:
@@ -121,6 +125,8 @@ def settings(cfg) -> Settings:
                             or getattr(cfg, "coverage_metric", "LINE") or "LINE").upper(),
         max_classes_per_run=5,
         max_phase_runs=5,
+        repair_failing=str(raw.get("repair_failing", False)).strip().lower()
+                       in ("true", "1", "yes", "on"),
     )
     for key in ("max_classes_per_run", "max_phase_runs"):
         try:
@@ -444,8 +450,23 @@ def prepare(run, repo_root, harness_dir, log=print) -> bool:
             "scope is treated as untested. If the repo has tests already, check that the "
             "coverage tool runs with test_command / coverage_command; the build gate "
             "will halt if it still finds no report.")
-    batch, remaining, skipped = select_batch(per_file, files, s.min_coverage,
-                                             s.max_classes_per_run, found)
+    # Tests that already fail on the base branch (baseline.py) and belong to
+    # classes in scope: recorded for triage; with repair on, their classes go
+    # first in the batch (failing_tests.py).
+    first = []
+    try:
+        import baseline as _BLu
+        import failing_tests as _FTu
+        first = _FTu.prepare(run, repo_root, files, _BLu.known_failing(run), s, log)
+    except Exception as e:
+        log(f"  [failing-tests] scope not recorded ({type(e).__name__}: {e})")
+    first = first[:s.max_classes_per_run]
+    batch, remaining, skipped = select_batch(
+        per_file, [f for f in files if f not in first], s.min_coverage,
+        max(0, s.max_classes_per_run - len(first)), found)
+    if first:
+        # A class at target that only needs a repair still belongs in the batch.
+        batch = first + batch
     if skipped:
         log(f"  [unit-test] {len(skipped)} file(s) have no row in the coverage report "
             f"(excluded by the coverage tool?) and are left out, e.g. {skipped[0]}")
@@ -458,7 +479,7 @@ def prepare(run, repo_root, harness_dir, log=print) -> bool:
         "targets": batch,
         "remaining": remaining,
         "skipped_not_in_report": skipped[:_LIST_CAP],
-        "already_at_target": len(files) - len(batch) - len(remaining) - len(skipped),
+        "already_at_target": max(0, len(files) - len(batch) - len(remaining) - len(skipped)),
     })
     ut.pop("candidates", None)    # the batch is what matters from here on
     run.unit_test = ut
@@ -734,6 +755,13 @@ def review_dossier(repo_root, run, cfg, log=print) -> str | None:
         if len(t) > _FILE_CAP:
             t = t[:_FILE_CAP] + "\n... [TRUNCATED by harness — file cap reached]"
         parts.append(f"--- PRODUCTION CLASS UNDER TEST (unchanged): {rel} ---\n{t}")
+    try:
+        import failing_tests as _FTr
+        _ftm = _FTr.review_material(root, run)
+        if _ftm:
+            parts.append(_ftm)
+    except Exception:
+        pass
     sd = root / SUSPECTED_DEFECTS
     if sd.is_file():
         try:
@@ -762,7 +790,10 @@ RED_BUILD_INSTRUCTION = (
     "Fix these tests (edit them in place). If a test fails because the production code "
     "really behaves that way, the test's expectation is wrong: assert what the code does "
     "if that is clearly intended, or remove the test and record the case in "
-    f"{SUSPECTED_DEFECTS}. Never ask for production changes. Failure output:\n"
+    f"{SUSPECTED_DEFECTS}. Never ask for production changes. A test that already "
+    "failed on the base branch is never removed: if your repair of one does not pass, "
+    "put it back exactly as it was and change its triage line to DEFECT. "
+    "Failure output:\n"
 )
 
 
@@ -781,6 +812,11 @@ def pr_section(repo_root, run) -> str:
                  f"**{_fmt(ut.get('aggregate_after'))}** |")
     lines += ["", f"Target: {float(ut.get('min_coverage', 0)):.0f}% for the batch taken "
               "together. Production code was not changed by this run."]
+    try:
+        import failing_tests as _FTp
+        lines += _FTp.pr_section(repo_root, run)
+    except Exception:
+        pass
     rem = ut.get("remaining") or []
     if rem:
         lines += ["", f"### Not in this batch ({len(rem)})", "",

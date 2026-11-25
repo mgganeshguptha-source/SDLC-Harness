@@ -415,6 +415,14 @@ def prompt_block(run, phase_id: str) -> str:
     ft = known_failing(run)
     if not ft:
         return ""
+    # Unit-test mode: triage, the guard and the opt-in repair (failing_tests.py).
+    try:
+        from unit_test_mode import is_unit_test
+        if is_unit_test(run) and phase_id in ("unit_testing", "code_review"):
+            import failing_tests as _FT
+            return _FT.unit_test_prompt(run, phase_id, ft)
+    except Exception:
+        pass
     if phase_id in ("coding", "unit_testing", "code_review"):
         lines = ["", "",
                  "TESTS THAT ALREADY FAIL ON THE BASE BRANCH (before any change by this run):"]
@@ -425,7 +433,8 @@ def prompt_block(run, phase_id: str) -> str:
             "These failures existed before this story and the harness ignores them at "
             "its build gate. Do NOT edit or delete these tests, and do NOT change "
             "production code to make them pass, unless the story itself requires that "
-            "change.")
+            "change. The harness records any edit to them and marks it in the pull "
+            "request for the reviewer.")
         if phase_id == "code_review":
             lines.append("A production change made only to make one of these tests "
                          "pass is out of scope: report it as an issue.")
@@ -438,6 +447,19 @@ def prompt_block(run, phase_id: str) -> str:
                 "Do not list them — the harness adds the list to the pull request "
                 "itself.\n")
     return ""
+
+
+def gate_known_failing(run) -> list:
+    """What the build gate ignores: the already-failing tests, minus any that
+    this run repaired (failing_tests.py) — those must pass."""
+    ft = known_failing(run)
+    if not ft:
+        return ft
+    try:
+        import failing_tests as _FT
+        return _FT.gate_known_failing(run, ft)
+    except Exception:
+        return ft
 
 
 def add_to_pr_body(repo_root, run) -> bool:
@@ -462,10 +484,16 @@ def add_to_pr_body(repo_root, run) -> bool:
                 if len(ft) == 1 else
                 "They cannot catch a fault in the code they cover until they are fixed."),
              ""]
+    edited = set(b.get("edited") or [])
+    rep = set((getattr(run, "unit_test", None) or {}).get("repaired") or [])
     for t in ft[:200]:
         mark = ""
         if isinstance(still, list) and t not in still:
             mark = " — passes after this change"
+        if t in rep:
+            mark += " — repaired by this run (marked STALE, reviewed)"
+        elif t in edited:
+            mark += " — **test edited by this change: check the edit**"
         lines.append(f"- `{t}`{mark}")
     if len(ft) > 200:
         lines.append(f"- ... and {len(ft) - 200} more")
