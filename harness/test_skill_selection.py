@@ -16,7 +16,7 @@ def _cfg(tmp_path, yaml_text=""):
 def test_backend_default_gets_backend_security_only(tmp_path):
     c = _cfg(tmp_path, 'repo_stacks: ["backend"]\n')
     assert c.skills_for_phase("coding") == ["security-review-backend"]
-    assert c.skills_for_phase("code_review") == ["security-review-backend"]
+    assert c.skills_for_phase("code_review") == ["security-review-backend", "code-review-backend"]
 
 
 def test_angular_default_gets_angular_security_and_review(tmp_path):
@@ -34,3 +34,8 @@ def test_old_name_expands_and_is_filtered(tmp_path):
                                 'phase_skills:\n  coding: ["security-review"]\n') \
         if (tmp_path / "fe").mkdir() is None else None
     assert c2.skills_for_phase("coding") == ["security-review", "security-review-angular"]
+
+
+def test_code_review_backend_not_loaded_on_angular(tmp_path):
+    c = _cfg(tmp_path, 'repo_stacks: ["angular-frontend"]\n')
+    assert "code-review-backend" not in c.skills_for_phase("code_review")
