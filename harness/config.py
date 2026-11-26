@@ -413,7 +413,10 @@ class HarnessConfig:
         # build-contract: the optional contract summary for the next story,
         # used when the change touches contract files (handoff.py).
         "documentation": ["build-contract"],
-        "raise_pr":     [],
+        # pr-description: the reviewer-facing PR body (why, visuals, reviewer
+        # notes, merge risk). The engine appends the Evidence section itself
+        # (pr_evidence.py). Not loaded in unit-test mode (sdk_runner).
+        "raise_pr":     ["pr-description"],
     })
     # Stack tags for skills, so phase_skills can be filtered by repo_stacks the
     # same way instruction subfolders already are. A skill listed here loads ONLY

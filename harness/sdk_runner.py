@@ -489,7 +489,8 @@ def _load_knowledge(repo_root: Path, cfg, manifest: dict) -> list:
     return out
 
 
-def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
+def _load_capability_layer(repo_root: Path, phase: Phase,
+                           skip_skills: tuple = ()) -> tuple:
     """Load the capability layer for THIS phase.
 
     Config-driven (HarnessConfig):
@@ -501,6 +502,10 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
     This keeps cross-cutting guardrails (HIPAA, prompt-injection, logging,
     output-naming) in EVERY phase, while stack/phase-specific rules and skills
     load only where relevant — cutting tokens without dropping safety rules.
+
+    skip_skills: skill names NOT to load for this call even when configured —
+    e.g. pr-description in unit-test mode, whose raise_pr prompt sets its own
+    PR body format.
     """
     from config import HarnessConfig
     cfg = HarnessConfig.load(repo_root / ".harness")
@@ -592,6 +597,8 @@ def _load_capability_layer(repo_root: Path, phase: Phase) -> tuple:
         for skill_md in sorted(skills_dir.rglob("SKILL.md")):
             skill_name = skill_md.parent.name
             if wanted is not None and skill_name not in wanted:
+                continue
+            if skill_name in skip_skills:
                 continue
             try:
                 skill_text = skill_md.read_text(encoding="utf-8")
@@ -1272,6 +1279,7 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
     # tests. The build-mode prompts talk about a story and a change, and the
     # build-mode reviewer is told never to look at tests — neither fits.
     import unit_test_mode as _UTp
+    import pr_evidence as _PRE
     _ut_mode = _UTp.is_unit_test(run)
     if _ut_mode:
         unit_testing_task = _UTp.unit_testing_task(run, rr, src_main, src_test,
@@ -1721,11 +1729,27 @@ def _phase_instruction(phase: Phase, run: RunState, repo_root: Path,
             f"Write ONLY under {docs_dir}/, {rr}/.harness/ and (for the service rules "
             f"above) {_repo_instr}."
         ),
+        # Build mode: the pr-description skill writes the reviewer-facing part
+        # (why, visuals, reviewer notes, merge risk). The engine appends the
+        # Evidence section from the gate outputs afterwards (pr_evidence.py), so
+        # the model is told NOT to write build, test or AC results at all —
+        # including the "How to verify" note when the harness did not build.
         "raise_pr": (_UTp.raise_pr_task(run, pr_body, build_status_pr) if _ut_mode else (
-            f"Summarize the change for a pull request body and write it to "
-            f"this EXACT file (parent .harness ALREADY EXISTS, shell disallowed): "
-            f"{pr_body}\n  STORY: {story}\n"
-            f"{build_status_pr}"
+            f"You are running in NON-INTERACTIVE / CI mode. Do NOT ask any questions "
+            f"and do NOT wait for input. Use the pr-description skill and follow its "
+            f"template exactly.\n"
+            f"Write the pull request body to this EXACT file (parent .harness "
+            f"ALREADY EXISTS, shell disallowed): {pr_body}\n"
+            f"  STORY: {story}\n"
+            f"For intent, read the newest context .md file in {ctx_dir}, the plan "
+            f"{plan_file}, and {design_file} if it exists. Draw the visuals from the "
+            f"changed files and diff below; do not survey the repository.\n"
+            f"Do NOT write build status, test results, coverage figures or "
+            f"acceptance-criteria verdicts, and do NOT add a 'How to verify' "
+            f"section: the harness appends an Evidence section from its own gate "
+            f"outputs after you finish.\n"
+            # Only computed for raise_pr: this dict is built for every phase.
+            f"{_PRE.prompt_block(repo_root, run) if phase.id == 'raise_pr' else ''}"
             f"Write ONLY {pr_body}."
         )),
     }
@@ -1973,7 +1997,11 @@ class SdkAgentRunner:
             return PermissionDecisionApproveOnce()
 
         # Build the prompt: capability layer (skills/instructions) + phase task.
-        capability, cap_manifest = _load_capability_layer(repo_root, phase)
+        # Unit-test mode's raise_pr prompt sets its own PR body format; the
+        # build-mode pr-description template would contradict it.
+        _skip = ("pr-description",) if (_ut_mode and phase.id == "raise_pr") else ()
+        capability, cap_manifest = _load_capability_layer(repo_root, phase,
+                                                          skip_skills=_skip)
         task = _phase_instruction(phase, run, repo_root,
                                   review_dossier=review_dossier,
                                   unittest_dossier=unittest_dossier)
