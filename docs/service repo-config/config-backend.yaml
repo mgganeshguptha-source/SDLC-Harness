@@ -190,7 +190,7 @@ phase_models:
   # the file is reviewed in the harness PR. Pinned rather than "auto" so the
   # first-run output is reproducible.
   repo_instructions: "gpt-5.3-codex"
-  context: "claude-opus-4.8"        # clarification quality matters most here
+  context: "claude-opus-5.5"        # clarification quality matters most here
   coding: "gpt-5.3-codex"
   validation: "claude-sonnet-5"     # judges each acceptance criterion — keep fixed
 
@@ -198,6 +198,16 @@ phase_models:
 # coding model so the reviewer is genuinely independent; a same-as-coding value
 # is allowed but the harness warns. Blank => falls back to phase_models/default.
 review_model: "claude-sonnet-5"
+
+# How long (seconds) the harness waits for one phase's model session before it
+# stops waiting. A phase cut off this way usually leaves no artifact, so the run
+# halts at that phase's gate (e.g. CONTEXT FILE MISSING) and the log shows
+# "[diag] timed out waiting for a terminal event after Ns". Large repos need more
+# time in the read-heavy phases. phase_timeouts overrides per phase id.
+phase_timeout: 300
+phase_timeouts:
+  context: 600
+  prompt_steps: 600
 
 # On a review MISS (reviewer reports issues), which phase to loop back to.
 review_loopback_phase: "coding"

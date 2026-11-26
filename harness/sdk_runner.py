@@ -2043,6 +2043,11 @@ class SdkAgentRunner:
         _cfg = _HC.load(repo_root / ".harness")
         phase_model = (_cfg.model_for_phase(phase.id) if _cfg else None) or self.model
         self.log(f"  [model] phase '{phase.id}' -> {phase_model}")
+        try:
+            if _cfg:
+                self.log(f"  [timeout] phase '{phase.id}' -> {_cfg.timeout_for_phase(phase.id)}s")
+        except Exception:
+            pass
         # Record the model for THIS attempt before the SDK runs, so a phase that
         # errors mid-call still leaves a record of which model it tried. Loopbacks
         # re-enter this method and append a fresh entry (one per attempt). The
@@ -2283,10 +2288,19 @@ class SdkAgentRunner:
                 else:
                     await session.send(full_prompt)
                 # guard against hanging forever if no terminal event arrives
+                _phase_timeout = 300
                 try:
-                    await asyncio.wait_for(done.wait(), timeout=300)
+                    if _cfg:
+                        _phase_timeout = _cfg.timeout_for_phase(phase.id)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=_phase_timeout)
                 except asyncio.TimeoutError:
-                    self.log("  [diag] timed out waiting for a terminal event")
+                    self.log(f"  [diag] timed out waiting for a terminal event after "
+                             f"{_phase_timeout}s - phase '{phase.id}' was cut off. If it "
+                             f"was still working, raise phase_timeouts.{phase.id} "
+                             f"(or phase_timeout) in .harness/config.yaml.")
 
                 # ---- SDK-REPORTED COST for this session (= this phase attempt) ----
                 # Must run INSIDE the session context: the session is gone once the
