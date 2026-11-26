@@ -215,6 +215,13 @@ class HarnessConfig:
     test_filter: str = "OwnerTest"
     # Seconds before the test run is killed (guards a hung build).
     test_timeout: int = 600
+    # Seconds a phase's model session may run before the harness stops waiting
+    # for it. A phase cut off this way usually leaves no artifact, so the run
+    # halts at that phase's gate (e.g. CONTEXT FILE MISSING). Large repos need
+    # more time in the read-heavy phases (context, prompt_steps).
+    phase_timeout: int = 300
+    # Per-phase override of phase_timeout, keyed by phase id, e.g. {context: 600}.
+    phase_timeouts: dict = field(default_factory=dict)
     # Default model for live runs.
     model: str = "gpt-5-mini"
     # Per-phase model override. A phase uses phase_models[phase_id] if present,
@@ -647,6 +654,9 @@ class HarnessConfig:
             test_command=data.get("test_command", cls.test_command),
             test_filter=data.get("test_filter", cls.test_filter),
             test_timeout=int(data.get("test_timeout", cls.test_timeout)),
+            phase_timeout=int(data.get("phase_timeout", cls.phase_timeout) or cls.phase_timeout),
+            phase_timeouts={str(k): int(v) for k, v in (data.get("phase_timeouts") or {}).items()
+                            if v is not None},
             model=data.get("model", cls.model),
             phase_models=data.get("phase_models") or {},
             model_rates=data.get("model_rates") or cls().model_rates,
@@ -1047,6 +1057,16 @@ class HarnessConfig:
             if not tags or allowed.intersection(tags):
                 out.append(name)
         return out
+
+    def timeout_for_phase(self, phase_id: str) -> int:
+        """Seconds the harness waits for a phase's model session:
+        phase_timeouts[phase_id] if set (and positive), else phase_timeout."""
+        v = (self.phase_timeouts or {}).get(phase_id)
+        try:
+            v = int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            v = 0
+        return v if v > 0 else int(self.phase_timeout or 300)
 
     def model_for_phase(self, phase_id: str) -> str:
         """Model for a phase: phase_models[phase_id] if set, else the default.
