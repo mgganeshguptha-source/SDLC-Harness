@@ -314,7 +314,7 @@ phase_skills:
   unit_testing:  []
   validation:    ["build-validation"]
   documentation: ["build-contract"]   # contract hand-off for the next story
-  raise_pr:      []
+  raise_pr:      ["pr-description"]   # reviewer-facing PR body; the engine appends Evidence
 
 
 # ------------------------------------------------------ phase instruction scope

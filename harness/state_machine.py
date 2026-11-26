@@ -637,6 +637,14 @@ class StateMachine:
 
         # The harness, not the model, tells the reviewer which repos were read.
         if phase.id == "raise_pr" and code == ExitCode.OK:
+            # Evidence from the gate outputs (build, AC verdicts, code review,
+            # loop-backs, test files) — first, directly under the model's part.
+            try:
+                import pr_evidence as _PE
+                if _PE.add_to_pr_body(self.repo_root, run):
+                    self.log("  [pr] evidence section added to the PR body")
+            except Exception as _e:
+                self.log(f"  [pr] evidence section skipped ({type(_e).__name__})")
             try:
                 from reference_repos import add_to_pr_body
                 add_to_pr_body(self.repo_root, getattr(run, "reference_repos", None) or [])
