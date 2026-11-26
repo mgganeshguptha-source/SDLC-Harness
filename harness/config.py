@@ -404,8 +404,10 @@ class HarnessConfig:
         # (Angular / Ionic). The old name "security-review" still works — see
         # SKILL_ALIASES.
         "coding":       ["security-review-backend", "security-review-angular"],
+        # code-review-backend: reuse of existing methods, the changed class's
+        # existing patterns, backend standards (OP018-6426 review comments).
         "code_review":  ["security-review-backend", "security-review-angular",
-                         "review-angular-code"],
+                         "code-review-backend", "review-angular-code"],
         "unit_testing": [],
         "validation":   ["build-validation"],
         # build-contract: the optional contract summary for the next story,
@@ -427,6 +429,7 @@ class HarnessConfig:
     skill_stacks: dict = field(default_factory=lambda: {
         "review-angular-code": ["angular-frontend", "ionic", "frontend"],
         "security-review-backend": ["backend", "kotlin"],
+        "code-review-backend": ["backend", "kotlin"],
         "security-review-angular": ["angular-frontend", "frontend", "mobile-frontend", "ionic"],
         "build-copilot-instructions-backend": ["backend"],
         "build-copilot-instructions-angular-frontend": ["angular-frontend", "frontend"],

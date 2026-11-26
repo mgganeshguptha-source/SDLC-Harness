@@ -58,6 +58,11 @@ _BLOCKING_CLASSES = {
     "CONCURRENCY",      # thread-safety, resource leaks
     "SECURITY",         # injection, secret exposure, missing authz
     "ERROR_HANDLING",   # errors swallowed or surfaced wrongly
+    # New code that duplicates an existing method, adds a method to a shared
+    # class without a reason in the plan, or bypasses the changed class's
+    # existing handling (OP018-6426: invokeGetBinaryRequest added next to
+    # invokeGetRequest; WrappedResponse null-check skipped). Style is NOT reuse.
+    "REUSE",
     # Unit-test mode only (the reviewer judges TESTS there, unit_test_mode.py).
     # A build-mode reviewer is never told about these two classes.
     "ASSERTION",        # a test that checks nothing (coverage without assertions)
@@ -72,6 +77,11 @@ _CLASS_ALIASES = {
     "CONCURRENCY SAFETY": "CONCURRENCY",
     "THREAD SAFETY": "CONCURRENCY",
     "API CONTRACT": "CONTRACT",
+    "DUPLICATION": "REUSE",
+    "DUPLICATE": "REUSE",
+    "DUPLICATE METHOD": "REUSE",
+    "DUPLICATED CODE": "REUSE",
+    "CODE REUSE": "REUSE",
     "ASSERTIONS": "ASSERTION",
     "NO ASSERTION": "ASSERTION",
     "FLAKY": "ISOLATION",

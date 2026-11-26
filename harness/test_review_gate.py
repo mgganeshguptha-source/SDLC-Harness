@@ -70,3 +70,16 @@ def test_a_style_finding_does_not_hide_a_real_one(tmp_path):
 def test_pass_is_unchanged(tmp_path):
     rv = _rv(tmp_path, "VERDICT: PASS\n[NOTE]: tidy later\n")
     assert rv.passed and not rv.downgraded and rv.issues == []
+
+
+def test_reuse_class_blocks(tmp_path):
+    """OP018-6426: a new method next to an existing one that does the job."""
+    rv = _rv(tmp_path, "VERDICT: CHANGES_REQUESTED\n"
+                       "[ISSUE]: (REUSE) MbpServiceRequest:invokeGetBinaryRequest duplicates invokeGetRequest\n")
+    assert not rv.passed and rv.unclassified == []
+    assert rv.issues == ["(REUSE) MbpServiceRequest:invokeGetBinaryRequest duplicates invokeGetRequest"]
+
+
+def test_duplication_alias_maps_to_reuse(tmp_path):
+    rv = _rv(tmp_path, "VERDICT: CHANGES_REQUESTED\n[ISSUE]: (DUPLICATION) same call as invokeGetRequest\n")
+    assert not rv.passed and rv.unclassified == []
