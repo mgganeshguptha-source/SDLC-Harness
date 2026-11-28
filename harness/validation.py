@@ -36,7 +36,8 @@ class ValidationResult:
     # message so the operator is not told to chmod mvnw for a network problem.
     #   env_reason: "toolchain" | "dependency" | "network_auth" | "unattributable"
     #               | "npm_peer_conflict" | "npm_install" | "browser"
-    #               | "angular_config" | "angular_cli"
+    #               | "angular_config" | "angular_cli" | "npx_tool_missing"
+    #               | "compile_unattributable"
     env_reason: str | None = None
     env_hint: str = ""
     # Coverage detail (populated when the coverage gate ran), for messaging.
@@ -432,6 +433,27 @@ _NPM_SIGNATURES = (
     "npm err! code e401", "npm error code e401",
     "npm err! code e403", "npm error code e403",
 )
+# npx could not find the tool in the project's node_modules/ (backlog: OP014-40628,
+# 2026-11-27). Without a local install, `npx tsc` downloads the unrelated npm
+# package named "tsc" (tsc@2.0.4), which only prints "This is not the tsc command
+# you are looking for" and exits 1. The compile check took that for a compile
+# error and sent 'coding' back twice to "fix" code that was never compiled.
+# With --no-install (npx --no), npm refuses instead: "npx canceled due to missing
+# packages" / "could not determine executable to run". No code phase can install
+# packages, so all of these are environment failures.
+_NPX_TOOL_MISSING_SIGNATURES = (
+    "this is not the tsc command you are looking for",
+    "npx canceled due to missing packages",
+    "npm error could not determine executable to run",
+    "npm err! could not determine executable to run",
+)
+# npx is about to download a tool that is not installed locally. On its own this
+# is only a warning (the download may work), so it counts only when the failed
+# output names no source file, compile error or test result.
+_NPX_AUTO_INSTALL_SIGNATURES = (
+    "npm warn exec the following package was not found and will be installed",
+    "npm warn exec the following packages were not found and will be installed",
+)
 # The test browser could not start (Karma) — no Chrome on the runner, or Chrome
 # refused to launch. Environment, like a JVM that cannot start.
 _BROWSER_START_SIGNATURES = (
@@ -539,6 +561,24 @@ _HINTS = {
         "           committed packages — use `npm install` in test_command for such\n"
         "           a repo. Or set runs_build: false in .harness/config.yaml and\n"
         "           let the developer build locally. Then resume."),
+    "npx_tool_missing": (
+        "npx could not find the build tool (e.g. tsc, ng) in the project's\n"
+        "           node_modules/, so the code was never compiled. No phase can fix\n"
+        "           this. Install the packages first in the same command, e.g.\n"
+        "             cd <module> && npm install ... && npx --no-install tsc ...\n"
+        "           (use the same npm install as test_command). --no-install makes\n"
+        "           npx fail at once instead of downloading an unrelated package of\n"
+        "           the same name. Fix compile_command / test_command in\n"
+        "           .harness/config.yaml on harness-wip/<feature> (a resume reads\n"
+        "           config from there) and on the base branch, then resume."),
+    "compile_unattributable": (
+        "The compile check failed, but its output names no source file and no\n"
+        "           compile error, so the code 'coding' wrote cannot be shown to be\n"
+        "           the cause. The harness halted instead of sending 'coding' back to\n"
+        "           guess. Read the tail above: usually compile_command cannot run as\n"
+        "           written (packages not installed, wrong directory, wrong tool).\n"
+        "           Run compile_command by hand on harness-wip/<feature>, fix it in\n"
+        "           .harness/config.yaml there and on the base branch, then resume."),
     "browser": (
         "The test browser (headless Chrome) could not start, so no spec ran.\n"
         "           No phase can fix this. On a GitHub-hosted runner Chrome is\n"
@@ -660,6 +700,13 @@ def classify_environment_failure(exit_code: int, output: str) -> str | None:
         if "is not set in the workspace" in low:
             return "angular_config"
         return "angular_cli"
+    # npx ran a tool that is not installed in the project (see the signatures).
+    # Before the 126/127 rule, whose hint is about the Maven wrapper.
+    if any(s in low for s in _NPX_TOOL_MISSING_SIGNATURES):
+        return "npx_tool_missing"
+    if (any(s in low for s in _NPX_AUTO_INSTALL_SIGNATURES)
+            and not is_code_attributable(output)):
+        return "npx_tool_missing"
     # 126 = found but not executable (e.g. ./mvnw without the +x bit).
     # 127 = command not found (missing wrapper / mvn not on PATH).
     if exit_code in (126, 127):
@@ -875,6 +922,7 @@ def run_validation(repo_root: Path, harness_dir: Path, log=print,
             "angular_config": "the Angular build configuration in test_command is not defined in angular.json",
             "angular_cli": "the Angular CLI stopped with an unhandled exception",
             "node_modules_missing": "files under node_modules/ are missing on the runner",
+            "npx_tool_missing": "npx could not find the tool in node_modules/ (packages not installed)",
         }
         summary = (f"ENVIRONMENT FAILURE (exit {proc.returncode}) — "
                    f"{_labels.get(_env, 'build did not run')}")
