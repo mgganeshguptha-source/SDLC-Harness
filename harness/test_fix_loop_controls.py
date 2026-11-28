@@ -78,6 +78,12 @@ def _compile_setup(repo, tmp_path, outcome, extra=""):
         "if o == 'missing':\n"
         "    print('[ERROR] Failed to execute goal on project app: Could not resolve "
         "dependencies: Could not find artifact p:lib:jar:2.0 in store'); sys.exit(1)\n"
+        "if o == 'imposter':\n"
+        "    print('npm warn exec The following package was not found and will be "
+        "installed: tsc@2.0.4')\n"
+        "    print('                This is not the tsc command you are looking for')\n"
+        "    sys.exit(1)\n"
+        "if o == 'unknown': print('something odd happened'); sys.exit(2)\n"
         "print('[ERROR] COMPILATION ERROR :')\n"
         f"print('[ERROR] /w/service/{PLANNED}:[3,9] error: cannot find symbol')\n"
         "print('[INFO] BUILD FAILURE'); sys.exit(1)\n")
@@ -284,3 +290,23 @@ def test_resume_clears_the_fix_loop_state(tmp_path):
     run.status, run.fix_loop, run.compile_attempts = "halted", "build", 2
     run = rewind(run, "coding", log=quiet)
     assert run.fix_loop == "" and run.compile_attempts == 0
+
+
+def test_npx_without_typescript_is_an_environment_halt_not_a_loopback(repo, tmp_path):
+    # OP014-40628: `npx tsc` with no local TypeScript ran the wrong npm package.
+    _compile_setup(repo, tmp_path, "imposter")
+    sm, run = _after_coding(repo)
+    run = sm.step(run)
+    assert run.status == "halted" and run.halt_gate == HG.CONFIG_ERROR
+    assert run.compile_attempts == 0
+    assert "npx_tool_missing" in run.halt_detail
+    assert run.approvals.get("coding") != "rejected"
+
+
+def test_compile_failure_naming_no_code_halts_instead_of_looping(repo, tmp_path):
+    _compile_setup(repo, tmp_path, "unknown")
+    sm, run = _after_coding(repo)
+    run = sm.step(run)
+    assert run.status == "halted" and run.halt_gate == HG.CONFIG_ERROR
+    assert run.compile_attempts == 0
+    assert "compile_unattributable" in run.halt_detail

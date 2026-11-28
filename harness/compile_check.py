@@ -18,6 +18,10 @@ production code:
                                 feedback (bounded by max_validation_retries per
                                 run, then halt for a person)
   - environment failure      -> the same environment halt the build gate uses
+  - failure that names no
+    source file or compile
+    error                    -> environment halt as well (no loopback): the
+                                command, not the code, is what failed
 
 THE COMMAND
 `compile_command` in .harness/config.yaml when set ("off" disables the check).
@@ -111,6 +115,22 @@ def after_phase(sm, run, phase) -> bool:
         sm.log(f"  [compile] check did not complete ({vr.summary}) — continuing; the "
                "build gate after unit_testing still applies")
         return False
+
+    # A failure that names no source file and no compile error is not a verdict
+    # on the code: sending 'coding' back makes it guess at errors that do not
+    # exist (OP014-40628, 2026-11-27: `npx tsc` with no TypeScript installed
+    # looped coding twice and the model rewrote imports and signatures). Halt
+    # as an environment problem instead, before any retry is spent.
+    from validation import environment_hint, is_code_attributable
+    if not is_code_attributable(vr.output_tail):
+        vr.failure_kind = "environment"
+        vr.env_reason = "compile_unattributable"
+        vr.env_hint = environment_hint("compile_unattributable")
+        vr.summary = (f"COMPILE CHECK COULD NOT JUDGE THE CODE (exit {vr.exit_code}) — "
+                      "the output names no source file or compile error")
+        sm.log(f"  ! {vr.summary}")
+        sm._halt_environment(run, phase, vr, vr.env_reason, vr.env_hint)
+        return True
 
     run.compile_attempts = int(getattr(run, "compile_attempts", 0) or 0) + 1
     cap = cfg.max_validation_retries
